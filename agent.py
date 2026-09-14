@@ -63,7 +63,7 @@ def enforce_token_budget(msgs: list, max_tokens: int = MAX_TOKENS) -> list:
     other_msgs = msgs[1:]
     
     system_tokens = estimate_tokens(system_msg.get('content', ''))
-    budget = max_tokens - system_tokens - 1000  # Reserve buffer for generation
+    budget = max_tokens - system_tokens - 1000
     
     current_tokens = 0
     retained_msgs = []
@@ -139,8 +139,6 @@ while True:
         
         while True:
             messages[0]['content'] = build_full_system_prompt()
-            
-            # Pre-filter message history to fit within token budget
             active_messages = enforce_token_budget(messages, MAX_TOKENS)
             
             response = ollama_client.chat(

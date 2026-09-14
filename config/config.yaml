@@ -3,7 +3,8 @@ agent:
   host: "http://host.docker.internal:11434"
   options:
     temperature: 0.2
-    num_ctx: 8192
+    num_ctx: 16384
+    num_predict: 4096
     top_p: 0.9
   system_prompt: |
     You are a highly capable, autonomous local AI agent. You have unrestricted access to a local workspace, system shell tools, pentesting tools, the internet, and a persistent knowledge base. 
