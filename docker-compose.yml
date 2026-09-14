@@ -1,0 +1,15 @@
+services:
+  agent:
+    build: .
+    image: agent
+    container_name: agent
+    stdin_open: true
+    tty: true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./config:/app/config
+      - ./workspace:/app/workspace
+      - ./memory:/app/memory
+      - ./tools:/app/tools
+      - ./agent.py:/app/agent.py

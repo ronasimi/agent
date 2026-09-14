@@ -1,0 +1,17 @@
+workspace/
+memory/
+
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+.idea/
+.vscode/
+*.swp
+*.swo

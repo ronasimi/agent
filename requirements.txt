@@ -1,0 +1,6 @@
+ollama
+ddgs
+wikipedia
+pyyaml
+prompt_toolkit
+pygments
