@@ -7,17 +7,13 @@ import io
 import contextlib
 from pathlib import Path
 
-# In-place mutable collections so references in agent.py update automatically
 ALL_TOOLS = []
 AVAILABLE_TOOLS_MAP = {}
 
-EXCLUDED_FUNCTIONS = {'init_db', 'load_tools', 'get_tools_prompt_summary'}
+EXCLUDED_FUNCTIONS = {'init_db', 'load_tools', 'get_tools_prompt_summary', 'clear_chat_history'}
 
 def load_tools():
-    """
-    Dynamically scan, test, and load all modules inside the tools directory.
-    Returns a tuple: (active_tool_count, errors_dict)
-    """
+    """Dynamically scan, test, and load all modules inside the tools directory."""
     ALL_TOOLS.clear()
     AVAILABLE_TOOLS_MAP.clear()
     errors = {}
@@ -33,17 +29,14 @@ def load_tools():
             else:
                 module = importlib.import_module(f".{module_name}", package=__name__)
             
-            # Run Docstring Tests quietly in memory
             capture = io.StringIO()
             with contextlib.redirect_stdout(capture):
                 results = doctest.testmod(module)
             
-            # If tests failed, reject the module and save the error output
             if results.failed > 0:
                 errors[module_name] = capture.getvalue()
                 continue
             
-            # Register functions
             for name, obj in inspect.getmembers(module, inspect.isfunction):
                 if obj.__module__ == module.__name__:
                     if not name.startswith('_') and name not in EXCLUDED_FUNCTIONS:
@@ -64,10 +57,16 @@ def get_tools_prompt_summary() -> str:
         summary += f"- **{name}**: {first_line}\n"
     return summary
 
-# Initial load on import
 load_tools()
 
-from .memory import init_db
+from .memory import (
+    init_db, 
+    _init_chat_db, 
+    _init_checkpoint_db, 
+    _load_chat_history_from_db, 
+    _save_message_to_db, 
+    clear_chat_history
+)
 
 __all__ = [
     'ALL_TOOLS',
@@ -75,4 +74,9 @@ __all__ = [
     'load_tools',
     'get_tools_prompt_summary',
     'init_db',
+    '_init_chat_db',
+    '_init_checkpoint_db',
+    '_load_chat_history_from_db',
+    '_save_message_to_db',
+    'clear_chat_history',
 ]

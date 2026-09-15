@@ -13,3 +13,6 @@ services:
       - ./memory:/app/memory
       - ./tools:/app/tools
       - ./agent.py:/app/agent.py
+      - ./memory.py:/app/memory.py
+      - /:/host:ro
+      - /var/log:/host_log:ro

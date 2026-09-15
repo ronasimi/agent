@@ -5,12 +5,9 @@ import threading
 import itertools
 import yaml
 import json
-import atexit
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
-from prompt_toolkit.lexers import PygmentsLexer
 from prompt_toolkit.styles import Style
-from pygments.lexers.shell import BashLexer
 
 try:
     from prompt_toolkit.auto_suggestion import AutoSuggestFromHistory
@@ -19,22 +16,19 @@ except ImportError:
     AUTO_SUGGEST = None
 
 class Spinner:
-    """A simple animated CLI spinner to provide immediate background feedback."""
+    """A simple animated CLI spinner for tool execution feedback."""
     def __init__(self, msg="Processing"):
         self.msg = msg
         self.running = False
         self.thread = None
 
     def _spin(self):
-        # Braille patterns for a smooth circular spinner
         spinner = itertools.cycle(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'])
         while self.running:
-            # \033[96m is Cyan, \033[0m resets, \033[K clears the line to prevent artifacts
             sys.stdout.write(f"\r\033[96m{next(spinner)} {self.msg}...\033[0m\033[K")
             sys.stdout.flush()
             time.sleep(0.08)
         
-        # Clear the spinner line completely when done
         sys.stdout.write('\r\033[K')
         sys.stdout.flush()
 
@@ -56,17 +50,28 @@ os.environ["OLLAMA_HOST"] = config['agent']['host']
 MODEL = config['agent']['model']
 OPTIONS = config['agent']['options']
 BASE_SYSTEM_PROMPT = config['agent']['system_prompt']
-MAX_TOKENS = OPTIONS.get('num_ctx', 16384)
+MAX_TOKENS = OPTIONS.get('num_ctx', 8192)
 
 from ollama import Client
 ollama_client = Client(host=config['agent']['host'])
 
-from tools import ALL_TOOLS, AVAILABLE_TOOLS_MAP, get_tools_prompt_summary, init_db
+from tools import (
+    ALL_TOOLS, 
+    AVAILABLE_TOOLS_MAP, 
+    get_tools_prompt_summary, 
+    init_db, 
+    _init_chat_db, 
+    _init_checkpoint_db, 
+    _load_chat_history_from_db, 
+    _save_message_to_db, 
+    clear_chat_history
+)
 
 init_db()
+_init_chat_db()
+_init_checkpoint_db()
 
 SHELL_HISTORY_FILE = "/app/memory/.agent_history"
-CHAT_HISTORY_FILE = "/app/memory/chat_history.json"
 
 custom_style = Style.from_dict({
     'prompt': 'ansigreen bold',
@@ -78,7 +83,6 @@ custom_style = Style.from_dict({
 session = PromptSession(
     history=FileHistory(SHELL_HISTORY_FILE),
     auto_suggest=AUTO_SUGGEST,
-    lexer=PygmentsLexer(BashLexer),
     style=custom_style
 )
 
@@ -86,11 +90,9 @@ def build_full_system_prompt() -> str:
     return BASE_SYSTEM_PROMPT + get_tools_prompt_summary()
 
 def estimate_tokens(text: str) -> int:
-    """Fast python-side token estimation (~4 characters per token)."""
     return len(text) // 4
 
 def enforce_token_budget(msgs: list, max_tokens: int = MAX_TOKENS) -> list:
-    """Trim older message history from the front while preserving system prompt and recent turns."""
     if not msgs:
         return msgs
     
@@ -98,10 +100,18 @@ def enforce_token_budget(msgs: list, max_tokens: int = MAX_TOKENS) -> list:
     other_msgs = msgs[1:]
     
     system_tokens = estimate_tokens(system_msg.get('content', ''))
-    budget = max_tokens - system_tokens - 1000
+    budget = max_tokens - system_tokens - 2048
+    if budget < 512:
+        budget = 512  
     
     current_tokens = 0
     retained_msgs = []
+    
+    if other_msgs:
+        latest_msg = other_msgs[-1]
+        retained_msgs.insert(0, latest_msg)
+        current_tokens += estimate_tokens(str(latest_msg.get('content', '')))
+        other_msgs = other_msgs[:-1]
     
     for m in reversed(other_msgs):
         content = str(m.get('content', ''))
@@ -113,41 +123,23 @@ def enforce_token_budget(msgs: list, max_tokens: int = MAX_TOKENS) -> list:
         
     return [system_msg] + retained_msgs
 
-# Load persistent chat history or initialize new
-if os.path.exists(CHAT_HISTORY_FILE):
-    try:
-        with open(CHAT_HISTORY_FILE, 'r') as f:
-            raw_messages = json.load(f)
-            messages = []
-            for m in raw_messages:
-                messages.append(m)
-            if messages:
-                messages[0] = {'role': 'system', 'content': build_full_system_prompt()}
-            else:
-                messages = [{'role': 'system', 'content': build_full_system_prompt()}]
-    except Exception:
-        messages = [{'role': 'system', 'content': build_full_system_prompt()}]
-else:
-    messages = [{'role': 'system', 'content': build_full_system_prompt()}]
+STATIC_SYSTEM_PROMPT = build_full_system_prompt()
 
-def save_chat_history():
-    serializable_messages = []
-    for m in messages:
-        if hasattr(m, 'model_dump'):
-            serializable_messages.append(m.model_dump())
-        elif hasattr(m, 'dict'):
-            serializable_messages.append(m.dict())
-        elif isinstance(m, dict):
-            serializable_messages.append(m)
-        else:
-            serializable_messages.append(dict(m) if hasattr(m, 'keys') else {"role": getattr(m, 'role', 'assistant'), "content": str(getattr(m, 'content', m))})
-    with open(CHAT_HISTORY_FILE, 'w') as f:
-        json.dump(serializable_messages, f, indent=2)
+try:
+    raw_messages = _load_chat_history_from_db(limit=20)
+    if raw_messages:
+        messages = [{'role': 'system', 'content': STATIC_SYSTEM_PROMPT}] + raw_messages
+    else:
+        messages = [{'role': 'system', 'content': STATIC_SYSTEM_PROMPT}]
+except Exception:
+    messages = [{'role': 'system', 'content': STATIC_SYSTEM_PROMPT}]
 
-atexit.register(save_chat_history)
+def append_and_save_message(msg: dict):
+    messages.append(msg)
+    _save_message_to_db(msg)
 
 thinking_enabled = True
-print(f"Agent initialized with {MODEL} (Thinking: ON). Type 'exit' to quit, or '/think [on/off]' to toggle reasoning.")
+print(f"Agent initialized with {MODEL} (Thinking: ON). Type 'exit' to quit, '/think [on/off]' to toggle reasoning, or '/forget' to clear chat.")
 
 while True:
     try:
@@ -156,6 +148,12 @@ while True:
             continue
         if user_input.lower() in ['exit', 'quit']:
             break
+            
+        if user_input.lower().startswith('/forget'):
+            clear_chat_history()
+            messages = [{'role': 'system', 'content': STATIC_SYSTEM_PROMPT}]
+            print("\n[System]: Chat history has been forgotten and cleared.")
+            continue
             
         if user_input.lower().startswith('/think'):
             parts = user_input.split()
@@ -170,13 +168,19 @@ while True:
             print(f"\n[System]: Thinking mode is now {'ENABLED' if thinking_enabled else 'DISABLED'}.")
             continue
             
-        messages.append({'role': 'user', 'content': user_input})
+        append_and_save_message({'role': 'user', 'content': user_input})
         
         while True:
-            messages[0]['content'] = build_full_system_prompt()
+            messages[0]['content'] = STATIC_SYSTEM_PROMPT
             active_messages = enforce_token_budget(messages, MAX_TOKENS)
             
-            # 1. Immediate visual feedback via Streaming
+            full_content = ""
+            tool_call_buffers = [] 
+            
+            in_thinking = False
+            in_content = False
+            
+            # Direct stream iteration for real-time token streaming
             stream = ollama_client.chat(
                 model=MODEL,
                 messages=active_messages,
@@ -185,15 +189,8 @@ while True:
                 think=thinking_enabled,
                 stream=True
             )
-            
-            full_content = ""
-            tool_calls = []
-            
-            in_thinking = False
-            in_content = False
-            
+
             for chunk in stream:
-                # Handle variations in Ollama Python SDK object returns
                 msg_chunk = chunk['message'] if isinstance(chunk, dict) else chunk.message
                 
                 c_thinking = msg_chunk.get('thinking', '') if isinstance(msg_chunk, dict) else getattr(msg_chunk, 'thinking', '')
@@ -216,18 +213,51 @@ while True:
                     full_content += c_content
                     
                 if c_tools:
-                    tool_calls.extend(c_tools)
+                    for tc in c_tools:
+                        func = tc.get('function', {}) if isinstance(tc, dict) else getattr(tc, 'function', {})
+                        t_name = func.get('name', '') if isinstance(tc, dict) else getattr(tc, 'name', '')
+                        t_args = func.get('arguments', '') if isinstance(tc, dict) else getattr(tc, 'arguments', '')
+                        
+                        if t_name:
+                            tool_call_buffers.append({'name': t_name, 'arguments': t_args or ''})
+                        elif t_args and tool_call_buffers:
+                            if isinstance(t_args, str):
+                                if isinstance(tool_call_buffers[-1]['arguments'], dict):
+                                    tool_call_buffers[-1]['arguments'] = json.dumps(tool_call_buffers[-1]['arguments'])
+                                tool_call_buffers[-1]['arguments'] += t_args
+                            elif isinstance(t_args, dict):
+                                tool_call_buffers[-1]['arguments'] = t_args
             
-            print() # Newline after the stream completes
+            print() 
             
-            # Reconstruct the message object so the tool execution loop still works
+            final_tool_calls = []
+            for buf in tool_call_buffers:
+                if buf['name']:
+                    parsed_args = {}
+                    raw_args = buf['arguments']
+                    
+                    if isinstance(raw_args, dict):
+                        parsed_args = raw_args
+                    elif raw_args:
+                        try:
+                            parsed_args = json.loads(raw_args)
+                        except json.JSONDecodeError:
+                            print(f"  [!] Error parsing arguments for {buf['name']}: {raw_args}")
+                            
+                    final_tool_calls.append({
+                        'function': {
+                            'name': buf['name'],
+                            'arguments': parsed_args
+                        }
+                    })
+            
             msg = {'role': 'assistant', 'content': full_content}
-            if tool_calls:
-                msg['tool_calls'] = tool_calls
+            if final_tool_calls:
+                msg['tool_calls'] = final_tool_calls
                 
-            messages.append(msg)
+            append_and_save_message(msg)
             
-            if not msg.get('tool_calls'):
+            if not final_tool_calls:
                 break
                 
             print("") 
@@ -235,23 +265,21 @@ while True:
                 func_name = tool_call['function']['name']
                 args = tool_call['function']['arguments']
                 
-                # 2. Immediate visual feedback for Tool Execution (great for long tools like nmap)
                 with Spinner(f"Executing tool '{func_name}'"):
                     try:
                         tool_res = AVAILABLE_TOOLS_MAP[func_name](**args)
                     except Exception as e:
                         tool_res = f"Error executing tool: {str(e)}"
                 
-                # Clean completion acknowledgment
                 print(f"  [✓] System: Finished '{func_name}'")
                         
-                messages.append({
+                append_and_save_message({
                     'role': 'tool',
                     'name': func_name,
                     'content': str(tool_res)
                 })
                 
     except KeyboardInterrupt:
-        print("\nUse 'exit' or 'quit' to save history and close.")
+        print("\nUse 'exit' or 'quit' to close.")
     except EOFError:
         break
