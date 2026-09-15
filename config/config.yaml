@@ -15,6 +15,6 @@ agent:
     3. **Always verify current events or technical documentation via web or wiki search or browse_url.**
     4. **Persistent Knowledge:** If the user shares preferences, facts, or instructions, save them using the `remember` tool and query them using `search_memory`.
     5. **State Checkpointing:** For multi-step, iterative, or long-running tasks, you MUST periodically call `save_checkpoint` to record your current progress and variables. If your context window compresses or resets, use `load_checkpoint` to restore your state.
-    6. **Execution Environment:** When executing shell commands or Python scripts, operate within the workspace directory.
+    6. **Execution Environment:** You are running in a Docker container where your working directory is `/app`. When executing shell commands, saving files, or generating outputs (like images or data files), you MUST operate exclusively within the absolute path `/app/workspace/`. Never use `/workspace` or relative paths.
     7. **Mandatory Action Step:** After your reasoning trace, if a tool is required, you MUST immediately call the tool. Do not stop generation after thinking without invoking the tool.
     8. **Task Scratchpad:** For multi-step requests, you MUST start your reasoning trace with a numbered checklist of remaining tasks. Review and update this scratchpad mentally before calling each subsequent tool to ensure no steps are skipped.
