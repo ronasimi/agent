@@ -1,4 +1,8 @@
 import os
+import sys
+import time
+import threading
+import itertools
 import yaml
 import json
 import atexit
@@ -13,6 +17,37 @@ try:
     AUTO_SUGGEST = AutoSuggestFromHistory()
 except ImportError:
     AUTO_SUGGEST = None
+
+class Spinner:
+    """A simple animated CLI spinner to provide immediate background feedback."""
+    def __init__(self, msg="Processing"):
+        self.msg = msg
+        self.running = False
+        self.thread = None
+
+    def _spin(self):
+        # Braille patterns for a smooth circular spinner
+        spinner = itertools.cycle(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'])
+        while self.running:
+            # \033[96m is Cyan, \033[0m resets, \033[K clears the line to prevent artifacts
+            sys.stdout.write(f"\r\033[96m{next(spinner)} {self.msg}...\033[0m\033[K")
+            sys.stdout.flush()
+            time.sleep(0.08)
+        
+        # Clear the spinner line completely when done
+        sys.stdout.write('\r\033[K')
+        sys.stdout.flush()
+
+    def __enter__(self):
+        self.running = True
+        self.thread = threading.Thread(target=self._spin, daemon=True)
+        self.thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.running = False
+        if self.thread:
+            self.thread.join()
 
 with open('/app/config/config.yaml', 'r') as f:
     config = yaml.safe_load(f)
@@ -141,22 +176,56 @@ while True:
             messages[0]['content'] = build_full_system_prompt()
             active_messages = enforce_token_budget(messages, MAX_TOKENS)
             
-            response = ollama_client.chat(
+            # 1. Immediate visual feedback via Streaming
+            stream = ollama_client.chat(
                 model=MODEL,
                 messages=active_messages,
                 tools=ALL_TOOLS,
                 options=OPTIONS,
-                think=thinking_enabled
+                think=thinking_enabled,
+                stream=True
             )
             
-            msg = response['message']
+            full_content = ""
+            tool_calls = []
+            
+            in_thinking = False
+            in_content = False
+            
+            for chunk in stream:
+                # Handle variations in Ollama Python SDK object returns
+                msg_chunk = chunk['message'] if isinstance(chunk, dict) else chunk.message
+                
+                c_thinking = msg_chunk.get('thinking', '') if isinstance(msg_chunk, dict) else getattr(msg_chunk, 'thinking', '')
+                c_content = msg_chunk.get('content', '') if isinstance(msg_chunk, dict) else getattr(msg_chunk, 'content', '')
+                c_tools = msg_chunk.get('tool_calls', []) if isinstance(msg_chunk, dict) else getattr(msg_chunk, 'tool_calls', [])
+                
+                if c_thinking:
+                    if not in_thinking:
+                        print("\n[Thinking Trace]:")
+                        in_thinking = True
+                    print(c_thinking, end='', flush=True)
+                    
+                if c_content:
+                    if not in_content:
+                        if in_thinking:
+                            print("\n")
+                        print("\nAgent: ", end='', flush=True)
+                        in_content = True
+                    print(c_content, end='', flush=True)
+                    full_content += c_content
+                    
+                if c_tools:
+                    tool_calls.extend(c_tools)
+            
+            print() # Newline after the stream completes
+            
+            # Reconstruct the message object so the tool execution loop still works
+            msg = {'role': 'assistant', 'content': full_content}
+            if tool_calls:
+                msg['tool_calls'] = tool_calls
+                
             messages.append(msg)
-            
-            if msg.get('thinking'):
-                print(f"\n[Thinking Trace]:\n{msg['thinking']}")
-            
-            if msg.get('content'):
-                print(f"\nAgent: {msg.get('content')}")
             
             if not msg.get('tool_calls'):
                 break
@@ -165,13 +234,17 @@ while True:
             for tool_call in msg['tool_calls']:
                 func_name = tool_call['function']['name']
                 args = tool_call['function']['arguments']
-                print(f"  [System: Executing {func_name}]")
                 
-                try:
-                    tool_res = AVAILABLE_TOOLS_MAP[func_name](**args)
-                except Exception as e:
-                    tool_res = f"Error executing tool: {str(e)}"
-                    
+                # 2. Immediate visual feedback for Tool Execution (great for long tools like nmap)
+                with Spinner(f"Executing tool '{func_name}'"):
+                    try:
+                        tool_res = AVAILABLE_TOOLS_MAP[func_name](**args)
+                    except Exception as e:
+                        tool_res = f"Error executing tool: {str(e)}"
+                
+                # Clean completion acknowledgment
+                print(f"  [✓] System: Finished '{func_name}'")
+                        
                 messages.append({
                     'role': 'tool',
                     'name': func_name,
