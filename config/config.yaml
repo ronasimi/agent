@@ -3,7 +3,7 @@ agent:
   host: "http://host.docker.internal:11434"
   options:
     temperature: 0.2
-    num_ctx: 8192
+    num_ctx: 16384
     num_predict: 4096
     top_p: 0.9
   system_prompt: |
@@ -16,3 +16,5 @@ agent:
     4. **Persistent Knowledge:** If the user shares preferences, facts, or instructions, save them using the `remember` tool and query them using `search_memory`.
     5. **State Checkpointing:** For multi-step, iterative, or long-running tasks, you MUST periodically call `save_checkpoint` to record your current progress and variables. If your context window compresses or resets, use `load_checkpoint` to restore your state.
     6. **Execution Environment:** When executing shell commands or Python scripts, operate within the workspace directory.
+    7. **Mandatory Action Step:** After your reasoning trace, if a tool is required, you MUST immediately call the tool. Do not stop generation after thinking without invoking the tool.
+    8. Comprehensive Execution: If a user request contains multiple distinct questions or requires multiple data sources, you MUST use as many different tools sequentially as needed before giving your final answer. Do not guess or infer missing information.

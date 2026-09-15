@@ -5,6 +5,7 @@ import threading
 import itertools
 import yaml
 import json
+import re
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.styles import Style
@@ -50,7 +51,7 @@ os.environ["OLLAMA_HOST"] = config['agent']['host']
 MODEL = config['agent']['model']
 OPTIONS = config['agent']['options']
 BASE_SYSTEM_PROMPT = config['agent']['system_prompt']
-MAX_TOKENS = OPTIONS.get('num_ctx', 8192)
+MAX_TOKENS = OPTIONS.get('num_ctx', 16384)
 
 from ollama import Client
 ollama_client = Client(host=config['agent']['host'])
@@ -93,6 +94,7 @@ def estimate_tokens(text: str) -> int:
     return len(text) // 4
 
 def enforce_token_budget(msgs: list, max_tokens: int = MAX_TOKENS) -> list:
+    """Optimized token budgeter that truncates overly large tool outputs instead of dropping them."""
     if not msgs:
         return msgs
     
@@ -100,27 +102,40 @@ def enforce_token_budget(msgs: list, max_tokens: int = MAX_TOKENS) -> list:
     other_msgs = msgs[1:]
     
     system_tokens = estimate_tokens(system_msg.get('content', ''))
-    budget = max_tokens - system_tokens - 2048
-    if budget < 512:
-        budget = 512  
+    reserve_tokens = 4096  # Reserved for model generation
+    budget = max_tokens - system_tokens - reserve_tokens
+    if budget < 1024:
+        budget = 1024  
     
     current_tokens = 0
     retained_msgs = []
     
+    # Always keep the most recent user message
     if other_msgs:
         latest_msg = other_msgs[-1]
         retained_msgs.insert(0, latest_msg)
         current_tokens += estimate_tokens(str(latest_msg.get('content', '')))
-        other_msgs = other_msgs[:-1]
-    
-    for m in reversed(other_msgs):
-        content = str(m.get('content', ''))
-        t_count = estimate_tokens(content)
-        if current_tokens + t_count > budget:
-            break
-        retained_msgs.insert(0, m)
-        current_tokens += t_count
         
+        # Iterate backward through history
+        for m in reversed(other_msgs[:-1]):
+            content = str(m.get('content', ''))
+            t_count = estimate_tokens(content)
+            
+            if current_tokens + t_count > budget:
+                # If we exceed budget but have some room left, gracefully truncate the message
+                remaining = budget - current_tokens
+                if remaining > 250:
+                    char_limit = remaining * 4
+                    truncated_content = content[:char_limit] + "\n\n[System: Content truncated to fit context budget...]"
+                    m_copy = m.copy()
+                    m_copy['content'] = truncated_content
+                    retained_msgs.insert(0, m_copy)
+                    current_tokens += estimate_tokens(truncated_content)
+                break
+                
+            retained_msgs.insert(0, m)
+            current_tokens += t_count
+            
     return [system_msg] + retained_msgs
 
 STATIC_SYSTEM_PROMPT = build_full_system_prompt()
@@ -175,7 +190,7 @@ while True:
             active_messages = enforce_token_budget(messages, MAX_TOKENS)
             
             full_content = ""
-            tool_call_buffers = [] 
+            raw_tool_calls = []
             
             in_thinking = False
             in_content = False
@@ -199,57 +214,66 @@ while True:
                 
                 if c_thinking:
                     if not in_thinking:
-                        print("\n[Thinking Trace]:")
+                        print("\n\033[90m[Thinking Trace]:")
                         in_thinking = True
                     print(c_thinking, end='', flush=True)
                     
                 if c_content:
                     if not in_content:
                         if in_thinking:
-                            print("\n")
+                            print("\033[0m\n")
                         print("\nAgent: ", end='', flush=True)
                         in_content = True
                     print(c_content, end='', flush=True)
                     full_content += c_content
                     
+                # Replace instead of append to prevent stream duplication of arguments
                 if c_tools:
-                    for tc in c_tools:
-                        func = tc.get('function', {}) if isinstance(tc, dict) else getattr(tc, 'function', {})
-                        t_name = func.get('name', '') if isinstance(tc, dict) else getattr(tc, 'name', '')
-                        t_args = func.get('arguments', '') if isinstance(tc, dict) else getattr(tc, 'arguments', '')
-                        
-                        if t_name:
-                            tool_call_buffers.append({'name': t_name, 'arguments': t_args or ''})
-                        elif t_args and tool_call_buffers:
-                            if isinstance(t_args, str):
-                                if isinstance(tool_call_buffers[-1]['arguments'], dict):
-                                    tool_call_buffers[-1]['arguments'] = json.dumps(tool_call_buffers[-1]['arguments'])
-                                tool_call_buffers[-1]['arguments'] += t_args
-                            elif isinstance(t_args, dict):
-                                tool_call_buffers[-1]['arguments'] = t_args
+                    raw_tool_calls = c_tools
             
+            if in_thinking and not in_content:
+                print("\033[0m", end='', flush=True)
+                
             print() 
             
             final_tool_calls = []
-            for buf in tool_call_buffers:
-                if buf['name']:
-                    parsed_args = {}
-                    raw_args = buf['arguments']
+            
+            # 1. Parse native tool calls from Ollama API
+            if raw_tool_calls:
+                for tc in raw_tool_calls:
+                    func = tc.get('function', {}) if isinstance(tc, dict) else getattr(tc, 'function', {})
+                    t_name = func.get('name', '') if isinstance(func, dict) else getattr(func, 'name', '')
+                    t_args = func.get('arguments', {}) if isinstance(func, dict) else getattr(func, 'arguments', {})
                     
-                    if isinstance(raw_args, dict):
-                        parsed_args = raw_args
-                    elif raw_args:
+                    if isinstance(t_args, str):
                         try:
-                            parsed_args = json.loads(raw_args)
+                            t_args = json.loads(t_args)
                         except json.JSONDecodeError:
-                            print(f"  [!] Error parsing arguments for {buf['name']}: {raw_args}")
+                            t_args = {}
                             
-                    final_tool_calls.append({
-                        'function': {
-                            'name': buf['name'],
-                            'arguments': parsed_args
-                        }
-                    })
+                    if t_name:
+                        final_tool_calls.append({
+                            'function': {
+                                'name': t_name,
+                                'arguments': t_args
+                            }
+                        })
+
+            # 2. Fallback: Parse raw JSON tool calls in content if native tool calls were empty
+            if not final_tool_calls and full_content:
+                json_match = re.search(r'(?:<tool_call>|```json)?\s*(\{\s*"name"\s*:\s*"[^"]+".*?\})\s*(?:</tool_call>|```)?', full_content, re.DOTALL)
+                if json_match:
+                    try:
+                        parsed = json.loads(json_match.group(1))
+                        if 'name' in parsed:
+                            final_tool_calls.append({
+                                'function': {
+                                    'name': parsed['name'],
+                                    'arguments': parsed.get('arguments', parsed.get('parameters', {}))
+                                }
+                            })
+                    except json.JSONDecodeError:
+                        pass
             
             msg = {'role': 'assistant', 'content': full_content}
             if final_tool_calls:
@@ -271,12 +295,19 @@ while True:
                     except Exception as e:
                         tool_res = f"Error executing tool: {str(e)}"
                 
-                print(f"  [✓] System: Finished '{func_name}'")
+                print(f"  \033[92m[✓]\033[0m System: Finished '{func_name}'")
+                
+                # Format Tool Output
+                res_str = str(tool_res)
+                preview = res_str[:250].replace('\n', ' ') + ('...' if len(res_str) > 250 else '')
+                print(f"\033[90m  {'─'*50}")
+                print(f"  Result: {preview}")
+                print(f"  {'─'*50}\033[0m")
                         
                 append_and_save_message({
                     'role': 'tool',
                     'name': func_name,
-                    'content': str(tool_res)
+                    'content': res_str
                 })
                 
     except KeyboardInterrupt:
