@@ -1,22 +1,12 @@
-#!/usr/bin/env python3
-"""
-Network Mapper - Scans a local network and generates a visual topology diagram
-optimized for VLM (Vision-Language Model) analysis.
-"""
-
 import subprocess
 import json
-import socket
-import argparse
 import ipaddress
-from datetime import datetime
 from pathlib import Path
 
-def scan_hosts(network: str = "192.168.1.0/24") -> list[str]:
+def _scan_hosts(network: str) -> list[str]:
     try:
         net = ipaddress.ip_network(network, strict=False)
-    except ValueError as e:
-        print(f"Invalid network CIDR '{network}': {e}")
+    except ValueError:
         return []
 
     hosts = []
@@ -33,7 +23,7 @@ def scan_hosts(network: str = "192.168.1.0/24") -> list[str]:
             pass
     return hosts
 
-def get_os_info(host: str) -> dict:
+def _get_os_info(host: str) -> dict:
     cmd = ["nmap", "-sV", "-O", "--top-ports", "100", host]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
@@ -65,7 +55,7 @@ def get_os_info(host: str) -> dict:
     
     return info
 
-def classify_hardware(hardware: str, os_family: str) -> str:
+def _classify_hardware(hardware: str, os_family: str) -> str:
     hw = hardware.lower() if hardware else ""
     os_f = os_family.lower() if os_family else ""
     
@@ -79,13 +69,10 @@ def classify_hardware(hardware: str, os_family: str) -> str:
     elif "windows" in os_f or "windows" in hw: return "Windows Device"
     else: return "Unknown Device"
 
-def generate_dot(hosts: list[dict]) -> str:
-    """Generate a Graphviz DOT representation of the network with VLM-friendly styling."""
+def _generate_dot(hosts: list[dict]) -> str:
     dot = 'digraph NetworkMap {\n'
-    # Increase DPI and node separation for VLM readability
     dot += '    graph [dpi=300, nodesep=1.0, ranksep=1.2];\n'
     dot += '    rankdir=TB;\n'
-    # Use larger, bolder fonts and high contrast borders
     dot += '    node [shape=box, style="filled,rounded", fontname="Helvetica-Bold", fontsize=16, penwidth=2];\n'
     dot += '    edge [fontname="Helvetica", fontsize=12, penwidth=2];\n\n'
     
@@ -104,7 +91,7 @@ def generate_dot(hosts: list[dict]) -> str:
         ip = host["ip"]
         os_family = host["os_family"] or "Unknown"
         hardware = host["hardware"] or "Unknown"
-        hw_type = classify_hardware(hardware, os_family)
+        hw_type = _classify_hardware(hardware, os_family)
         color = colors.get(hw_type, "#E0E0E0")
         
         os_display = os_family[:20] + "..." if len(os_family) > 20 else os_family
@@ -112,45 +99,36 @@ def generate_dot(hosts: list[dict]) -> str:
         dot += f'    "{ip}" [label="{label}", fillcolor="{color}"];\n'
     
     dot += '\n    "router" [label="Router / Gateway", shape=diamond, fillcolor="#9C27B0", style="filled,rounded"];\n\n'
-    
     for host in hosts:
-        ip = host["ip"]
-        dot += f'    "router" -> "{ip}" [label="ethernet", color="#424242", style=solid];\n'
+        dot += f'    "router" -> "{host["ip"]}" [label="ethernet", color="#424242", style=solid];\n'
     
     dot += '}\n'
     return dot
 
-def generate_png(hosts: list[dict], output_path: str = "/app/workspace/network_map.png") -> str:
-    if not output_path.startswith("/app/workspace/"):
-        output_path = "/app/workspace/network_map.png"
-        
+def map_network(network: str = "192.168.1.0/24", output_filename: str = "network_map.png") -> str:
+    """Scan local subnets, perform OS discovery, and generate a visual topology diagram for VLM analysis.
+    
+    Args:
+        network: Subnet CIDR block to scan (defaults to '192.168.1.0/24').
+        output_filename: Output image filename inside /app/workspace (defaults to 'network_map.png').
+    """
+    output_path = f"/app/workspace/{Path(output_filename).name}"
+    hosts = _scan_hosts(network)
+    if not hosts:
+        return f"No active hosts discovered on subnet {network}."
+    
+    host_info = [_get_os_info(h) for h in hosts]
+    dot_code = _generate_dot(host_info)
+    
     try:
         import graphviz
+        src = graphviz.Source(dot_code)
+        src.format = "png"
+        src.render(filename=Path(output_path).stem, directory=Path(output_path).parent, cleanup=True)
     except ImportError:
-        dot_code = generate_dot(hosts)
         dot_file = Path(output_path).with_suffix(".dot")
         with open(dot_file, "w") as f:
             f.write(dot_code)
         subprocess.run(["dot", "-Tpng", str(dot_file), "-o", output_path], check=True)
-        return output_path
-
-    dot_code = generate_dot(hosts)
-    src = graphviz.Source(dot_code)
-    src.format = "png"
-    src.render(filename=Path(output_path).stem, directory=Path(output_path).parent or ".", cleanup=True)
-    return output_path
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--network", default="192.168.1.0/24")
-    parser.add_argument("--output", default="/app/workspace/network_map.png")
-    args = parser.parse_args()
-    
-    hosts = scan_hosts(args.network)
-    if not hosts: return
-    
-    host_info = [get_os_info(h) for h in hosts]
-    generate_png(host_info, args.output)
-
-if __name__ == "__main__":
-    main()
+        
+    return f"Network map successfully generated and saved to {output_path}"
