@@ -1,9 +1,10 @@
 ollama
-ddgs
-wikipedia
-pyyaml
 prompt_toolkit
-pygments
+pyyaml
 requests
 beautifulsoup4
+wikipedia
+ddgs
 zeroconf
+playwright
+graphviz

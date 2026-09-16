@@ -6,6 +6,7 @@ import itertools
 import yaml
 import json
 import re
+import base64
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.styles import Style
@@ -17,7 +18,6 @@ except ImportError:
     AUTO_SUGGEST = None
 
 class Spinner:
-    """A simple animated CLI spinner for tool execution feedback."""
     def __init__(self, msg="Processing"):
         self.msg = msg
         self.running = False
@@ -94,7 +94,6 @@ def estimate_tokens(text: str) -> int:
     return len(text) // 4
 
 def enforce_token_budget(msgs: list, max_tokens: int = MAX_TOKENS) -> list:
-    """Optimized token budgeter that truncates overly large tool outputs instead of dropping them."""
     if not msgs:
         return msgs
     
@@ -102,7 +101,7 @@ def enforce_token_budget(msgs: list, max_tokens: int = MAX_TOKENS) -> list:
     other_msgs = msgs[1:]
     
     system_tokens = estimate_tokens(system_msg.get('content', ''))
-    reserve_tokens = 4096  # Reserved for model generation
+    reserve_tokens = 4096 
     budget = max_tokens - system_tokens - reserve_tokens
     if budget < 1024:
         budget = 1024  
@@ -110,19 +109,16 @@ def enforce_token_budget(msgs: list, max_tokens: int = MAX_TOKENS) -> list:
     current_tokens = 0
     retained_msgs = []
     
-    # Always keep the most recent user message
     if other_msgs:
         latest_msg = other_msgs[-1]
         retained_msgs.insert(0, latest_msg)
         current_tokens += estimate_tokens(str(latest_msg.get('content', '')))
         
-        # Iterate backward through history
         for m in reversed(other_msgs[:-1]):
             content = str(m.get('content', ''))
             t_count = estimate_tokens(content)
             
             if current_tokens + t_count > budget:
-                # If we exceed budget but have some room left, gracefully truncate the message
                 remaining = budget - current_tokens
                 if remaining > 250:
                     char_limit = remaining * 4
@@ -182,8 +178,25 @@ while True:
                 thinking_enabled = not thinking_enabled
             print(f"\n[System]: Thinking mode is now {'ENABLED' if thinking_enabled else 'DISABLED'}.")
             continue
+
+        msg = {'role': 'user', 'content': user_input}
+        detected_images = []
+        
+        potential_paths = re.findall(r'/?[\w\-\./]+(?:\.png|\.jpg|\.jpeg|\.webp)', user_input, re.IGNORECASE)
+        for path in potential_paths:
+            if os.path.exists(path):
+                try:
+                    with open(path, "rb") as img_file:
+                        b64_img = base64.b64encode(img_file.read()).decode('utf-8')
+                        detected_images.append(b64_img)
+                except Exception as e:
+                    print(f"  \033[91m[!] System: Failed to process image '{path}': {e}\033[0m")
+
+        if detected_images:
+            msg['images'] = detected_images
+            print(f"  \033[92m[System]: Automatically encoded and attached {len(detected_images)} image(s) to the prompt.\033[0m")
             
-        append_and_save_message({'role': 'user', 'content': user_input})
+        append_and_save_message(msg)
         
         while True:
             messages[0]['content'] = STATIC_SYSTEM_PROMPT
@@ -195,7 +208,6 @@ while True:
             in_thinking = False
             in_content = False
             
-            # Direct stream iteration for real-time token streaming
             stream = ollama_client.chat(
                 model=MODEL,
                 messages=active_messages,
@@ -227,7 +239,6 @@ while True:
                     print(c_content, end='', flush=True)
                     full_content += c_content
                     
-                # Replace instead of append to prevent stream duplication of arguments
                 if c_tools:
                     raw_tool_calls = c_tools
             
@@ -238,7 +249,6 @@ while True:
             
             final_tool_calls = []
             
-            # 1. Parse native tool calls from Ollama API
             if raw_tool_calls:
                 for tc in raw_tool_calls:
                     func = tc.get('function', {}) if isinstance(tc, dict) else getattr(tc, 'function', {})
@@ -259,7 +269,6 @@ while True:
                             }
                         })
 
-            # 2. Fallback: Parse raw JSON tool calls in content if native tool calls were empty
             if not final_tool_calls and full_content:
                 json_match = re.search(r'(?:<tool_call>|```json)?\s*(\{\s*"name"\s*:\s*"[^"]+".*?\})\s*(?:</tool_call>|```)?', full_content, re.DOTALL)
                 if json_match:
@@ -297,7 +306,6 @@ while True:
                 
                 print(f"  \033[92m[✓]\033[0m System: Finished '{func_name}'")
                 
-                # Format Tool Output
                 res_str = str(tool_res)
                 preview = res_str[:250].replace('\n', ' ') + ('...' if len(res_str) > 250 else '')
                 print(f"\033[90m  {'─'*50}")

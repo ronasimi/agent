@@ -7,6 +7,7 @@ from ddgs import DDGS
 def web_search(query: str) -> str:
     """Search the web for current information."""
     try:
+        # DDGS now acts as a comprehensive metasearch engine
         results = DDGS().text(query, max_results=3)
         return json.dumps(results)
     except Exception as e:
@@ -34,13 +35,11 @@ def browse_url(url: str) -> str:
         
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Remove noisy layout elements
         for element in soup(["script", "style", "nav", "footer", "header", "aside"]):
             element.decompose()
             
         text = soup.get_text(separator='\n', strip=True)
         
-        # Cap text length to prevent flooding the context window
         if len(text) > 12000:
             return text[:12000] + "\n[Content truncated due to length...]"
         return text.strip() or "The page returned no readable text content."

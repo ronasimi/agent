@@ -19,12 +19,10 @@ class NetworkServiceListener(ServiceListener):
     def add_service(self, zc, type_, name):
         info = zc.get_service_info(type_, name)
         if info:
-            # Parse addresses cleanly
             addr_list = info.parsed_addresses() if hasattr(info, 'parsed_addresses') else []
             if not addr_list and info.addresses:
                 addr_list = [".".join(map(str, addr)) for addr in info.addresses]
 
-            # Decode properties safely
             props = {}
             if info.properties:
                 for k, v in info.properties.items():
@@ -50,22 +48,18 @@ def scan_mdns(timeout: int = 5) -> str:
     if Zeroconf is None:
         return "Error: 'zeroconf' python package is missing. Use execute_shell to run: pip install zeroconf"
 
+    # Protect against the LLM hallucinating uselessly short timeouts
+    timeout = max(int(timeout), 5)
+
     try:
         zc = Zeroconf()
         listener = NetworkServiceListener()
         
-        # Comprehensive list of service types that reveal OS and hardware details
         service_types = [
-            "_http._tcp.local.", 
-            "_ssh._tcp.local.", 
-            "_smb._tcp.local.", 
-            "_printer._tcp.local.", 
-            "_ipp._tcp.local.", 
-            "_googlecast._tcp.local.", 
-            "_workstation._tcp.local.", 
-            "_device-info._tcp.local.",
-            "_afpovertcp._tcp.local.",
-            "_nvstream._tcp.local."
+            "_http._tcp.local.", "_ssh._tcp.local.", "_smb._tcp.local.", 
+            "_printer._tcp.local.", "_ipp._tcp.local.", "_googlecast._tcp.local.", 
+            "_workstation._tcp.local.", "_device-info._tcp.local.",
+            "_afpovertcp._tcp.local.", "_nvstream._tcp.local."
         ]
         
         browsers = [ServiceBrowser(zc, st, listener) for st in service_types]
@@ -76,7 +70,6 @@ def scan_mdns(timeout: int = 5) -> str:
         if not listener.services:
             return "No mDNS services discovered during the listening window."
             
-        # Deduplicate services by device name and type
         unique_services = {f"{s['device_name']}-{s['service_type']}": s for s in listener.services}.values()
         return json.dumps(list(unique_services), indent=2)
         
