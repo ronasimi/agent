@@ -46,6 +46,7 @@ from tools import (
     get_relevant_memories,
     search_memory,
     get_tools_prompt_summary,
+    select_tool_schemas,
     init_db,
     set_conversation_summary,
     normalize_arguments,
@@ -63,6 +64,9 @@ MODEL = AGENT_CFG.get("model", "qwen3.5:4b")
 FAST_MODEL = AGENT_CFG.get("fast_model", "qwen2.5-coder:1.5b")
 MAIN_OPTIONS = AGENT_CFG.get("main_options") or {"num_ctx": 16384, "temperature": 0.4, "top_p": 0.9, "top_k": 20}
 FAST_OPTIONS = AGENT_CFG.get("fast_options") or {"num_ctx": 4096, "temperature": 0.0, "top_p": 0.9, "top_k": 20}
+COMPACTION_MODEL = str(AGENT_CFG.get("compaction_model") or MODEL)
+COMPACTION_OPTIONS = AGENT_CFG.get("compaction_options") or dict(FAST_OPTIONS)
+MAX_TOOLS_PER_TURN = max(8, int(AGENT_CFG.get("max_tools_per_turn", 20)))
 OLLAMA_HOST = AGENT_CFG.get("host", "http://127.0.0.1:11434")
 os.environ["OLLAMA_HOST"] = OLLAMA_HOST
 MAX_CTX = int(AGENT_CFG.get("context", {}).get("num_ctx", MAIN_OPTIONS.get("num_ctx", 16384)))
@@ -73,7 +77,8 @@ SUMMARY_KEEP_MESSAGES = int(AGENT_CFG.get("context", {}).get("summary_keep_messa
 MAX_TOOL_OUTPUT = int(AGENT_CFG.get("context", {}).get("max_tool_output_chars", 14000))
 MAX_ITERATIONS = int(AGENT_CFG.get("max_iterations", 30))
 SEMANTIC_MEMORY = bool(AGENT_CFG.get("semantic_memory_enabled", False))
-THINKING_DEFAULT = bool(AGENT_CFG.get("thinking_default", True))
+THINKING_DEFAULT = bool(AGENT_CFG.get("thinking_default", False))
+SHOW_PERF_STATS = bool(AGENT_CFG.get("show_perf_stats", True))
 
 OLLAMA = Client(host=OLLAMA_HOST)
 
@@ -132,7 +137,7 @@ SYSTEM_POLICY = """
 
 
 def build_system_prompt(user_text: str = "") -> str:
-    parts = [AGENT_CFG.get("system_prompt", ""), SYSTEM_POLICY, get_tools_prompt_summary()]
+    parts = [AGENT_CFG.get("system_prompt", ""), SYSTEM_POLICY, get_tools_prompt_summary(compact=True)]
     if user_text:
         try:
             memories = get_relevant_memories(user_text, limit=8) if SEMANTIC_MEMORY else json.loads(search_memory(user_text, limit=8))
@@ -145,6 +150,25 @@ def build_system_prompt(user_text: str = "") -> str:
 
 def _clean_thinking(text: str) -> str:
     return re.sub(r"<think>.*?</think>", "", text or "", flags=re.DOTALL).strip()
+
+
+def _print_perf_stats(stats: dict[str, Any]) -> None:
+    """Display Ollama timing/cache counters when the server returns them."""
+    if not SHOW_PERF_STATS or not stats.get("done"):
+        return
+    prompt_count = stats.get("prompt_eval_count")
+    cached_count = stats.get("prompt_eval_cached_count")
+    prompt_ns = stats.get("prompt_eval_duration")
+    eval_count = stats.get("eval_count")
+    eval_ns = stats.get("eval_duration")
+    if prompt_count is None and eval_count is None:
+        return
+    prompt_ms = (float(prompt_ns) / 1_000_000.0) if prompt_ns else 0.0
+    eval_ms = (float(eval_ns) / 1_000_000.0) if eval_ns else 0.0
+    cache_text = f", cached {cached_count}" if cached_count is not None else ""
+    prompt_text = f"prompt {prompt_count}{cache_text} in {prompt_ms:.0f} ms" if prompt_count is not None else "prompt n/a"
+    eval_text = f"eval {eval_count} in {eval_ms:.0f} ms" if eval_count is not None else "eval n/a"
+    print(f"  \033[90m[Ollama] {prompt_text}; {eval_text}\033[0m")
 
 
 def append_and_save(messages: list[dict], msg: dict) -> None:
@@ -235,21 +259,21 @@ def _extract_tool_calls(raw_calls: Any) -> list[dict]:
     return result
 
 
-def _compact_if_needed(messages: list[dict]) -> None:
+def _compact_if_needed(messages: list[dict]) -> bool:
     """Persist a rolling summary and retain only recent raw turns in memory."""
     if estimate_messages_tokens(messages[1:]) < COMPACT_AT:
-        return
+        return False
     if len(messages) <= SUMMARY_KEEP_MESSAGES + 2:
-        return
+        return False
 
     cutoff = max(1, len(messages) - SUMMARY_KEEP_MESSAGES)
     while cutoff < len(messages) and messages[cutoff].get("role") != "user":
         cutoff += 1
     if cutoff <= 1:
-        return
+        return False
     old = messages[1:cutoff]
     if not old:
-        return
+        return False
     existing = get_conversation_summary()
     prompt = (
         "Maintain a durable rolling summary of an assistant conversation. Keep only information needed to continue the task: "
@@ -258,13 +282,15 @@ def _compact_if_needed(messages: list[dict]) -> None:
         f"Existing summary:\n{existing}\n\nOlder messages:\n{json.dumps(old, ensure_ascii=False)[:24000]}"
     )
     try:
-        response = OLLAMA.generate(model=FAST_MODEL, prompt=prompt, options=FAST_OPTIONS, keep_alive=0)
+        response = OLLAMA.generate(model=COMPACTION_MODEL, prompt=prompt, options=COMPACTION_OPTIONS, keep_alive=-1)
         summary = _clean_thinking(response.get("response", "")).strip()
         if summary:
             set_conversation_summary(summary[:8000])
             del messages[1:cutoff]
+            return True
     except Exception as exc:
         print(f"  \033[93m[System]: Context compaction skipped: {exc}\033[0m")
+    return False
 
 
 def _finalize_after_limit(messages: list[dict]) -> None:
@@ -278,6 +304,7 @@ def _finalize_after_limit(messages: list[dict]) -> None:
             max_ctx_tokens=MAX_CTX,
             reserve_tokens=RESERVE_TOKENS,
             recent_messages=RECENT_MESSAGES,
+            extra_prompt_tokens=0,
         )[1:],
         {"role": "user", "content": "The tool-call safety limit was reached. Summarize what has been established, what remains incomplete, and any useful next steps. Do not call tools."},
     ]
@@ -294,114 +321,138 @@ def _finalize_after_limit(messages: list[dict]) -> None:
 
 def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bool) -> None:
     record_monitor_state("agent.last_interaction", utc_now())
-    for previous in messages[1:]:
-        previous.pop("images", None)
-    msg: dict[str, Any] = {"role": "user", "content": user_input}
-    detected_images = []
-    for path in IMAGE_REGEX.findall(user_input):
-        encoded = encode_image(path)
-        if encoded:
-            detected_images.append(encoded)
-    if detected_images:
-        msg["images"] = detected_images
-        print(f"  \033[92m[System]: Attached {len(detected_images)} media file(s).\033[0m")
-    append_and_save(messages, msg)
-    _compact_if_needed(messages)
-
-    for iteration in range(1, MAX_ITERATIONS + 1):
-        system_prompt = build_system_prompt(user_input)
-        active = build_active_messages(
-            system_prompt=system_prompt,
-            summary=get_conversation_summary(),
-            history=messages[1:],
-            max_ctx_tokens=MAX_CTX,
-            reserve_tokens=RESERVE_TOKENS,
-            recent_messages=RECENT_MESSAGES,
-        )
-        active[-1] = dict(active[-1])
-        raw_tool_calls = []
-        full_content = ""
-        in_thinking = False
-        in_content = False
-
-        try:
-            stream = OLLAMA.chat(
-                model=MODEL,
-                messages=active,
-                tools=TOOL_SCHEMAS,
-                options=MAIN_OPTIONS,
-                think=thinking_enabled,
-                stream=True,
-                keep_alive=-1,
-            )
-            for chunk in stream:
-                chunk_msg = chunk.get("message", {}) if isinstance(chunk, dict) else getattr(chunk, "message", {})
-                thinking = chunk_msg.get("thinking", "") if isinstance(chunk_msg, dict) else getattr(chunk_msg, "thinking", "")
-                content = chunk_msg.get("content", "") if isinstance(chunk_msg, dict) else getattr(chunk_msg, "content", "")
-                calls = chunk_msg.get("tool_calls", []) if isinstance(chunk_msg, dict) else getattr(chunk_msg, "tool_calls", [])
-                if calls:
-                    raw_tool_calls = calls
-                if thinking:
-                    if not in_thinking:
-                        print("\n\033[90m[Thinking Trace]:")
-                        in_thinking = True
-                    print(thinking, end="", flush=True)
-                if content:
-                    if not in_content:
-                        print("\033[0m\nAgent: ", end="", flush=True)
-                        in_content = True
-                    print(content, end="", flush=True)
-                    full_content += content
-        except Exception as exc:
-            print(f"\n\033[91m[!] Ollama error: {exc}\033[0m")
-            if iteration < 2:
-                time.sleep(1)
-                continue
-            break
-
-        print("\033[0m")
-        tool_calls = _extract_tool_calls(raw_tool_calls)
-        assistant_msg = {"role": "assistant", "content": full_content}
-        if tool_calls:
-            assistant_msg["tool_calls"] = tool_calls
-            
-        if full_content or tool_calls:
-            append_and_save(messages, assistant_msg)
-
-        if not tool_calls:
-            if not full_content and in_thinking:
-                append_and_save(messages, {"role": "user", "content": "Please provide the final answer or issue an explicit tool call."})
-                continue
-            break
-
-        for call in tool_calls:
-            name = call["function"]["name"]
-            raw_args = call["function"].get("arguments", {})
-            print(f"\n\033[96m[Tool] {name}\033[0m")
-            try:
-                args = normalize_arguments(AVAILABLE_TOOLS_MAP[name], raw_args)
-                with Spinner(f"Executing {name}"):
-                    result = AVAILABLE_TOOLS_MAP[name](**args)
-            except Exception as exc:
-                result = f"Tool execution error: {exc}"
-            result_text = str(result)
-            if len(result_text) > MAX_TOOL_OUTPUT:
-                result_text = result_text[:MAX_TOOL_OUTPUT] + "\n\n[Harness: tool output truncated.]"
-            print(f"  \033[90m{result_text[:300].replace(chr(10), ' ')}{'...' if len(result_text) > 300 else ''}\033[0m")
-            append_and_save(
-                messages,
-                {
-                    "role": "tool",
-                    "name": name,
-                    "content": result_text,
-                    "tool_call_id": call["id"],
-                },
-            )
+    record_monitor_state("agent.interaction_active", {"pid": os.getpid(), "started_at": utc_now()})
+    try:
+        for previous in messages[1:]:
+            previous.pop("images", None)
+        msg: dict[str, Any] = {"role": "user", "content": user_input}
+        detected_images = []
+        for path in IMAGE_REGEX.findall(user_input):
+            encoded = encode_image(path)
+            if encoded:
+                detected_images.append(encoded)
+        if detected_images:
+            msg["images"] = detected_images
+            print(f"  \033[92m[System]: Attached {len(detected_images)} media file(s).\033[0m")
+        append_and_save(messages, msg)
         _compact_if_needed(messages)
 
-    else:
-        print("\n\033[91m[!] Reached the maximum tool-call iteration limit.\033[0m")
-        _finalize_after_limit(messages)
+        system_prompt = build_system_prompt(user_input)
+        tool_schemas = select_tool_schemas(user_input, max_tools=MAX_TOOLS_PER_TURN)
+        tool_prompt_tokens = estimate_tokens(json.dumps(tool_schemas, ensure_ascii=False, separators=(",", ":")))
+        summary = get_conversation_summary()
+
+        for iteration in range(1, MAX_ITERATIONS + 1):
+            active = build_active_messages(
+                system_prompt=system_prompt,
+                summary=summary,
+                history=messages[1:],
+                max_ctx_tokens=MAX_CTX,
+                reserve_tokens=RESERVE_TOKENS,
+                recent_messages=RECENT_MESSAGES,
+                extra_prompt_tokens=tool_prompt_tokens,
+            )
+            if active:
+                active[-1] = dict(active[-1])
+            raw_tool_calls = []
+            full_content = ""
+            in_thinking = False
+            in_content = False
+            perf_stats: dict[str, Any] = {}
+
+            try:
+                stream = OLLAMA.chat(
+                    model=MODEL,
+                    messages=active,
+                    tools=tool_schemas,
+                    options=MAIN_OPTIONS,
+                    think=thinking_enabled,
+                    stream=True,
+                    keep_alive=-1,
+                )
+                for chunk in stream:
+                    if isinstance(chunk, dict):
+                        perf_stats = chunk
+                    else:
+                        perf_stats = {
+                            "done": getattr(chunk, "done", False),
+                            "prompt_eval_count": getattr(chunk, "prompt_eval_count", None),
+                            "prompt_eval_cached_count": getattr(chunk, "prompt_eval_cached_count", None),
+                            "prompt_eval_duration": getattr(chunk, "prompt_eval_duration", None),
+                            "eval_count": getattr(chunk, "eval_count", None),
+                            "eval_duration": getattr(chunk, "eval_duration", None),
+                        }
+                    chunk_msg = chunk.get("message", {}) if isinstance(chunk, dict) else getattr(chunk, "message", {})
+                    thinking = chunk_msg.get("thinking", "") if isinstance(chunk_msg, dict) else getattr(chunk_msg, "thinking", "")
+                    content = chunk_msg.get("content", "") if isinstance(chunk_msg, dict) else getattr(chunk_msg, "content", "")
+                    calls = chunk_msg.get("tool_calls", []) if isinstance(chunk_msg, dict) else getattr(chunk_msg, "tool_calls", [])
+                    if calls:
+                        raw_tool_calls = calls
+                    if thinking:
+                        if not in_thinking:
+                            print("\n\033[90m[Thinking Trace]:")
+                            in_thinking = True
+                        print(thinking, end="", flush=True)
+                    if content:
+                        if not in_content:
+                            print("\033[0m\nAgent: ", end="", flush=True)
+                            in_content = True
+                        print(content, end="", flush=True)
+                        full_content += content
+            except Exception as exc:
+                print(f"\n\033[91m[!] Ollama error: {exc}\033[0m")
+                if iteration < 2:
+                    time.sleep(0.2)
+                    continue
+                break
+
+            print("\033[0m")
+            _print_perf_stats(perf_stats)
+            tool_calls = _extract_tool_calls(raw_tool_calls)
+            assistant_msg = {"role": "assistant", "content": full_content}
+            if tool_calls:
+                assistant_msg["tool_calls"] = tool_calls
+            
+            if full_content or tool_calls:
+                append_and_save(messages, assistant_msg)
+
+            if not tool_calls:
+                if not full_content and in_thinking:
+                    append_and_save(messages, {"role": "user", "content": "Please provide the final answer or issue an explicit tool call."})
+                    continue
+                break
+
+            for call in tool_calls:
+                name = call["function"]["name"]
+                raw_args = call["function"].get("arguments", {})
+                print(f"\n\033[96m[Tool] {name}\033[0m")
+                try:
+                    args = normalize_arguments(AVAILABLE_TOOLS_MAP[name], raw_args)
+                    with Spinner(f"Executing {name}"):
+                        result = AVAILABLE_TOOLS_MAP[name](**args)
+                except Exception as exc:
+                    result = f"Tool execution error: {exc}"
+                result_text = str(result)
+                if len(result_text) > MAX_TOOL_OUTPUT:
+                    result_text = result_text[:MAX_TOOL_OUTPUT] + "\n\n[Harness: tool output truncated.]"
+                print(f"  \033[90m{result_text[:300].replace(chr(10), ' ')}{'...' if len(result_text) > 300 else ''}\033[0m")
+                append_and_save(
+                    messages,
+                    {
+                        "role": "tool",
+                        "name": name,
+                        "content": result_text,
+                        "tool_call_id": call["id"],
+                    },
+                )
+            _compact_if_needed(messages)
+
+        else:
+            print("\n\033[91m[!] Reached the maximum tool-call iteration limit.\033[0m")
+            _finalize_after_limit(messages)
+
+    finally:
+        record_monitor_state("agent.interaction_active", False)
 
 
 def print_jobs() -> None:

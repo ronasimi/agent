@@ -56,8 +56,9 @@ def build_active_messages(
     max_ctx_tokens: int,
     reserve_tokens: int = 2048,
     recent_messages: int = 12,
+    extra_prompt_tokens: int = 0,
 ) -> list[dict[str, Any]]:
-    """Construct bounded model context: system + summary + recent turns."""
+    """Construct bounded model context while reserving space for non-message prompt data."""
     base: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
     if summary:
         bounded_summary = str(summary)[-8000:]
@@ -67,7 +68,7 @@ def build_active_messages(
         })
 
     recent = list(history[-max(2, int(recent_messages)):])
-    budget = max(128, int(max_ctx_tokens) - int(reserve_tokens))
+    budget = max(128, int(max_ctx_tokens) - int(reserve_tokens) - max(0, int(extra_prompt_tokens)))
     used = estimate_messages_tokens(base)
     selected: list[dict[str, Any]] = []
 

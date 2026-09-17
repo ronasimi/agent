@@ -115,6 +115,18 @@ def _interactive_recent() -> bool:
         return False
 
 
+def _interactive_busy() -> bool:
+    """Return True while the frontend owns the interactive inference path."""
+    active = get_monitor_state("agent.interaction_active", False)
+    if isinstance(active, dict) and active.get("pid"):
+        try:
+            os.kill(int(active["pid"]), 0)
+            return True
+        except (OSError, ValueError, TypeError):
+            record_monitor_state("agent.interaction_active", False)
+    return _interactive_recent()
+
+
 def _notify(title: str, message: str) -> None:
     try:
         notify_desktop(title, message)
@@ -212,7 +224,7 @@ def run_research_job(job_id: str, worker_id: str) -> str:
                     heartbeat_job(job_id, worker_id, state)
                     time.sleep(min(POLL_SECONDS * 2, 10))
                     break
-                if _interactive_recent():
+                if _interactive_busy():
                     time.sleep(min(POLL_SECONDS * 2, 5))
                     break
                 deep_search_and_scrape(job_id, query, max_results=int(RESEARCH_CFG.get("max_results_per_query", 3)))
@@ -359,6 +371,10 @@ def monitor_once() -> None:
 
 
 def main() -> None:
+    try:
+        os.nice(5)
+    except OSError:
+        pass
     init_runtime_db()
     recovered = recover_stale_jobs(STALE_SECONDS)
     if recovered:

@@ -9,8 +9,24 @@ agent:
   embed_model: "nomic-embed-text"
   timezone: "America/Toronto"
   semantic_memory_enabled: false
-  thinking_default: true
+  # Keep normal turns fast; /think on enables explicit reasoning when needed.
+  thinking_default: false
+  show_perf_stats: true
   max_iterations: 30
+
+  # Native tool schemas are selected deterministically per turn to reduce prefill.
+  max_tools_per_turn: 20
+
+  # Context compaction normally reuses the main model so a single-model Ollama
+  # server does not evict the interactive model. Set this to the fast model only
+  # when the server can keep both models resident.
+  compaction_model: ""
+  compaction_options:
+    num_ctx: 4096
+    temperature: 0.0
+    top_p: 0.9
+    top_k: 20
+    num_predict: 512
 
   # Keep the main context below the theoretical model maximum. On an 8 GiB
   # VRAM budget, bounded context + compaction is preferable to a huge KV cache.
@@ -20,7 +36,7 @@ agent:
     recent_messages: 12
     summary_keep_messages: 8
     compact_at_tokens: 9000
-    max_tool_output_chars: 14000
+    max_tool_output_chars: 10000
 
   main_options:
     num_ctx: 16384
