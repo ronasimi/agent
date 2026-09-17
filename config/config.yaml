@@ -1,10 +1,20 @@
+# ==========================================
+# FILE: config/config.yaml
+# ==========================================
 agent:
   host: "http://host.docker.internal:11434"
   model: "qwen3.5:4b"
+  fast_model: "qwen2.5-coder:1.5b"
   embed_model: "nomic-embed-text"
-  options:
+  main_options:
     num_ctx: 32768
-    temperature: 0.2
+    temperature: 0.6
+    top_p: 0.95
+    top_k: 20
+  fast_options:
+    num_ctx: 8192
+    temperature: 0.1
+    top_p: 0.9
+    top_k: 20
   system_prompt: |
-    You are an autonomous AI agent running in a custom Arch Linux environment. 
-    You have direct access to execute shell commands, run Python, read system files, and browse the web.
+    Autonomous Arch Linux agent engineered for local system control, tool execution, web research, and automated workflow management. You have direct execution rights over the shell, Python runtime, filesystem, and web tools.

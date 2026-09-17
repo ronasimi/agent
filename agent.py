@@ -16,6 +16,8 @@ from io import BytesIO
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.styles import Style
+from prompt_toolkit.patch_stdout import patch_stdout
+from prompt_toolkit.application import get_app
 
 try:
     from prompt_toolkit.auto_suggestion import AutoSuggestFromHistory
@@ -23,9 +25,15 @@ try:
 except ImportError:
     AUTO_SUGGEST = None
 
+# Global background status tracker for the bottom status bar
+BACKGROUND_STATUS = "Idle"
+
+def get_bottom_toolbar():
+    return [('class:toolbar', f" ⚙ Background Status: {BACKGROUND_STATUS} ")]
+
 class Spinner:
-    def __init__(self, msg="Processing"):
-        # Strip newlines and truncate long messages to prevent terminal line wrapping
+    def __init__(self, msg="Processing", background=False):
+        self.background = background
         clean_msg = str(msg).replace('\n', ' ').replace('\r', ' ')
         if len(clean_msg) > 65:
             clean_msg = clean_msg[:62] + "..."
@@ -43,12 +51,23 @@ class Spinner:
         sys.stdout.flush()
 
     def __enter__(self):
+        global BACKGROUND_STATUS
+        if self.background:
+            BACKGROUND_STATUS = self.msg
+            try:
+                get_app().invalidate()
+            except Exception:
+                pass
+            return self
+            
         self.running = True
         self.thread = threading.Thread(target=self._spin, daemon=True)
         self.thread.start()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.background:
+            return
         self.running = False
         if self.thread:
             self.thread.join()
@@ -58,10 +77,13 @@ with open('/app/config/config.yaml', 'r') as f:
 
 os.environ["OLLAMA_HOST"] = config['agent']['host']
 MODEL = config['agent']['model']
-FAST_MODEL = "qwen2.5-coder:1.5b"
-OPTIONS = config['agent']['options']
+FAST_MODEL = config['agent'].get('fast_model', 'qwen2.5-coder:1.5b')
+
+MAIN_OPTIONS = config['agent'].get('main_options') or config['agent'].get('options', {'num_ctx': 32768, 'temperature': 0.6})
+FAST_OPTIONS = config['agent'].get('fast_options') or config['agent'].get('options', {'num_ctx': 8192, 'temperature': 0.1})
+
 BASE_SYSTEM_PROMPT = config['agent']['system_prompt']
-MAX_TOKENS = OPTIONS.get('num_ctx', 32768)
+MAX_TOKENS = MAIN_OPTIONS.get('num_ctx', 32768)
 MAX_ITERATIONS = 30
 
 from ollama import Client
@@ -91,6 +113,7 @@ SHELL_HISTORY_FILE = "/app/memory/.agent_history"
 custom_style = Style.from_dict({
     'prompt': 'ansigreen bold',
     'input': 'ansiwhite',
+    'toolbar': 'bg:#1a202c #63b3ed bold',
     'completion-menu.completion': 'bg:#000000 #ffffff',
     'completion-menu.completion.current': 'bg:#005f5f #ffffff',
 })
@@ -98,7 +121,8 @@ custom_style = Style.from_dict({
 session = PromptSession(
     history=FileHistory(SHELL_HISTORY_FILE),
     auto_suggest=AUTO_SUGGEST,
-    style=custom_style
+    style=custom_style,
+    bottom_toolbar=get_bottom_toolbar
 )
 
 AUTO_MEMORY_SYSTEM_INSTRUCTION = """
@@ -113,6 +137,11 @@ AUTO_MEMORY_SYSTEM_INSTRUCTION = """
 - To schedule a reminder, write a `<name>.service` file and a `<name>.timer` file directly into the `host_timers` directory.
 - The `.service` file should use native host commands, e.g., `ExecStart=/usr/bin/notify-send "Reminder" "Message"`.
 - After writing both files, use `execute_shell` to run `systemctl --user daemon-reload` followed by `systemctl --user enable --now <name>.timer`.
+
+### Tool Execution Protocol
+- Your tool arguments MUST be strictly valid JSON. 
+- When using `execute_shell`, provide the command exactly like this: {"command": "your_bash_command_here"}.
+- CRITICAL: You must properly escape all internal double quotes inside your bash commands (e.g., \\") to prevent JSON corruption.
 """
 
 def build_full_system_prompt() -> str:
@@ -229,100 +258,119 @@ def encode_image(path_str: str) -> str:
 IMAGE_REGEX = r'(?:https?://[^\s>\"\']+\.(?:png|jpg|jpeg|webp|pdf)|/?[\w\-\./]+\.(?:png|jpg|jpeg|webp|pdf))'
 thinking_enabled = True
 
-def run_deep_research_pipeline(topic: str):
-    print(f"\n\033[95m[Deep Research Engine]: Initializing research on '{topic}'...\033[0m")
+def run_deep_research_pipeline(topic: str, is_background: bool = False):
+    global BACKGROUND_STATUS
+    if not is_background:
+        print(f"\n\033[95m[Deep Research Engine]: Initializing research on '{topic}'...\033[0m")
+    
     clear_research_buffer()
 
-    # PHASE 1: PLANNER
     planner_prompt = (
         f"You are a Lead Research Planner. Topic: '{topic}'.\n"
         "Generate 3 distinct, specific search queries to thoroughly investigate this topic.\n"
         "Return ONLY a JSON array of strings, e.g. [\"query 1\", \"query 2\", \"query 3\"]."
     )
-    with Spinner("Planner: Generating research sub-queries"):
-        plan_res = ollama_client.generate(model=FAST_MODEL, prompt=planner_prompt)
+    with Spinner("Planner: Generating research sub-queries", background=is_background):
+        plan_res = ollama_client.generate(model=FAST_MODEL, prompt=planner_prompt, options=FAST_OPTIONS, keep_alive=0)
         try:
             match = re.search(r'\[.*\]', plan_res['response'], re.DOTALL)
             sub_queries = json.loads(match.group(0)) if match else [topic]
         except Exception:
             sub_queries = [f"{topic} key overview", f"{topic} technical details", f"{topic} latest updates"]
 
-    print(f"\033[94m[Planner]: Generated sub-queries:\033[0m")
-    for q in sub_queries:
-        print(f"  • {q}")
+    if not is_background:
+        print(f"\033[94m[Planner]: Generated sub-queries:\033[0m")
+        for q in sub_queries:
+            print(f"  • {q}")
 
-    # PHASE 2: WORKER
     for query in sub_queries:
-        with Spinner(f"Worker: Searching & scraping for '{query}'"):
+        with Spinner(f"Worker: Searching & scraping for '{query}'", background=is_background):
             deep_search_and_scrape(query, max_results=3)
 
-    # PHASE 3: EVALUATOR
     eval_prompt = (
         f"Target Topic: '{topic}'\n"
         f"Current Buffer Findings:\n{read_research_buffer()}\n\n"
         "As a strict Critical Evaluator, you must verify the accuracy and relevance of the gathered data.\n"
         "Check for two things:\n"
-        "1. RELEVANCE: Does the data actually discuss the target topic, or is it about something completely different (e.g., bed frames instead of the insect bed bugs)?\n"
+        "1. RELEVANCE: Does the data actually discuss the target topic, or is it about something completely different?\n"
         "2. COMPLETENESS: Are there major knowledge gaps?\n\n"
         "Reply EXACTLY with one of the following formats:\n"
         "- If the data is completely irrelevant or wrong: 'IRRELEVANT: <reason>'\n"
         "- If relevant but missing key info: 'GAP: <specific missing topic to search for>'\n"
         "- If relevant and sufficient: 'COMPLETE'"
     )
-    with Spinner("Evaluator: Checking coverage, relevance, and knowledge gaps"):
-        eval_res = ollama_client.generate(model=FAST_MODEL, prompt=eval_prompt)['response'].strip()
+    with Spinner("Evaluator: Checking coverage, relevance, and knowledge gaps", background=is_background):
+        eval_res = ollama_client.generate(model=FAST_MODEL, prompt=eval_prompt, options=FAST_OPTIONS, keep_alive=0)['response'].strip()
 
     if eval_res.startswith("IRRELEVANT:"):
         fail_reason = eval_res.replace("IRRELEVANT:", "").strip()
-        print(f"\033[91m[Evaluator]: FAIL - Irrelevant data detected. Reason: {fail_reason}\033[0m")
-        print("\033[93m[Evaluator]: Flushing corrupted buffer and executing emergency precise scrape...\033[0m")
+        if not is_background:
+            print(f"\033[91m[Evaluator]: FAIL - Irrelevant data detected. Reason: {fail_reason}\033[0m")
+            print("\033[93m[Evaluator]: Flushing corrupted buffer and executing emergency precise scrape...\033[0m")
         clear_research_buffer()
-        with Spinner("Worker: Emergency precise scrape"):
-            # Add strict contextual words to force the search engine into the right domain
+        with Spinner("Worker: Emergency precise scrape", background=is_background):
             deep_search_and_scrape(f"factual information about {topic}", max_results=4)
     elif eval_res.startswith("GAP:"):
         gap_query = eval_res.replace("GAP:", "").strip()
-        print(f"\033[93m[Evaluator]: Identified gap -> '{gap_query}'. Executing targeted scrape...\033[0m")
-        with Spinner("Worker: Addressing research gap"):
+        if not is_background: print(f"\033[93m[Evaluator]: Identified gap -> '{gap_query}'. Executing targeted scrape...\033[0m")
+        with Spinner("Worker: Addressing research gap", background=is_background):
             deep_search_and_scrape(gap_query, max_results=2)
     else:
-        print(f"\033[92m[Evaluator]: Information coverage and relevance verified complete.\033[0m")
+        if not is_background: print(f"\033[92m[Evaluator]: Information coverage and relevance verified complete.\033[0m")
 
-    # PHASE 4: SYNTHESIZER
-    print(f"\033[96m[Synthesizer]: Compiling final report using main model...\033[0m\n")
+    if not is_background:
+        print(f"\033[96m[Synthesizer]: Compiling final report using main model...\033[0m\n")
+    else:
+        BACKGROUND_STATUS = f"Compiling report for '{topic}'..."
+        try:
+            get_app().invalidate()
+        except Exception:
+            pass
+    
     all_notes = read_research_buffer()
     
-    # Strict safeguard instruction to prevent the synthesizer from confidently presenting garbage
     synthesis_prompt = [
         {'role': 'system', 'content': 'You are a Senior Technical Analyst. Compile a detailed, well-structured research report in markdown format with clear section headings, inline images if relevant, and a dedicated References section with source URLs based ONLY on the provided findings. If the provided findings are completely irrelevant to the target topic, DO NOT write a report. Instead, output a clear error stating the data gathering failed due to irrelevance.'},
         {'role': 'user', 'content': f"Topic: {topic}\n\nGathered Research Buffer:\n{all_notes}\n\nWrite the comprehensive research report now:"}
     ]
     
-    stream = ollama_client.chat(model=MODEL, messages=synthesis_prompt, stream=True)
+    stream = ollama_client.chat(model=MODEL, messages=synthesis_prompt, options=MAIN_OPTIONS, stream=True)
     report_content = ""
     for chunk in stream:
         content = chunk['message']['content']
-        print(content, end='', flush=True)
+        if not is_background:
+            print(content, end='', flush=True)
         report_content += content
-    print("\n")
+    if not is_background: print("\n")
 
-    # Save Markdown report to message memory
-    append_and_save_message({'role': 'assistant', 'content': f"### Deep Research Report: {topic}\n\n{report_content}"})
+    clean_report_content = re.sub(r'<think>.*?</think>', '', report_content, flags=re.DOTALL).strip()
+    append_and_save_message({'role': 'assistant', 'content': f"### Deep Research Report: {topic}\n\n{clean_report_content}"})
 
-    # Automatically generate PDF report in workspace
     clean_topic_filename = re.sub(r'[^\w\-_\. ]', '_', topic).replace(' ', '_').lower()
     pdf_filename = f"report_{clean_topic_filename}.pdf"
     
-    with Spinner("Generating PDF report"):
-        pdf_res = generate_pdf_report(report_content, output_filename=pdf_filename)
-        print(f"\033[92m[PDF Generator]: {pdf_res}\033[0m")
+    with Spinner("Generating PDF report", background=is_background):
+        generate_pdf_report(clean_report_content, output_filename=pdf_filename)
 
-print(f"Agent initialized with {MODEL} (Thinking: ON). Type 'exit' to quit, '/research <topic>' for deep research, '/think [on/off]' to toggle, or '/forget' to clear chat.")
+    if is_background:
+        BACKGROUND_STATUS = "Idle"
+        try:
+            get_app().invalidate()
+        except Exception:
+            pass
+        os.system(f"notify-send 'Deep Research Complete' 'Finished report for: {topic}'")
+        with patch_stdout():
+            print(f"\n\033[92m[System]: Background research complete for '{topic}'. PDF saved to workspace/report_{clean_topic_filename}.pdf\033[0m\n")
+
+print(f"Agent initialized with Main: {MODEL} | Fast: {FAST_MODEL} (Thinking: ON).") 
+print("Type 'exit' to quit, '/research <topic>' for background deep research, '/think [on/off]' to toggle.")
 print("Use Ctrl+P followed by Ctrl+Q to detach the terminal and let the agent work in the background.")
 
 while True:
     try:
-        user_input = session.prompt("\nYou: ").strip()
+        with patch_stdout():
+            user_input = session.prompt("\nYou: ").strip()
+            
         if not user_input: continue
         if user_input.lower() in ['exit', 'quit']: break
             
@@ -337,7 +385,10 @@ while True:
             if not topic:
                 print("[System]: Please provide a topic, e.g., '/research Quantum Computing developments'")
                 continue
-            run_deep_research_pipeline(topic)
+            
+            print(f"[System]: Launching background research sub-agent for '{topic}'...")
+            t = threading.Thread(target=run_deep_research_pipeline, args=(topic, True), daemon=True)
+            t.start()
             continue
             
         if user_input.lower().startswith('/think'):
@@ -395,7 +446,7 @@ while True:
             raw_tool_calls = []
             in_thinking, in_content = False, False
             
-            stream = ollama_client.chat(model=MODEL, messages=active_messages, tools=ALL_TOOLS, options=OPTIONS, think=thinking_enabled, stream=True)
+            stream = ollama_client.chat(model=MODEL, messages=active_messages, tools=ALL_TOOLS, options=MAIN_OPTIONS, think=thinking_enabled, stream=True)
 
             for chunk in stream:
                 msg_chunk = chunk['message'] if isinstance(chunk, dict) else chunk.message
@@ -426,16 +477,37 @@ while True:
             final_tool_calls = []
             if raw_tool_calls:
                 for tc in raw_tool_calls:
-                    func = tc.get('function', {}) if isinstance(tc, dict) else getattr(tc, 'function', {})
-                    t_name = func.get('name', '') if isinstance(func, dict) else getattr(func, 'name', '')
-                    t_args = func.get('arguments', {}) if isinstance(func, dict) else getattr(func, 'arguments', {})
-                    if isinstance(t_args, str):
-                        try: t_args = json.loads(t_args)
-                        except json.JSONDecodeError: t_args = {}
-                    if t_name in AVAILABLE_TOOLS_MAP:
-                        final_tool_calls.append({'id': tc.get('id', uuid.uuid4().hex), 'type': 'function', 'function': {'name': t_name, 'arguments': t_args}})
+                    # STRICT DICTIONARY / OBJECT SAFE PARSING
+                    try:
+                        if isinstance(tc, dict):
+                            func = tc.get('function', {})
+                            t_name = func.get('name', '')
+                            t_args = func.get('arguments', {})
+                            t_id = tc.get('id', uuid.uuid4().hex)
+                        else:
+                            func = getattr(tc, 'function', None)
+                            t_name = getattr(func, 'name', '') if func else ''
+                            t_args = getattr(func, 'arguments', {}) if func else {}
+                            t_id = getattr(tc, 'id', uuid.uuid4().hex)
+                            
+                        if isinstance(t_args, str):
+                            try: 
+                                t_args = json.loads(t_args)
+                            except json.JSONDecodeError as e: 
+                                print(f"  \033[91m[!] JSON Parser Error: {e}\033[0m")
+                                t_args = {}
+                                
+                        if t_name in AVAILABLE_TOOLS_MAP:
+                            final_tag = {
+                                'id': t_id, 
+                                'type': 'function', 
+                                'function': {'name': t_name, 'arguments': t_args}
+                            }
+                            final_tool_calls.append(final_tag)
+                    except Exception as e:
+                        print(f"  \033[91m[!] Tool Call Extraction Error: {e}\033[0m")
 
-            # Fallback JSON scanner: Checks full content first, then full thinking trace
+            # Fallback JSON block scanner
             search_target = full_content if full_content else full_thinking
             if not final_tool_calls and search_target:
                 json_match = re.search(r'(?:<tool_call>|```json)?\s*(\{\s*"name"\s*:\s*"[^"]+".*?\})\s*(?:</tool_call>|```)?', search_target, re.DOTALL)
@@ -462,6 +534,28 @@ while True:
                 func_name = tool_call['function']['name']
                 args = tool_call['function']['arguments']
                 
+                # --- SMART AUTO-RECOVERY FOR DROPPED SHELL COMMANDS ---
+                if func_name == 'execute_shell' and not args.get('command'):
+                    recovered = False
+                    bash_match = re.search(r'```(?:bash|sh)\n(.*?)\n```', full_content, re.DOTALL)
+                    if bash_match:
+                        args['command'] = bash_match.group(1).strip()
+                        recovered = True
+                    else:
+                        curl_match = re.search(r'(curl\s+-[^\n]+)', full_content + full_thinking)
+                        if curl_match:
+                            args['command'] = curl_match.group(1).strip()
+                            recovered = True
+                        else:
+                            url_match = re.search(r'(https?://[^\s<>`"\']+)', full_content + full_thinking)
+                            if url_match:
+                                args['command'] = f"curl -s '{url_match.group(1)}'"
+                                recovered = True
+                                
+                    if recovered:
+                        print(f"  \033[93m[System]: Auto-recovered missing shell command from context.\033[0m")
+                # --------------------------------------------------------
+
                 with Spinner(f"Executing tool '{func_name}'"):
                     try: tool_res = AVAILABLE_TOOLS_MAP[func_name](**args)
                     except Exception as e: tool_res = f"Error executing tool: {str(e)}"
@@ -469,7 +563,6 @@ while True:
                 print(f"  \033[92m[✓]\033[0m System: Finished '{func_name}'")
                 res_str = str(tool_res)
                 
-                # Safeguard: Hard limit output size to prevent oversized tool outputs
                 if len(res_str) > 25000:
                     res_str = res_str[:25000] + "\n\n[System: Tool output truncated. Returned too much raw data to process directly.]"
 

@@ -4,11 +4,17 @@
 import sqlite3
 import os
 import requests
+import yaml
 from bs4 import BeautifulSoup
 from ddgs import DDGS
 from ollama import Client
 
-FAST_MODEL = "qwen2.5-coder:1.5b"
+# Load configuration for fast model and task-optimized options
+with open('/app/config/config.yaml', 'r') as f:
+    config = yaml.safe_load(f)
+
+FAST_MODEL = config['agent'].get('fast_model', 'qwen2.5-coder:1.5b')
+FAST_OPTIONS = config['agent'].get('fast_options', config['agent'].get('options', {}))
 DB_PATH = "/app/memory/knowledge.db"
 
 def _get_db():
@@ -64,14 +70,14 @@ def deep_search_and_scrape(query: str, max_results: int = 3) -> str:
         except Exception as e:
             text = f"Scraping failed: {str(e)}"
 
-        # Distill findings using fast secondary model
+        # Distill findings using fast model with keep_alive=0 to instantly free VRAM
         prompt = (
             f"Analyze the following text regarding the query: '{query}'.\n"
             "Extract 3-5 distinct, key factual insights as concise bullet points.\n\n"
             f"Text:\n{text[:4000]}"
         )
         try:
-            distill_response = client.generate(model=FAST_MODEL, prompt=prompt)
+            distill_response = client.generate(model=FAST_MODEL, prompt=prompt, options=FAST_OPTIONS, keep_alive=0)
             distilled_notes = distill_response.get('response', '').strip()
         except Exception as e:
             distilled_notes = f"Distillation error: {str(e)}"
@@ -121,3 +127,7 @@ def clear_research_buffer() -> str:
     conn.commit()
     conn.close()
     return "Research buffer successfully cleared."
+
+def general_web_search(query: str) -> str:
+    """Perform a general web search. Fetches top URLs, cleans the HTML, and uses a fast sub-model to distill the content into precise facts. Use this for all web searches to prevent context window overload."""
+    return deep_search_and_scrape(query, max_results=2)
