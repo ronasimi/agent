@@ -1,3 +1,6 @@
+# ==========================================
+# FILE: worker.py
+# ==========================================
 """Durable background worker for research jobs and low-cost host/network monitoring."""
 from __future__ import annotations
 
@@ -17,7 +20,7 @@ from tools.deep_research import (
     plan_research_queries,
     read_research_buffer,
 )
-from tools.host_tools import gpu_snapshot_dict, host_snapshot, ollama_runtime_snapshot, network_snapshot
+from tools.host_tools import gpu_snapshot_dict, host_snapshot, ollama_runtime_snapshot
 from tools.notify import notify_desktop
 from tools.pdf_generator import generate_pdf_report
 from tools.runtime import (
@@ -281,7 +284,7 @@ def _transition_event(key: str, condition: bool, event_type: str, summary: str, 
 
 
 def monitor_once() -> None:
-    """Record host/network changes and threshold crossings without noisy polling notifications."""
+    """Record host changes and threshold crossings without network snapshot noise."""
     if not MONITOR_CFG.get("enabled", True):
         return
 
@@ -335,17 +338,6 @@ def monitor_once() -> None:
             if isinstance(entry, dict) and isinstance(entry.get("current"), (int, float)) and entry["current"] >= temp_limit
         ]
         _transition_event("host.high_temperature", bool(hot), "host_high_temperature", "High host temperature", {"sensors": hot})
-    except Exception:
-        pass
-
-    try:
-        raw_network = json.loads(network_snapshot())
-        normalized_network = json.dumps(raw_network, sort_keys=True, separators=(",", ":"))
-        previous_network = get_monitor_state("network.snapshot")
-        if previous_network is not None and previous_network != normalized_network:
-            record_monitor_event("network_change", "Network topology changed.", {"snapshot": raw_network})
-            _notify("Network Change Detected", "The local network topology snapshot changed.")
-        record_monitor_state("network.snapshot", normalized_network)
     except Exception:
         pass
 
