@@ -12,12 +12,17 @@ DB_PATH = "/app/memory/knowledge.db"
 DB_TIMEOUT = 10.0
 
 
+def _connect():
+    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
+    conn.execute("PRAGMA busy_timeout=15000")
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
 def init_work_queue_db():
     """Initialize work queue tables."""
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
+    conn = _connect()
     try:
-        conn.execute("PRAGMA journal_mode=WAL;")
-        
         conn.execute("""
             CREATE TABLE IF NOT EXISTS work_queue (
                 id TEXT PRIMARY KEY,
@@ -69,19 +74,14 @@ def queue_work(
         estimated_hours: Estimated time to complete
     
     Returns: Work ID
-    
-    Example:
-        >>> work_id = queue_work("Research AI trends", priority=2, due_in_hours=24)
-        >>> isinstance(work_id, str) and len(work_id) > 0
-        True
     """
     work_id = str(uuid.uuid4())
     
     due_at = None
     if due_in_hours:
-        due_at = (datetime.now() + timedelta(hours=due_in_hours)).isoformat()
+        due_at = (datetime.now() + timedelta(hours=due_in_hours)).strftime("%Y-%m-%d %H:%M:%S")
     
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
+    conn = _connect()
     try:
         conn.execute("""
             INSERT INTO work_queue 
@@ -99,15 +99,8 @@ def get_next_work_item() -> dict:
     Retrieve the highest-priority pending work-list item.
     
     Returns: Work item dictionary or None
-    
-    Example:
-        >>> queue_work("Test work", priority=1)
-        '...'
-        >>> next_item = get_next_work_item()
-        >>> next_item is not None
-        True
     """
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
+    conn = _connect()
     try:
         cursor = conn.cursor()
         
@@ -151,13 +144,8 @@ def mark_work_complete(work_id: str, summary: str, full_result: str = "") -> str
         full_result: Full detailed results
     
     Returns: Confirmation message
-    
-    Example:
-        >>> work_id = queue_work("Test work")
-        >>> mark_work_complete(work_id, "Completed", "Full details")
-        "Work item '...' marked complete."
     """
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
+    conn = _connect()
     try:
         conn.execute(
             "UPDATE work_queue SET status = 'completed' WHERE id = ?",
@@ -181,17 +169,8 @@ def list_work_queue(status: str = "pending") -> str:
         status: Filter by status (pending, running, completed, cancelled)
     
     Returns: JSON string of work items
-    
-    Example:
-        >>> queue_work("Work 1", priority=1)
-        '...'
-        >>> queue_work("Work 2", priority=2)
-        '...'
-        >>> result = list_work_queue("pending")
-        >>> "Work" in result
-        True
     """
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
+    conn = _connect()
     try:
         cursor = conn.cursor()
         
@@ -232,7 +211,7 @@ def get_work_details(work_id: str) -> str:
     
     Returns: JSON string with work details
     """
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
+    conn = _connect()
     try:
         cursor = conn.cursor()
         
@@ -286,7 +265,7 @@ def get_work_result(work_id: str) -> str:
     
     Returns: Result text or error message
     """
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
+    conn = _connect()
     try:
         cursor = conn.cursor()
         cursor.execute(
@@ -313,7 +292,7 @@ def update_work_status(work_id: str, status: str) -> str:
     if status not in valid_statuses:
         return f"Invalid status. Must be one of: {', '.join(valid_statuses)}"
     
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
+    conn = _connect()
     try:
         conn.execute(
             "UPDATE work_queue SET status = ? WHERE id = ?",
@@ -334,7 +313,7 @@ def delete_work(work_id: str) -> str:
     
     Returns: Confirmation message
     """
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
+    conn = _connect()
     try:
         conn.execute("DELETE FROM work_results WHERE work_id = ?", (work_id,))
         conn.execute("DELETE FROM work_queue WHERE id = ?", (work_id,))
@@ -350,7 +329,7 @@ def get_work_statistics() -> str:
     
     Returns: JSON string with statistics
     """
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
+    conn = _connect()
     try:
         cursor = conn.cursor()
         

@@ -69,8 +69,20 @@ def create_or_update_tool(tool_name: str, specification: str) -> str:
     system_prompt = (
         "You are an expert Python tool developer for an autonomous AI agent harness. "
         "Write clean, self-contained Python code for a custom agent tool based on the user specification. "
-        "Every tool function must be decorated with `@agent_tool` (imported from `tools.tool_registry`), "
+        "Every tool function must be decorated with `@agent_tool` (imported explicitly from `tools.tool_registry`), "
         "include comprehensive type annotations, and have a clear docstring describing its behavior. "
+        "CRITICAL IMPORT RULES:\n"
+        "- You may only import standard library modules, `requests`, `sqlite3`, `bs4`, `ollama`, and `tools.tool_registry`.\n"
+        "- NEVER import non-existent internal helper modules like `tools.utils`.\n\n"
+        "Example structural format:\n"
+        "```python\n"
+        "import sqlite3\n"
+        "from tools.tool_registry import agent_tool\n\n"
+        "@agent_tool\n"
+        "def example_tool(param: str) -> str:\n"
+        "    \"\"\"Tool docstring description.\"\"\"\n"
+        "    return f'Result: {param}'\n"
+        "```\n"
         "Return ONLY valid Python source code inside a ```python markdown block, with no extra conversational prose."
     )
 
@@ -85,14 +97,19 @@ def create_or_update_tool(tool_name: str, specification: str) -> str:
             f"Specification: {specification}\n"
         )
         if error_feedback:
-            prompt += f"\nPrevious attempt failed validation:\n{error_feedback}\nPlease correct the code."
+            prompt += f"\nPrevious attempt failed validation or test loading with this error:\n{error_feedback}\nPlease correct the code and ensure all imports are valid."
 
         try:
+            # Introduce slight temperature variance on retry attempts to escape logic loops
+            options = dict(FAST_OPTIONS)
+            if attempt > 1:
+                options["temperature"] = 0.2
+
             response = client.generate(
                 model=FAST_MODEL,
                 prompt=f"{system_prompt}\n\n{prompt}",
-                options=FAST_OPTIONS,
-                keep_alive=0,  # Unload fast coder model immediately after completion
+                options=options,
+                keep_alive=-1,
             )
             raw_text = response.get("response", "")
 
@@ -112,17 +129,31 @@ def create_or_update_tool(tool_name: str, specification: str) -> str:
                 error_feedback = msg
                 continue
 
-            # Test dynamic import and importability check
-            file_path.write_text(current_code, encoding="utf-8")
-            spec = importlib.util.spec_from_file_location(f"custom_test_{tool_name}", file_path)
-            if spec is None or spec.loader is None:
-                raise RuntimeError("Could not load module spec for testing.")
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
+            # Test dynamic import and execution check
+            try:
+                file_path.write_text(current_code, encoding="utf-8")
+                spec = importlib.util.spec_from_file_location(f"custom_test_{tool_name}", file_path)
+                if spec is None or spec.loader is None:
+                    raise RuntimeError("Could not load module spec for testing.")
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+            except Exception as import_exc:
+                file_path.unlink(missing_ok=True)
+                raise import_exc
+
+            try:
+                client.generate(model=FAST_MODEL, prompt="", keep_alive=0)
+            except Exception:
+                pass
 
             return f"Successfully generated, validated, and saved custom tool to {file_path}. Call /reload to activate."
         except Exception as exc:
             error_feedback = str(exc)
+
+    try:
+        client.generate(model=FAST_MODEL, prompt="", keep_alive=0)
+    except Exception:
+        pass
 
     return f"Error: Failed to generate a valid custom tool after 3 attempts. Last error: {error_feedback}"
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import time
 import traceback
@@ -122,7 +123,6 @@ def _notify(title: str, message: str) -> None:
 
 
 def _safe_filename(topic: str) -> str:
-    import re
     return re.sub(r"[^a-zA-Z0-9._-]+", "_", topic).strip("._")[:80] or "research"
 
 
@@ -147,7 +147,10 @@ def _synthesize(topic: str, evidence: str, job_id: str) -> str:
         content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
         if content:
             output.append(content)
+            
     text = "".join(output).strip()
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    
     if not text:
         raise RuntimeError("Main model returned an empty research report.")
     return text
@@ -208,10 +211,10 @@ def run_research_job(job_id: str, worker_id: str) -> str:
                 if not ok:
                     heartbeat_job(job_id, worker_id, state)
                     time.sleep(min(POLL_SECONDS * 2, 10))
-                    continue
+                    break
                 if _interactive_recent():
                     time.sleep(min(POLL_SECONDS * 2, 5))
-                    continue
+                    break
                 deep_search_and_scrape(job_id, query, max_results=int(RESEARCH_CFG.get("max_results_per_query", 3)))
                 completed.add(query)
                 evidence_now = read_research_buffer(job_id, max_chars=120000)
@@ -365,7 +368,6 @@ def main() -> None:
     last_heartbeat = 0.0
     print(f"[worker] started as {worker_id}; database={DB_PATH}")
 
-    # Warmup / preload main model immediately into VRAM with keep_alive=-1 on worker startup
     print(f"[worker] Preloading main model ({MODEL}) into VRAM...")
     try:
         Client(host=os.environ.get("OLLAMA_HOST", OLLAMA_HOST)).chat(

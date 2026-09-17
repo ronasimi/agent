@@ -45,10 +45,11 @@ WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir --break-system-packages -r /app/requirements.txt
 
-# Playwright is retained for explicit screenshot requests.
-RUN playwright install chromium
-
 COPY --chown=agent:agent . /app
 
 USER agent
+
+# Playwright is retained for explicit screenshot requests.
+RUN playwright install chromium
+
 CMD ["python", "/app/agent.py"]

@@ -64,6 +64,12 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def _clean_json(raw: str) -> dict:
+    raw = str(raw).strip()
+    raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.MULTILINE).strip()
+    return json.loads(raw)
+
+
 def init_research_db() -> None:
     with _connect() as conn:
         conn.execute(
@@ -83,7 +89,7 @@ def init_research_db() -> None:
             )
             """
         )
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(research_buffer)").fetchall()}
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(research_buffer)").fetchall()}
         if "run_id" not in columns:
             conn.execute("ALTER TABLE research_buffer ADD COLUMN run_id TEXT NOT NULL DEFAULT 'legacy'")
         if "evidence" not in columns:
@@ -116,7 +122,7 @@ def plan_research_queries(topic: str, max_queries: int = 4) -> list[str]:
             options=FAST_OPTIONS,
             keep_alive=0,
         )
-        payload = json.loads(response.get("response", "{}"))
+        payload = _clean_json(response.get("response", "{}"))
         queries = payload.get("queries", []) if isinstance(payload, dict) else []
         cleaned = []
         for query in queries:
@@ -156,7 +162,7 @@ def _distill(query: str, title: str, url: str, text: str) -> dict:
             options=FAST_OPTIONS,
             keep_alive=0,
         )
-        parsed = json.loads(response.get("response", "{}"))
+        parsed = _clean_json(response.get("response", "{}"))
         if isinstance(parsed, dict) and parsed.get("findings"):
             return parsed
     except Exception as exc:
@@ -287,7 +293,7 @@ def evaluate_research(run_id: str, topic: str) -> dict:
             options=FAST_OPTIONS,
             keep_alive=0,
         )
-        result = json.loads(response.get("response", "{}"))
+        result = _clean_json(response.get("response", "{}"))
         if result.get("status") in {"complete", "gap", "contradiction", "insufficient"}:
             return result
     except Exception as exc:

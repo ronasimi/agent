@@ -58,10 +58,14 @@ BUILTINS = [
 
 def _register(func, *, builtin_name: str | None = None) -> None:
     public_name = getattr(func, "_agent_tool_name", None) or builtin_name or func.__name__
+    
+    # Evaluate schema first so a failure doesn't leave the registry in a partially mutated state
+    schema = function_schema(func)
+    
     AVAILABLE_TOOLS_MAP[public_name] = func
     if func not in ALL_TOOLS:
         ALL_TOOLS.append(func)
-    TOOL_SCHEMAS.append(function_schema(func))
+    TOOL_SCHEMAS.append(schema)
     TOOL_METADATA[public_name] = {
         "readonly": False if public_name in MUTATING_TOOLS else bool(getattr(func, "_agent_tool_readonly", True)),
         "timeout": getattr(func, "_agent_tool_timeout", None),

@@ -171,10 +171,14 @@ def encode_image(path_str: str) -> str | None:
             print(f"  \033[93m[System]: Could not download media URL: {exc}\033[0m")
             return None
 
-    candidates = [
+    candidates = []
+    if value.startswith("/app/workspace/"):
+        candidates.append(value)
+    candidates.extend([
         os.path.join("/app/workspace", value.lstrip("/")),
         os.path.join("/app/workspace", os.path.basename(value)),
-    ]
+    ])
+    
     for candidate in candidates:
         safe = os.path.abspath(candidate)
         if os.path.commonpath(["/app/workspace", safe]) != "/app/workspace":
@@ -360,7 +364,9 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
         assistant_msg = {"role": "assistant", "content": full_content}
         if tool_calls:
             assistant_msg["tool_calls"] = tool_calls
-        append_and_save(messages, assistant_msg)
+            
+        if full_content or tool_calls:
+            append_and_save(messages, assistant_msg)
 
         if not tool_calls:
             if not full_content and in_thinking:
@@ -436,7 +442,6 @@ def main() -> None:
 
     print(f"Agent initialized with Main: {MODEL} | Fast: {FAST_MODEL} | Context: {MAX_CTX}")
     
-    # Warmup / preload main model immediately into VRAM with keep_alive=-1
     print(f"[System]: Preloading main model ({MODEL}) into VRAM...")
     try:
         OLLAMA.chat(

@@ -72,7 +72,7 @@ def _unit_files(unit_name: str, title: str, message: str, calendar: str, repeat:
     service_path = TIMER_DIR / f"{unit_name}.service"
     timer_path = TIMER_DIR / f"{unit_name}.timer"
     unit_title = str(title).replace("\n", " ").replace("\r", " ").replace("%", "%%")
-    service = f"""[Unit]\nDescription=Local Agent reminder: {unit_title}\n\n[Service]\nType=oneshot\nEnvironment=XDG_RUNTIME_DIR={XDG_RUNTIME_DIR}\nEnvironment=DBUS_SESSION_BUS_ADDRESS=unix:path={XDG_RUNTIME_DIR}/bus\nExecStart=/usr/bin/notify-send --app-name=LocalAgent {_systemd_quote(title)} {_systemd_quote(message)}\n"""
+    service = f"""[Unit]\nDescription=Local Agent reminder: {unit_title}\n\n[Service]\nType=oneshot\nEnvironment=XDG_RUNTIME_DIR={XDG_RUNTIME_DIR}\nEnvironment=DBUS_SESSION_BUS_ADDRESS=unix:path={XDG_RUNTIME_DIR}/bus\nExecStart=/usr/bin/notify-send --app-name=LocalAgent -- {_systemd_quote(title)} {_systemd_quote(message)}\n"""
     persistent = "true" if repeat == "once" else "false"
     timer = f"""[Unit]\nDescription=Local Agent reminder: {unit_title}\n\n[Timer]\nOnCalendar={calendar}\nPersistent={persistent}\nAccuracySec=1s\nUnit={unit_name}.service\n\n[Install]\nWantedBy=timers.target\n"""
     service_path.write_text(service, encoding="utf-8")

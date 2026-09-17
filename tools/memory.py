@@ -31,6 +31,7 @@ def init_db() -> None:
     """Initialize persistent memory and runtime storage."""
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+        conn.execute("PRAGMA busy_timeout=15000")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("CREATE TABLE IF NOT EXISTS memory (topic TEXT PRIMARY KEY, fact TEXT, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)")
@@ -241,7 +242,6 @@ def get_all_memories_prompt_summary() -> str:
     return "\n\n### Memory Policy\nRelevant long-term memories are retrieved per task; the complete memory store is not injected into context."
 
 
-# Compatibility wrappers for older callers. Arbitrary background Python is intentionally no longer started here.
 def start_background_task(task_name: str = "", python_code: str = "", timeout: int = 3600) -> str:
     """Deprecated: arbitrary Python is not launched as a detached thread."""
     return "Background Python execution is disabled by the durable runtime. Use queue_work() for explicit work items."

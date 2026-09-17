@@ -108,7 +108,7 @@ def gpu_snapshot_dict() -> dict:
 def ollama_runtime_snapshot() -> str:
     """Inspect models currently loaded by the configured Ollama server via /api/ps."""
     import requests
-    url = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/") + "/api/ps"
+    url = os.environ.get("OLLAMA_HOST", "[http://127.0.0.1:11434](http://127.0.0.1:11434)").rstrip("/") + "/api/ps"
     try:
         response = requests.get(url, timeout=5)
         response.raise_for_status()
@@ -134,7 +134,7 @@ def network_snapshot() -> str:
         except json.JSONDecodeError:
             snapshot["routes_error"] = stdout[:2000]
 
-    resolv = Path("/etc/resolv.conf")
+    resolv = Path("/host/etc/resolv.conf")
     try:
         snapshot["dns"] = [
             line.split()[1]
@@ -154,7 +154,7 @@ def network_snapshot() -> str:
 def network_reachability(targets: list[str] | None = None) -> str:
     """Check DNS/HTTPS reachability for a small set of configured public endpoints."""
     from .netutil import fetch_bytes
-    targets = targets or ["https://www.cloudflare.com/cdn-cgi/trace", "https://example.com/"]
+    targets = targets or ["[https://www.cloudflare.com/cdn-cgi/trace](https://www.cloudflare.com/cdn-cgi/trace)", "[https://example.com/](https://example.com/)"]
     results = []
     for target in targets[:5]:
         item = {"target": str(target)}

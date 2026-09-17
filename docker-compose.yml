@@ -51,6 +51,7 @@ services:
       - ./workspace:/app/workspace
       - ./memory:/app/memory
       - ./tools:/app/tools:ro
+      - ./worker.py:/app/worker.py:ro
       - /:/host:ro
       - /var/log:/host_log:ro
       - /run/user/1000/bus:/run/user/1000/bus

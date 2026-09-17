@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 from ollama import Client
@@ -27,16 +28,19 @@ def decompose_research_goal(research_goal: str) -> list[str]:
     try:
         client = Client(host=os.environ.get("OLLAMA_HOST", CONFIG.get("agent", {}).get("host", "http://localhost:11434")))
         response = client.generate(model=FAST_MODEL, prompt=prompt, format=schema, options=FAST_OPTIONS, keep_alive=0)
-        payload = json.loads(response.get("response", "{}"))
+        
+        raw = response.get("response", "{}").strip()
+        raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.MULTILINE).strip()
+        payload = json.loads(raw)
+        
         queries = [str(q).strip() for q in payload.get("queries", []) if str(q).strip()]
         return queries or [research_goal]
     except Exception:
         return [research_goal]
 
 
-def orchestrate_research(research_goal: str, output_format: str = "summary", max_queries: int = 3) -> str:
+def orchestrate_research(research_goal: str) -> str:
     """Queue durable research; use get_research_status() later for progress and result path."""
-    del output_format, max_queries
     result = json.loads(enqueue_research(research_goal))
     return json.dumps({
         "job_id": result.get("job_id"),
@@ -64,9 +68,8 @@ def schedule_research_reminder(research_topic: str, days_ahead: int = 7) -> str:
     )
 
 
-def batch_research(topics: list, output_format: str = "summary") -> str:
+def batch_research(topics: list) -> str:
     """Queue multiple durable research jobs and return their IDs."""
-    del output_format
     jobs = [json.loads(enqueue_research(str(topic))) for topic in topics[:20]]
     return json.dumps(jobs, indent=2)
 
@@ -76,9 +79,8 @@ def trending_analysis(base_topic: str) -> str:
     return orchestrate_research(f"Current trends and recent developments in {base_topic}")
 
 
-def research_with_constraints(goal: str, constraints: dict | None = None, output_format: str = "summary") -> str:
+def research_with_constraints(goal: str, constraints: dict | None = None) -> str:
     """Queue research with textual constraints appended to the research goal."""
-    del output_format
     constraints = constraints or {}
     suffix = ", ".join(f"{key}={value}" for key, value in constraints.items())
     enhanced = f"{goal} ({suffix})" if suffix else goal
