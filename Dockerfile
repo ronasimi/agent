@@ -17,6 +17,23 @@ RUN pacman -Syu --noconfirm && \
     bind \
     sqlite \
     systemd \
+    kitty-terminfo \
+    nss \
+    alsa-lib \
+    atk \
+    at-spi2-core \
+    cups \
+    libdrm \
+    mesa \
+    libxcomposite \
+    libxdamage \
+    libxrandr \
+    libxkbcommon \
+    pango \
+    cairo \
+    gdk-pixbuf2 \
+    fontconfig \
+    ttf-dejavu \
     && pacman -Scc --noconfirm
 
 WORKDIR /app
@@ -27,12 +44,19 @@ RUN pip install --no-cache-dir --break-system-packages \
     pyyaml \
     requests \
     beautifulsoup4 \
-    duckduckgo-search \
+    ddgs \
     wikipedia \
     pdf2image \
     zeroconf \
     ollama \
-    graphviz
+    graphviz \
+    playwright \
+    markdown \
+    weasyprint \
+    pygments
+
+# Install Playwright's headless Chromium browser
+RUN playwright install chromium
 
 # Default launch path (Interactive detached CLI mode)
 CMD ["python", "/app/agent.py"]

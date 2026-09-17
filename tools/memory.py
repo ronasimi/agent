@@ -162,13 +162,7 @@ def _run_background_task(task_name: str, python_code: str, timeout: int):
         conn.execute("INSERT OR REPLACE INTO background_tasks (task_name, status, output) VALUES (?, ?, ?)", (task_name, status, output))
 
 def start_background_task(task_name: str = "", python_code: str = "", timeout: int = 3600) -> str:
-    """Start a long-running python task in a background thread.
-    
-    Args:
-        task_name: Unique name identifier for the task.
-        python_code: Python code string to execute in the background workspace.
-        timeout: Maximum execution time in seconds (default: 3600).
-    """
+    """Start a long-running python task in a background thread."""
     if not task_name or not python_code: return "Error: Missing required 'task_name' or 'python_code' parameter."
         
     with sqlite3.connect(DB_PATH) as conn:
@@ -188,4 +182,20 @@ def check_background_task(task_name: str = "") -> str:
         row = cursor.fetchone()
     return json.dumps({"task_name": task_name, "status": row[0], "output": row[1], "timestamp": row[2]}) if row else f"No background task found with name '{task_name}'."
 
-# [The rest of the SQLite custom table functions remain unchanged, but they inherit the WAL concurrency benefits from the DB initialization above.]
+def get_all_memories_prompt_summary() -> str:
+    """Fetch all stored key-value memories from SQLite and format them for system prompt injection on boot."""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT topic, fact FROM memory")
+            rows = cursor.fetchall()
+            
+        if not rows:
+            return "\n\n### Long-Term Knowledge Base\n- [No memories recorded yet]"
+            
+        summary = "\n\n### Long-Term Knowledge Base (Loaded on Boot)\n"
+        for topic, fact in rows:
+            summary += f"- **[{topic}]**: {fact}\n"
+        return summary
+    except Exception as e:
+        return f"\n\n[System Warning: Unable to load knowledge base from DB: {str(e)}]"

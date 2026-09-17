@@ -1,18 +1,24 @@
+# ==========================================
+# FILE: docker-compose.yml
+# ==========================================
 services:
   agent:
     build: .
     image: agent
     container_name: agent
     restart: unless-stopped
-    pid: host                   # <--- Grants visibility into host processes
-    devices:                    
-      - /dev/video0:/dev/video0 # <--- Maps hardware (e.g., webcam)
+    stdin_open: true            
+    tty: true                   
+    pid: host                   
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
+      - OLLAMA_FLASH_ATTENTION=1
+      - OLLAMA_MAX_LOADED_MODELS=2              # <--- Enables concurrent model loading
       - DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
       - DISPLAY=:0
       - WAYLAND_DISPLAY=wayland-1 
+      - TERM=xterm-256color
     volumes:
       - ./config:/app/config
       - ./workspace:/app/workspace
@@ -24,3 +30,4 @@ services:
       - /var/log:/host_log:ro
       - /run/user/1000/bus:/run/user/1000/bus
       - ~/.config/systemd/user:/app/workspace/host_timers
+      - /etc/machine-id:/etc/machine-id:ro

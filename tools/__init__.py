@@ -10,7 +10,7 @@ from pathlib import Path
 ALL_TOOLS = []
 AVAILABLE_TOOLS_MAP = {}
 
-EXCLUDED_FUNCTIONS = {'init_db', 'load_tools', 'get_tools_prompt_summary', 'clear_chat_history'}
+EXCLUDED_FUNCTIONS = {'init_db', 'load_tools', 'get_tools_prompt_summary', 'clear_chat_history', 'get_all_memories_prompt_summary'}
 
 def load_tools():
     """Dynamically scan, test, and load all modules inside the tools directory."""
@@ -65,7 +65,8 @@ from .memory import (
     _init_checkpoint_db, 
     _load_chat_history_from_db, 
     _save_message_to_db, 
-    clear_chat_history
+    clear_chat_history,
+    get_all_memories_prompt_summary
 )
 
 __all__ = [
@@ -79,4 +80,5 @@ __all__ = [
     '_load_chat_history_from_db',
     '_save_message_to_db',
     'clear_chat_history',
+    'get_all_memories_prompt_summary',
 ]
