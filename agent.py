@@ -12,6 +12,7 @@ import re
 import base64
 import requests
 import uuid
+import sqlite3
 from io import BytesIO
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
@@ -232,7 +233,9 @@ def encode_image(path_str: str) -> str:
         try:
             resp = requests.get(path_str, headers={"User-Agent": "Agent-Auto-Vision/1.0"}, timeout=10)
             return base64.b64encode(resp.content).decode('utf-8')
-        except: return None
+        except Exception as e: 
+            print(f"  \033[93m[System]: Could not download image URL: {e}\033[0m")
+            return None
             
     candidates = [path_str, os.path.join("/app/workspace", path_str.lstrip('/')), os.path.join("/app/workspace", os.path.basename(path_str))]
     for p in candidates:
@@ -252,7 +255,8 @@ def encode_image(path_str: str) -> str:
                 else:
                     with open(p, "rb") as img_file: 
                         return base64.b64encode(img_file.read()).decode('utf-8')
-            except: pass
+            except Exception as e: 
+                print(f"  \033[93m[System]: Could not encode image file '{p}': {e}\033[0m")
     return None
 
 IMAGE_REGEX = r'(?:https?://[^\s>\"\']+\.(?:png|jpg|jpeg|webp|pdf)|/?[\w\-\./]+\.(?:png|jpg|jpeg|webp|pdf))'
@@ -411,7 +415,6 @@ while True:
             continue
             
         if user_input.lower() == '/tasks':
-            import sqlite3
             try:
                 with sqlite3.connect("/app/memory/knowledge.db") as conn:
                     cursor = conn.cursor()
@@ -477,7 +480,6 @@ while True:
             final_tool_calls = []
             if raw_tool_calls:
                 for tc in raw_tool_calls:
-                    # STRICT DICTIONARY / OBJECT SAFE PARSING
                     try:
                         if isinstance(tc, dict):
                             func = tc.get('function', {})
@@ -516,7 +518,8 @@ while True:
                         parsed = json.loads(json_match.group(1))
                         if parsed.get('name') in AVAILABLE_TOOLS_MAP:
                             final_tool_calls.append({'id': uuid.uuid4().hex, 'type': 'function', 'function': {'name': parsed['name'], 'arguments': parsed.get('arguments', parsed.get('parameters', {}))}})
-                    except json.JSONDecodeError: pass
+                    except Exception as e: 
+                        print(f"  \033[93m[System]: Failed to parse fallback JSON tool call: {e}\033[0m")
             
             asst_msg = {'role': 'assistant', 'content': full_content}
             if final_tool_calls: asst_msg['tool_calls'] = final_tool_calls

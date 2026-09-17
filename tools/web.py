@@ -5,25 +5,18 @@ import wikipedia
 from ddgs import DDGS
 
 def web_search(query: str = "") -> str:
-    """Search the web for current real-time information and return search snippets.
-    
-    Args:
-        query: Search keywords or question.
-    """
+    """Search the web for current real-time information and return search snippets."""
     if not query or not str(query).strip():
         return "Error: Missing required 'query' parameter."
     try:
-        results = DDGS().text(query, max_results=3)
+        # Wrap DDGS().text generator in list() to ensure valid JSON serialization
+        results = list(DDGS().text(query, max_results=3))
         return json.dumps(results)
     except Exception as e:
         return f"Web search error: {str(e)}"
 
 def wiki_search(query: str = "") -> str:
-    """Search Wikipedia for encyclopedic summaries and factual background.
-    
-    Args:
-        query: Topic or entity to search on Wikipedia.
-    """
+    """Search Wikipedia for encyclopedic summaries and factual background."""
     if not query or not str(query).strip():
         return "Error: Missing required 'query' parameter."
     try:
@@ -32,11 +25,7 @@ def wiki_search(query: str = "") -> str:
         return f"Wikipedia search error: {str(e)}"
 
 def browse_url(url: str = "") -> str:
-    """Fetch and extract clean text content from a live URL in real-time.
-    
-    Args:
-        url: The full http:// or https:// URL to browse and read.
-    """
+    """Fetch and extract clean text content from a live URL in real-time."""
     if not url or not str(url).strip():
         return "Error: Missing required 'url' parameter."
     try:

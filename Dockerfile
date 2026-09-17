@@ -34,26 +34,15 @@ RUN pacman -Syu --noconfirm && \
     gdk-pixbuf2 \
     fontconfig \
     ttf-dejavu \
-    && pacman -Scc --noconfirm
+    && pacman -Scc --noconfirm \
+    && rm -rf /var/cache/pacman/pkg/* \
+    && rm -rf /var/lib/pacman/sync/*
 
 WORKDIR /app
 
-# Upgrade pip and install standard harness requirements
-RUN pip install --no-cache-dir --break-system-packages \
-    prompt_toolkit \
-    pyyaml \
-    requests \
-    beautifulsoup4 \
-    ddgs \
-    wikipedia \
-    pdf2image \
-    zeroconf \
-    ollama \
-    graphviz \
-    playwright \
-    markdown \
-    weasyprint \
-    pygments
+# Copy requirement list and install
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
 
 # Install Playwright's headless Chromium browser
 RUN playwright install chromium

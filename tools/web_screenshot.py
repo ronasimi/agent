@@ -6,20 +6,15 @@ except ImportError:
     sync_playwright = None
 
 def take_web_screenshot(url: str, output_filename: str = "web_screenshot.png") -> str:
-    """Navigate to a URL in a headless browser, wait for it to load, and save a screenshot image.
-    
-    Args:
-        url: The full HTTP/HTTPS URL to visit.
-        output_filename: The name of the PNG file to save (defaults to web_screenshot.png).
-    """
+    """Navigate to a URL in a headless browser, wait for it to load, and save a screenshot image."""
     if not sync_playwright:
         return "Error: playwright package is not installed."
         
     if not url.startswith("http"):
         url = "http://" + url
         
-    if not output_filename.startswith("/app/workspace/"):
-        output_filename = os.path.join("/app/workspace", os.path.basename(output_filename))
+    # Unconditionally sanitize filename to prevent path traversal
+    output_filename = os.path.join("/app/workspace", os.path.basename(output_filename))
         
     if not output_filename.endswith('.png'):
         output_filename += '.png'

@@ -15,6 +15,7 @@ def list_tool_files() -> str:
 def create_or_update_tool(filename: str, python_code: str) -> str:
     """Create or update a Python tool after verifying syntax with py_compile. 
     Filename must end with .py. Call reload_tools after using this."""
+    filename = os.path.basename(filename) # Prevent path traversal
     if not filename.endswith(".py"):
         return "Error: Filename must end with .py"
     
@@ -53,6 +54,7 @@ def create_or_update_tool(filename: str, python_code: str) -> str:
 
 def read_tool_source(filename: str) -> str:
     """Read the source code of a tool in the tools directory."""
+    filename = os.path.basename(filename) # Prevent path traversal
     if not filename.endswith(".py"):
         filename += ".py"
     filepath = os.path.join(TOOLS_DIR, filename)

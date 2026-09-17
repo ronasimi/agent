@@ -10,25 +10,26 @@ import os
 import yaml
 
 DB_PATH = "/app/memory/knowledge.db"
+DB_TIMEOUT = 10.0 # Added explicit timeout for concurrent multi-threading
 
 with open('/app/config/config.yaml', 'r') as f:
     config = yaml.safe_load(f)
 EMBED_MODEL = config.get('agent', {}).get('embed_model', 'nomic-embed-text')
 
 def init_db():
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute('''CREATE TABLE IF NOT EXISTS memory (topic TEXT PRIMARY KEY, fact TEXT)''')
         conn.execute('''CREATE TABLE IF NOT EXISTS semantic_memory (id INTEGER PRIMARY KEY AUTOINCREMENT, topic TEXT, fact TEXT, embedding TEXT)''')
         conn.execute('''CREATE TABLE IF NOT EXISTS background_tasks (task_name TEXT PRIMARY KEY, status TEXT, output TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
 def _init_chat_db():
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute('''CREATE TABLE IF NOT EXISTS chat_history (id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT, content TEXT, name TEXT, extra TEXT)''')
 
 def _init_checkpoint_db():
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute('''CREATE TABLE IF NOT EXISTS checkpoints (task_name TEXT PRIMARY KEY, state_data TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
@@ -37,7 +38,7 @@ def _save_message_to_db(msg: dict):
     content = msg.get('content', '')
     name = msg.get('name')
     
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT role, content FROM chat_history ORDER BY id DESC LIMIT 1")
         last = cursor.fetchone()
@@ -48,11 +49,11 @@ def _save_message_to_db(msg: dict):
     if 'tool_calls' in msg: extra_data['tool_calls'] = msg['tool_calls']
     extra = json.dumps(extra_data) if extra_data else None
     
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
         conn.execute("INSERT INTO chat_history (role, content, name, extra) VALUES (?, ?, ?, ?)", (role, content, name, extra))
 
 def _load_chat_history_from_db(limit: int = 20) -> list:
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT role, content, name, extra FROM chat_history ORDER BY id DESC LIMIT ?", (limit * 2,))
         rows = cursor.fetchall()
@@ -78,16 +79,17 @@ def _load_chat_history_from_db(limit: int = 20) -> list:
     return messages[-limit:] if len(messages) > limit else messages
 
 def clear_chat_history() -> str:
-    with sqlite3.connect(DB_PATH) as conn: conn.execute("DELETE FROM chat_history")
+    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn: 
+        conn.execute("DELETE FROM chat_history")
     return "Chat history cleared."
 
 def remember(topic: str = "general_knowledge", fact: str = "Recorded by agent action") -> str:
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
         conn.execute("INSERT OR REPLACE INTO memory (topic, fact) VALUES (?, ?)", (str(topic), str(fact)))
     return f"Successfully committed '{topic}' to long-term memory."
 
 def search_memory(query: str = "") -> str:
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
         cursor = conn.cursor()
         query_str = str(query).strip().lower()
         if not query_str or query_str in ["memory", "all", "everything"]:
@@ -110,7 +112,7 @@ def remember_semantic(topic: str = "general_knowledge", fact: str = "") -> str:
         if 'embedding' in res: embedding_json = json.dumps(res['embedding'])
     except Exception as e: return f"Embedding generation failed: {e}"
         
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
         conn.execute("INSERT INTO semantic_memory (topic, fact, embedding) VALUES (?, ?, ?)", (str(topic), str(fact), embedding_json))
     return f"Successfully stored semantic memory under topic '{topic}'."
 
@@ -129,7 +131,7 @@ def search_semantic_memory(query: str = "", limit: int = 5) -> str:
         query_embedding = res.get('embedding', [])
     except Exception: return search_memory(query)
         
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT topic, fact, embedding FROM semantic_memory")
         rows = cursor.fetchall()
@@ -158,14 +160,14 @@ def _run_background_task(task_name: str, python_code: str, timeout: int):
         output = f"Error executing background task: {str(e)}"
         status = "failed"
         
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
         conn.execute("INSERT OR REPLACE INTO background_tasks (task_name, status, output) VALUES (?, ?, ?)", (task_name, status, output))
 
 def start_background_task(task_name: str = "", python_code: str = "", timeout: int = 3600) -> str:
     """Start a long-running python task in a background thread."""
     if not task_name or not python_code: return "Error: Missing required 'task_name' or 'python_code' parameter."
         
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
         conn.execute("INSERT OR REPLACE INTO background_tasks (task_name, status, output) VALUES (?, ?, ?)",
                      (task_name, "running", "Task is currently executing in the background..."))
                      
@@ -176,7 +178,7 @@ def start_background_task(task_name: str = "", python_code: str = "", timeout: i
 def check_background_task(task_name: str = "") -> str:
     """Check the status and output of a background task."""
     if not task_name: return "Error: Missing required 'task_name' parameter."
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT status, output, timestamp FROM background_tasks WHERE task_name = ?", (task_name,))
         row = cursor.fetchone()
@@ -185,7 +187,7 @@ def check_background_task(task_name: str = "") -> str:
 def get_all_memories_prompt_summary() -> str:
     """Fetch all stored key-value memories from SQLite and format them for system prompt injection on boot."""
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT topic, fact FROM memory")
             rows = cursor.fetchall()

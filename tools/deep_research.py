@@ -18,7 +18,8 @@ FAST_OPTIONS = config['agent'].get('fast_options', config['agent'].get('options'
 DB_PATH = "/app/memory/knowledge.db"
 
 def _get_db():
-    conn = sqlite3.connect(DB_PATH)
+    # Added timeout to prevent locking during concurrent background scrapes
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS research_buffer (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,9 +43,11 @@ def deep_search_and_scrape(query: str, max_results: int = 3) -> str:
         ddgs = DDGS()
         results = list(ddgs.text(query, max_results=max_results))
     except Exception as e:
+        conn.close()
         return f"Search execution failed: {str(e)}"
 
     if not results:
+        conn.close()
         return f"No search results found for query: '{query}'."
 
     reflections = []
@@ -53,7 +56,11 @@ def deep_search_and_scrape(query: str, max_results: int = 3) -> str:
 
     for r in results:
         url = r.get("href")
-        title = r.get("title", "")
+        title = r.get("title", "Untitled")
+        
+        # Skip if DDGS returns a malformed entry without a URL
+        if not url:
+            continue
         
         # Deduplication check
         cursor.execute("SELECT id FROM research_buffer WHERE url = ?", (url,))

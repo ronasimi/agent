@@ -14,7 +14,7 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       - OLLAMA_FLASH_ATTENTION=1
-      - OLLAMA_MAX_LOADED_MODELS=2              # <--- Enables concurrent model loading
+      - OLLAMA_MAX_LOADED_MODELS=2
       - DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
       - DISPLAY=:0
       - WAYLAND_DISPLAY=wayland-1 
@@ -25,7 +25,6 @@ services:
       - ./memory:/app/memory
       - ./tools:/app/tools
       - ./agent.py:/app/agent.py
-      - ./memory.py:/app/memory.py
       - /:/host:ro
       - /var/log:/host_log:ro
       - /run/user/1000/bus:/run/user/1000/bus

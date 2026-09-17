@@ -40,16 +40,13 @@ class NetworkServiceListener(ServiceListener):
             })
 
 def scan_mdns(timeout: int = 5) -> str:
-    """Scan the local network and cross-subnet repeaters using mDNS to discover live devices and their OS/hardware types.
-    
-    Args:
-        timeout: Number of seconds to listen for mDNS broadcast packets.
-    """
+    """Scan the local network and cross-subnet repeaters using mDNS to discover live devices and their OS/hardware types."""
     if Zeroconf is None:
         return "Error: 'zeroconf' python package is missing. Use execute_shell to run: pip install zeroconf"
 
-    # Protect against the LLM hallucinating uselessly short timeouts
     timeout = max(int(timeout), 5)
+    browsers = []
+    zc = None
 
     try:
         zc = Zeroconf()
@@ -63,9 +60,7 @@ def scan_mdns(timeout: int = 5) -> str:
         ]
         
         browsers = [ServiceBrowser(zc, st, listener) for st in service_types]
-        
         time.sleep(timeout)
-        zc.close()
         
         if not listener.services:
             return "No mDNS services discovered during the listening window."
@@ -75,3 +70,8 @@ def scan_mdns(timeout: int = 5) -> str:
         
     except Exception as e:
         return f"mDNS scan encountered an error: {str(e)}"
+    finally:
+        for b in browsers:
+            b.cancel()
+        if zc:
+            zc.close()

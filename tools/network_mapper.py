@@ -2,6 +2,19 @@ import subprocess
 import json
 import ipaddress
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+
+def _ping_host(ip: str):
+    try:
+        result = subprocess.run(
+            ["ping", "-c", "1", "-W", "1", ip],
+            capture_output=True, text=True, timeout=2
+        )
+        if "bytes from" in result.stdout or "ttl=" in result.stdout.lower():
+            return ip
+    except Exception:
+        pass
+    return None
 
 def _scan_hosts(network: str) -> list[str]:
     try:
@@ -10,17 +23,10 @@ def _scan_hosts(network: str) -> list[str]:
         return []
 
     hosts = []
-    for ip in list(net.hosts())[:254]:
-        ip_str = str(ip)
-        try:
-            result = subprocess.run(
-                ["ping", "-c", "1", "-W", "1", ip_str],
-                capture_output=True, text=True, timeout=2
-            )
-            if "bytes from" in result.stdout or "ttl=" in result.stdout.lower():
-                hosts.append(ip_str)
-        except Exception:
-            pass
+    # Utilize threading to scan a /24 subnet in ~2 seconds instead of 5+ minutes
+    with ThreadPoolExecutor(max_workers=50) as executor:
+        results = executor.map(_ping_host, (str(ip) for ip in list(net.hosts())[:254]))
+        hosts = [ip for ip in results if ip]
     return hosts
 
 def _get_os_info(host: str) -> dict:
@@ -106,12 +112,7 @@ def _generate_dot(hosts: list[dict]) -> str:
     return dot
 
 def map_network(network: str = "192.168.1.0/24", output_filename: str = "network_map.png") -> str:
-    """Scan local subnets, perform OS discovery, and generate a visual topology diagram for VLM analysis.
-    
-    Args:
-        network: Subnet CIDR block to scan (defaults to '192.168.1.0/24').
-        output_filename: Output image filename inside /app/workspace (defaults to 'network_map.png').
-    """
+    """Scan local subnets, perform OS discovery, and generate a visual topology diagram for VLM analysis."""
     output_path = f"/app/workspace/{Path(output_filename).name}"
     hosts = _scan_hosts(network)
     if not hosts:
@@ -125,10 +126,14 @@ def map_network(network: str = "192.168.1.0/24", output_filename: str = "network
         src = graphviz.Source(dot_code)
         src.format = "png"
         src.render(filename=Path(output_path).stem, directory=Path(output_path).parent, cleanup=True)
-    except ImportError:
+    except Exception:
+        # Graceful fallback if graphviz python module fails
         dot_file = Path(output_path).with_suffix(".dot")
         with open(dot_file, "w") as f:
             f.write(dot_code)
-        subprocess.run(["dot", "-Tpng", str(dot_file), "-o", output_path], check=True)
+        try:
+            subprocess.run(["dot", "-Tpng", str(dot_file), "-o", output_path], check=True, capture_output=True)
+        except Exception as e:
+            return f"Error generating graph map: {e}"
         
     return f"Network map successfully generated and saved to {output_path}"
