@@ -1,12 +1,27 @@
-"""Manage optional workspace custom tools."""
+# ==========================================
+# FILE: tools/tool_manager.py
+# ==========================================
+"""Manage optional workspace custom tools using the fast coder model with validation."""
 from __future__ import annotations
 
+import ast
+import importlib.util
 import os
-import subprocess
-import tempfile
+from pathlib import Path
+from ollama import Client
+from .config import load_config
 
-TOOLS_DIR = "/app/workspace/custom_tools"
-os.makedirs(TOOLS_DIR, exist_ok=True)
+TOOLS_DIR = Path("/app/workspace/custom_tools")
+TOOLS_DIR.mkdir(parents=True, exist_ok=True)
+
+CONFIG = load_config()
+FAST_MODEL = CONFIG.get("agent", {}).get("fast_model", "qwen2.5-coder:1.5b")
+FAST_OPTIONS = CONFIG.get("agent", {}).get("fast_options", {"num_ctx": 4096, "temperature": 0.0})
+OLLAMA_HOST = CONFIG.get("agent", {}).get("host", os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434"))
+
+
+def _fast_client() -> Client:
+    return Client(host=os.environ.get("OLLAMA_HOST", OLLAMA_HOST))
 
 
 def list_tool_files() -> str:
@@ -18,40 +33,106 @@ def list_tool_files() -> str:
         return f"Error: {exc}"
 
 
-def create_or_update_tool(filename: str, python_code: str) -> str:
-    """Syntax-check and save a custom tool; custom functions must use @agent_tool to become callable."""
-    filename = os.path.basename(str(filename))
-    if not filename.endswith(".py") or filename.startswith("_"):
-        return "Error: Filename must end with .py and may not start with '_'."
-    code = str(python_code)
-    with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False, encoding="utf-8") as temp_file:
-        temp_file.write(code)
-        temp_path = temp_file.name
+def _validate_tool_code(code_text: str) -> tuple[bool, str]:
+    """Validate python AST syntax and required @agent_tool decorator presence."""
     try:
-        result = subprocess.run(["python", "-m", "py_compile", temp_path], capture_output=True, text=True, timeout=10)
-        if result.returncode != 0:
-            return f"Syntax validation failed; tool was not saved.\n{result.stderr or result.stdout}"
-    finally:
+        tree = ast.parse(code_text)
+    except SyntaxError as exc:
+        return False, f"SyntaxError: {exc}"
+
+    has_tool = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            for decorator in node.decorator_list:
+                if isinstance(decorator, ast.Name) and decorator.id == "agent_tool":
+                    has_tool = True
+                elif isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Name) and decorator.func.id == "agent_tool":
+                    has_tool = True
+    if not has_tool:
+        return False, "Validation Error: No function decorated with @agent_tool found in the code."
+
+    return True, "Valid"
+
+
+def create_or_update_tool(tool_name: str, specification: str) -> str:
+    """Generate, validate, test-load, and save a custom tool using the fast coder model with self-correction."""
+    tool_name = str(tool_name).strip().lower().replace(".py", "").replace(" ", "_")
+    if not tool_name:
+        return "Error: Missing required 'tool_name' parameter."
+    
+    filename = f"{tool_name}.py"
+    if filename.startswith("_"):
+        return "Error: Custom tool filename may not start with '_'."
+
+    file_path = TOOLS_DIR / filename
+
+    system_prompt = (
+        "You are an expert Python tool developer for an autonomous AI agent harness. "
+        "Write clean, self-contained Python code for a custom agent tool based on the user specification. "
+        "Every tool function must be decorated with `@agent_tool` (imported from `tools.tool_registry`), "
+        "include comprehensive type annotations, and have a clear docstring describing its behavior. "
+        "Return ONLY valid Python source code inside a ```python markdown block, with no extra conversational prose."
+    )
+
+    current_code = ""
+    error_feedback = ""
+    client = _fast_client()
+
+    # Self-correction loop (up to 3 attempts)
+    for attempt in range(1, 4):
+        prompt = (
+            f"Tool Name: {tool_name}\n"
+            f"Specification: {specification}\n"
+        )
+        if error_feedback:
+            prompt += f"\nPrevious attempt failed validation:\n{error_feedback}\nPlease correct the code."
+
         try:
-            os.remove(temp_path)
-        except OSError:
-            pass
-    path = os.path.join(TOOLS_DIR, filename)
-    try:
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(code)
-    except Exception as exc:
-        return f"Error saving tool: {exc}"
-    return f"Saved custom tool to {path}. Call /reload to activate decorated @agent_tool functions."
+            response = client.generate(
+                model=FAST_MODEL,
+                prompt=f"{system_prompt}\n\n{prompt}",
+                options=FAST_OPTIONS,
+                keep_alive=0,  # Unload fast coder model immediately after completion
+            )
+            raw_text = response.get("response", "")
+
+            # Extract python code block
+            if "```python" in raw_text:
+                parts = raw_text.split("```python", 1)[1]
+                current_code = parts.split("```", 1)[0].strip()
+            elif "```" in raw_text:
+                parts = raw_text.split("```", 1)[1]
+                current_code = parts.split("```", 1)[0].strip()
+            else:
+                current_code = raw_text.strip()
+
+            # Validate syntax and decorators
+            is_valid, msg = _validate_tool_code(current_code)
+            if not is_valid:
+                error_feedback = msg
+                continue
+
+            # Test dynamic import and importability check
+            file_path.write_text(current_code, encoding="utf-8")
+            spec = importlib.util.spec_from_file_location(f"custom_test_{tool_name}", file_path)
+            if spec is None or spec.loader is None:
+                raise RuntimeError("Could not load module spec for testing.")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+
+            return f"Successfully generated, validated, and saved custom tool to {file_path}. Call /reload to activate."
+        except Exception as exc:
+            error_feedback = str(exc)
+
+    return f"Error: Failed to generate a valid custom tool after 3 attempts. Last error: {error_feedback}"
 
 
 def read_tool_source(filename: str) -> str:
     """Read a custom tool source file."""
     filename = os.path.basename(str(filename))
-    path = os.path.join(TOOLS_DIR, filename if filename.endswith(".py") else filename + ".py")
+    path = TOOLS_DIR / (filename if filename.endswith(".py") else filename + ".py")
     try:
-        with open(path, encoding="utf-8") as handle:
-            return handle.read()
+        return path.read_text(encoding="utf-8")
     except Exception as exc:
         return f"Error: {exc}"
 

@@ -278,7 +278,7 @@ def _finalize_after_limit(messages: list[dict]) -> None:
         {"role": "user", "content": "The tool-call safety limit was reached. Summarize what has been established, what remains incomplete, and any useful next steps. Do not call tools."},
     ]
     try:
-        response = OLLAMA.chat(model=MODEL, messages=prompt, options=MAIN_OPTIONS, tools=[], think=False)
+        response = OLLAMA.chat(model=MODEL, messages=prompt, options=MAIN_OPTIONS, tools=[], think=False, keep_alive=-1)
         msg = response.get("message", {}) if isinstance(response, dict) else getattr(response, "message", {})
         content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
         if content:
@@ -328,6 +328,7 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
                 options=MAIN_OPTIONS,
                 think=thinking_enabled,
                 stream=True,
+                keep_alive=-1,
             )
             for chunk in stream:
                 chunk_msg = chunk.get("message", {}) if isinstance(chunk, dict) else getattr(chunk, "message", {})
@@ -434,6 +435,21 @@ def main() -> None:
     thinking_enabled = THINKING_DEFAULT
 
     print(f"Agent initialized with Main: {MODEL} | Fast: {FAST_MODEL} | Context: {MAX_CTX}")
+    
+    # Warmup / preload main model immediately into VRAM with keep_alive=-1
+    print(f"[System]: Preloading main model ({MODEL}) into VRAM...")
+    try:
+        OLLAMA.chat(
+            model=MODEL,
+            messages=[{"role": "user", "content": "warmup"}],
+            options=MAIN_OPTIONS,
+            keep_alive=-1,
+            think=False,
+        )
+        print(f"[System]: Main model successfully loaded and pinned in VRAM.")
+    except Exception as exc:
+        print(f"[System]: Warning - failed to preload main model: {exc}")
+
     print("Commands: /research, /jobs, /job <id>, /cancel-job <id>, /reminders, /tools, /think [on/off], /reload, /forget, exit")
     print("Background research runs in the durable worker process and survives CLI restarts.")
 

@@ -140,7 +140,7 @@ def _synthesize(topic: str, evidence: str, job_id: str) -> str:
         },
         {"role": "user", "content": f"Target: {topic}\n\nEvidence:\n{evidence}"},
     ]
-    stream = client.chat(model=MODEL, messages=prompt, options=MAIN_OPTIONS, keep_alive=0, stream=True)
+    stream = client.chat(model=MODEL, messages=prompt, options=MAIN_OPTIONS, keep_alive=-1, stream=True)
     output = []
     for chunk in stream:
         msg = chunk.get("message", {}) if isinstance(chunk, dict) else getattr(chunk, "message", {})
@@ -364,6 +364,20 @@ def main() -> None:
     last_monitor = 0.0
     last_heartbeat = 0.0
     print(f"[worker] started as {worker_id}; database={DB_PATH}")
+
+    # Warmup / preload main model immediately into VRAM with keep_alive=-1 on worker startup
+    print(f"[worker] Preloading main model ({MODEL}) into VRAM...")
+    try:
+        Client(host=os.environ.get("OLLAMA_HOST", OLLAMA_HOST)).chat(
+            model=MODEL,
+            messages=[{"role": "user", "content": "warmup"}],
+            options=MAIN_OPTIONS,
+            keep_alive=-1,
+            think=False,
+        )
+        print(f"[worker] Main model successfully loaded and pinned in VRAM.")
+    except Exception as exc:
+        print(f"[worker] Warning - failed to preload main model: {exc}")
 
     while True:
         now = time.monotonic()
