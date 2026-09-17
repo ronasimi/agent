@@ -321,33 +321,32 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
         in_content = False
 
         try:
-            with Spinner(f"Model turn {iteration}/{MAX_ITERATIONS}"):
-                stream = OLLAMA.chat(
-                    model=MODEL,
-                    messages=active,
-                    tools=TOOL_SCHEMAS,
-                    options=MAIN_OPTIONS,
-                    think=thinking_enabled,
-                    stream=True,
-                )
-                for chunk in stream:
-                    chunk_msg = chunk.get("message", {}) if isinstance(chunk, dict) else getattr(chunk, "message", {})
-                    thinking = chunk_msg.get("thinking", "") if isinstance(chunk_msg, dict) else getattr(chunk_msg, "thinking", "")
-                    content = chunk_msg.get("content", "") if isinstance(chunk_msg, dict) else getattr(chunk_msg, "content", "")
-                    calls = chunk_msg.get("tool_calls", []) if isinstance(chunk_msg, dict) else getattr(chunk_msg, "tool_calls", [])
-                    if calls:
-                        raw_tool_calls = calls
-                    if thinking:
-                        if not in_thinking:
-                            print("\n\033[90m[Thinking Trace]:")
-                            in_thinking = True
-                        print(thinking, end="", flush=True)
-                    if content:
-                        if not in_content:
-                            print("\033[0m\nAgent: ", end="", flush=True)
-                            in_content = True
-                        print(content, end="", flush=True)
-                        full_content += content
+            stream = OLLAMA.chat(
+                model=MODEL,
+                messages=active,
+                tools=TOOL_SCHEMAS,
+                options=MAIN_OPTIONS,
+                think=thinking_enabled,
+                stream=True,
+            )
+            for chunk in stream:
+                chunk_msg = chunk.get("message", {}) if isinstance(chunk, dict) else getattr(chunk, "message", {})
+                thinking = chunk_msg.get("thinking", "") if isinstance(chunk_msg, dict) else getattr(chunk_msg, "thinking", "")
+                content = chunk_msg.get("content", "") if isinstance(chunk_msg, dict) else getattr(chunk_msg, "content", "")
+                calls = chunk_msg.get("tool_calls", []) if isinstance(chunk_msg, dict) else getattr(chunk_msg, "tool_calls", [])
+                if calls:
+                    raw_tool_calls = calls
+                if thinking:
+                    if not in_thinking:
+                        print("\n\033[90m[Thinking Trace]:")
+                        in_thinking = True
+                    print(thinking, end="", flush=True)
+                if content:
+                    if not in_content:
+                        print("\033[0m\nAgent: ", end="", flush=True)
+                        in_content = True
+                    print(content, end="", flush=True)
+                    full_content += content
         except Exception as exc:
             print(f"\n\033[91m[!] Ollama error: {exc}\033[0m")
             if iteration < 2:
