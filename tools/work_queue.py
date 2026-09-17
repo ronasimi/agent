@@ -57,9 +57,8 @@ def queue_work(
     estimated_hours: float = 1.0
 ) -> str:
     """
-    Add a work item to the autonomous queue.
-    
-    The agent will pick this up on next cycle if priority warrants.
+    Add a durable work-list item. This legacy queue is a planning list; the dedicated
+    runtime job queue is used for executable background research.
     
     Args:
         title: Work title
@@ -97,7 +96,7 @@ def queue_work(
 
 def get_next_work_item() -> dict:
     """
-    Retrieve highest-priority pending work (agent autonomous scheduler).
+    Retrieve the highest-priority pending work-list item.
     
     Returns: Work item dictionary or None
     

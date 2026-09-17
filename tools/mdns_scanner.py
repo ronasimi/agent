@@ -1,10 +1,13 @@
-import time
 import json
+import time
 
 try:
-    from zeroconf import Zeroconf, ServiceBrowser, ServiceListener
-except ImportError:
+    from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
+except ImportError:  # optional dependency; the rest of the agent must still load
     Zeroconf = None
+    ServiceBrowser = None
+    ServiceListener = object
+
 
 class NetworkServiceListener(ServiceListener):
     def __init__(self):
@@ -18,60 +21,57 @@ class NetworkServiceListener(ServiceListener):
 
     def add_service(self, zc, type_, name):
         info = zc.get_service_info(type_, name)
-        if info:
-            addr_list = info.parsed_addresses() if hasattr(info, 'parsed_addresses') else []
-            if not addr_list and info.addresses:
-                addr_list = [".".join(map(str, addr)) for addr in info.addresses]
+        if not info:
+            return
+        addr_list = info.parsed_addresses() if hasattr(info, "parsed_addresses") else []
+        if not addr_list and getattr(info, "addresses", None):
+            addr_list = [".".join(map(str, addr)) for addr in info.addresses]
+        props = {}
+        for key, value in (info.properties or {}).items():
+            key_str = key.decode("utf-8", "ignore") if isinstance(key, bytes) else str(key)
+            val_str = value.decode("utf-8", "ignore") if isinstance(value, bytes) else str(value)
+            props[key_str] = val_str
+        self.services.append({
+            "device_name": name.split(".")[0],
+            "service_type": type_,
+            "server": info.server,
+            "ip_addresses": addr_list,
+            "port": info.port,
+            "properties": props,
+        })
 
-            props = {}
-            if info.properties:
-                for k, v in info.properties.items():
-                    key_str = k.decode('utf-8', 'ignore') if isinstance(k, bytes) else str(k)
-                    val_str = v.decode('utf-8', 'ignore') if isinstance(v, bytes) else str(v)
-                    props[key_str] = val_str
-
-            self.services.append({
-                "device_name": name.split('.')[0],
-                "service_type": type_,
-                "server": info.server,
-                "ip_addresses": addr_list,
-                "port": info.port,
-                "properties": props
-            })
 
 def scan_mdns(timeout: int = 5) -> str:
-    """Scan the local network and cross-subnet repeaters using mDNS to discover live devices and their OS/hardware types."""
-    if Zeroconf is None:
-        return "Error: 'zeroconf' python package is missing. Use execute_shell to run: pip install zeroconf"
-
-    timeout = max(int(timeout), 5)
+    """Listen briefly for local mDNS services and return discovered devices as JSON."""
+    if Zeroconf is None or ServiceBrowser is None:
+        return "Error: zeroconf is not installed."
+    timeout = max(1, min(int(timeout), 30))
     browsers = []
     zc = None
-
     try:
         zc = Zeroconf()
         listener = NetworkServiceListener()
-        
         service_types = [
-            "_http._tcp.local.", "_ssh._tcp.local.", "_smb._tcp.local.", 
-            "_printer._tcp.local.", "_ipp._tcp.local.", "_googlecast._tcp.local.", 
-            "_workstation._tcp.local.", "_device-info._tcp.local.",
-            "_afpovertcp._tcp.local.", "_nvstream._tcp.local."
+            "_http._tcp.local.", "_ssh._tcp.local.", "_smb._tcp.local.", "_printer._tcp.local.",
+            "_ipp._tcp.local.", "_googlecast._tcp.local.", "_workstation._tcp.local.", "_device-info._tcp.local.",
+            "_afpovertcp._tcp.local.", "_nvstream._tcp.local.",
         ]
-        
-        browsers = [ServiceBrowser(zc, st, listener) for st in service_types]
+        browsers = [ServiceBrowser(zc, service_type, listener) for service_type in service_types]
         time.sleep(timeout)
-        
-        if not listener.services:
-            return "No mDNS services discovered during the listening window."
-            
-        unique_services = {f"{s['device_name']}-{s['service_type']}": s for s in listener.services}.values()
-        return json.dumps(list(unique_services), indent=2)
-        
-    except Exception as e:
-        return f"mDNS scan encountered an error: {str(e)}"
+        unique = {}
+        for service in listener.services:
+            unique[f"{service['device_name']}|{service['service_type']}|{service['server']}"] = service
+        return json.dumps(list(unique.values()), ensure_ascii=False, indent=2) if unique else "No mDNS services discovered during the listening window."
+    except Exception as exc:
+        return f"mDNS scan encountered an error: {exc}"
     finally:
-        for b in browsers:
-            b.cancel()
+        for browser in browsers:
+            try:
+                browser.cancel()
+            except Exception:
+                pass
         if zc:
-            zc.close()
+            try:
+                zc.close()
+            except Exception:
+                pass

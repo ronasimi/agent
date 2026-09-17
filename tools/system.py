@@ -1,3 +1,10 @@
+"""Privileged-in-container execution helpers.
+
+These tools deliberately never infer a missing command from model prose. The
+agent must issue an explicit native tool call with a concrete argument.
+"""
+from __future__ import annotations
+
 import os
 import subprocess
 import tempfile
@@ -5,46 +12,78 @@ import tempfile
 WORKSPACE_DIR = "/app/workspace"
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
 
-def execute_shell(command: str = "") -> str:
-    """Execute a bash/shell command in the workspace directory."""
-    if not command or not str(command).strip():
-        return "Error: Missing required 'command' parameter."
-    
-    try:
-        result = subprocess.run(command, shell=True, cwd=WORKSPACE_DIR, 
-                                capture_output=True, text=True, timeout=30, 
-                                stdin=subprocess.DEVNULL)
-        output = f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
-        return output.strip() or "Command executed successfully with no output."
-    except subprocess.TimeoutExpired:
-        return "Error: Command timed out after 30 seconds."
-    except Exception as e:
-        return f"Execution error: {str(e)}"
 
-def execute_python(code: str = "") -> str:
-    """Execute Python code natively within the workspace and return the output."""
-    if not code or not str(code).strip():
-        return "Error: Missing required 'code' parameter."
-        
+_FORBIDDEN_SHELL_PATTERNS = (
+    "/host", "/host_log", "nsenter", "docker", "podman",
+    "systemctl --user", "loginctl", "machinectl", "mount ", "umount ",
+)
+
+
+def _shell_policy_violation(command: str) -> str | None:
+    lowered = str(command).lower()
+    for pattern in _FORBIDDEN_SHELL_PATTERNS:
+        if pattern.lower() in lowered:
+            return f"Generic shell access to host-control path/command '{pattern}' is blocked; use a dedicated typed tool."
+    return None
+
+
+def execute_shell(command: str = "", timeout: int = 30) -> str:
+    """Execute an explicit shell command inside the agent container workspace; no command auto-recovery is performed."""
+    if not str(command).strip():
+        return "Error: Missing required 'command' parameter."
+    violation = _shell_policy_violation(command)
+    if violation:
+        return "Error: " + violation
+    timeout = max(1, min(int(timeout), 120))
     try:
-        with tempfile.NamedTemporaryFile(dir=WORKSPACE_DIR, suffix=".py", mode="w", delete=False) as f:
-            f.write(code)
-            script_path = f.name
-        
-        result = subprocess.run(["python", os.path.basename(script_path)], cwd=WORKSPACE_DIR, 
-                                capture_output=True, text=True, timeout=30,
-                                stdin=subprocess.DEVNULL)
-        
-        if os.path.exists(script_path):
-            os.remove(script_path)
-            
-        output = f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
-        return output.strip() or "Python execution completed with no output."
+        result = subprocess.run(
+            ["bash", "-lc", str(command)],
+            cwd=WORKSPACE_DIR,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+            env=os.environ.copy(),
+        )
+        output = f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}".strip()
+        return output or "Command completed successfully with no output."
     except subprocess.TimeoutExpired:
-        if 'script_path' in locals() and os.path.exists(script_path):
-            os.remove(script_path)
-        return "Error: Python script execution timed out after 30 seconds."
-    except Exception as e:
-        if 'script_path' in locals() and os.path.exists(script_path):
-            os.remove(script_path)
-        return f"Python execution error: {str(e)}"
+        return f"Error: Command timed out after {timeout} seconds."
+    except Exception as exc:
+        return f"Execution error: {exc}"
+
+
+def execute_python(code: str = "", timeout: int = 30) -> str:
+    """Execute explicit Python code inside the agent container workspace."""
+    if not str(code).strip():
+        return "Error: Missing required 'code' parameter."
+    violation = _shell_policy_violation(code)
+    if violation:
+        return "Error: " + violation
+    timeout = max(1, min(int(timeout), 120))
+    script_path = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=WORKSPACE_DIR, suffix=".py", mode="w", delete=False, encoding="utf-8") as handle:
+            handle.write(str(code))
+            script_path = handle.name
+        result = subprocess.run(
+            ["python", script_path],
+            cwd=WORKSPACE_DIR,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+            env=os.environ.copy(),
+        )
+        output = f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}".strip()
+        return output or "Python execution completed with no output."
+    except subprocess.TimeoutExpired:
+        return f"Error: Python execution timed out after {timeout} seconds."
+    except Exception as exc:
+        return f"Python execution error: {exc}"
+    finally:
+        if script_path:
+            try:
+                os.remove(script_path)
+            except OSError:
+                pass

@@ -1,49 +1,65 @@
+"""Safe web search and browsing helpers."""
+from __future__ import annotations
+
 import json
+
 import requests
 from bs4 import BeautifulSoup
-import wikipedia
-from ddgs import DDGS
+
+from .netutil import fetch_text
+
 
 def web_search(query: str = "") -> str:
-    """Search the web for current real-time information and return search snippets."""
-    if not query or not str(query).strip():
+    """Search the public web for current information and return a small JSON result set."""
+    query = str(query).strip()
+    if not query:
         return "Error: Missing required 'query' parameter."
+    if len(query) > 1000:
+        return "Error: Query is limited to 1000 characters."
     try:
-        # Wrap DDGS().text generator in list() to ensure valid JSON serialization
-        results = list(DDGS().text(query, max_results=3))
-        return json.dumps(results)
-    except Exception as e:
-        return f"Web search error: {str(e)}"
+        from ddgs import DDGS
+        results = list(DDGS().text(query, max_results=5))
+        compact = [
+            {
+                "title": item.get("title", ""),
+                "url": item.get("href", ""),
+                "snippet": item.get("body", ""),
+            }
+            for item in results
+        ]
+        return json.dumps(compact, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        return f"Web search error: {exc}"
+
 
 def wiki_search(query: str = "") -> str:
-    """Search Wikipedia for encyclopedic summaries and factual background."""
-    if not query or not str(query).strip():
+    """Search Wikipedia for encyclopedic background information."""
+    query = str(query).strip()
+    if not query:
         return "Error: Missing required 'query' parameter."
+    if len(query) > 1000:
+        return "Error: Query is limited to 1000 characters."
     try:
-        return wikipedia.summary(query, sentences=3)
-    except Exception as e:
-        return f"Wikipedia search error: {str(e)}"
+        import wikipedia
+        return wikipedia.summary(query, sentences=4, auto_suggest=True)
+    except Exception as exc:
+        return f"Wikipedia search error: {exc}"
+
 
 def browse_url(url: str = "") -> str:
-    """Fetch and extract clean text content from a live URL in real-time."""
-    if not url or not str(url).strip():
+    """Fetch a public HTTP(S) URL with redirect, size, and private-network protections and extract readable text."""
+    if not str(url).strip():
         return "Error: Missing required 'url' parameter."
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        response = requests.get(url, headers=headers, timeout=15)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        for element in soup(["script", "style", "nav", "footer", "header", "aside"]):
-            element.decompose()
-            
-        text = soup.get_text(separator='\n', strip=True)
-        
-        if len(text) > 12000:
-            return text[:12000] + "\n[Content truncated due to length...]"
-        return text.strip() or "The page returned no readable text content."
-    except Exception as e:
-        return f"Error browsing URL: {str(e)}"
+        final_url, content_type, body = fetch_text(url, max_bytes=2 * 1024 * 1024)
+        if content_type in {"application/json", "application/xml", "text/xml", "text/plain"}:
+            text = body
+        else:
+            soup = BeautifulSoup(body, "html.parser")
+            for element in soup(["script", "style", "nav", "footer", "header", "aside", "noscript", "form"]):
+                element.decompose()
+            text = "\n".join(soup.stripped_strings)
+        text = text[:20000]
+        return f"URL: {final_url}\nContent-Type: {content_type}\n\n{text or 'The page returned no readable text content.'}"
+    except Exception as exc:
+        return f"Error browsing URL: {exc}"

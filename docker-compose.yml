@@ -7,26 +7,52 @@ services:
     image: agent
     container_name: agent
     restart: unless-stopped
-    stdin_open: true            
-    tty: true                   
-    pid: host                   
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    stdin_open: true
+    tty: true
+    pid: host
+    network_mode: host
+    user: "1000:1000"
     environment:
-      - OLLAMA_FLASH_ATTENTION=1
-      - OLLAMA_MAX_LOADED_MODELS=2
+      - XDG_RUNTIME_DIR=/run/user/1000
       - DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
-      - DISPLAY=:0
-      - WAYLAND_DISPLAY=wayland-1 
+      - DISPLAY=${DISPLAY:-:0}
+      - WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-1}
+      - TZ=${TZ:-America/Toronto}
       - TERM=xterm-256color
     volumes:
-      - ./config:/app/config
+      - ./config:/app/config:ro
       - ./workspace:/app/workspace
       - ./memory:/app/memory
-      - ./tools:/app/tools
-      - ./agent.py:/app/agent.py
+      - ./tools:/app/tools:ro
+      - ./agent.py:/app/agent.py:ro
       - /:/host:ro
       - /var/log:/host_log:ro
       - /run/user/1000/bus:/run/user/1000/bus
-      - ~/.config/systemd/user:/app/workspace/host_timers
+      - ${HOME}/.config/systemd/user:/home/agent/.config/systemd/user
+      - /etc/machine-id:/etc/machine-id:ro
+
+  worker:
+    build: .
+    image: agent
+    container_name: agent-worker
+    restart: unless-stopped
+    user: "1000:1000"
+    pid: host
+    network_mode: host
+    environment:
+      - XDG_RUNTIME_DIR=/run/user/1000
+      - DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+      - DISPLAY=${DISPLAY:-:0}
+      - WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-1}
+      - TZ=${TZ:-America/Toronto}
+    command: ["python", "/app/worker.py"]
+    volumes:
+      - ./config:/app/config:ro
+      - ./workspace:/app/workspace
+      - ./memory:/app/memory
+      - ./tools:/app/tools:ro
+      - /:/host:ro
+      - /var/log:/host_log:ro
+      - /run/user/1000/bus:/run/user/1000/bus
+      - ${HOME}/.config/systemd/user:/home/agent/.config/systemd/user
       - /etc/machine-id:/etc/machine-id:ro
