@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
-import os
 import re
 from pathlib import Path
 
@@ -33,6 +32,7 @@ MUTATING_TOOLS = {
 BUILTINS = [
     ("memory", "remember"), ("memory", "search_memory"),
     ("memory", "remember_semantic"), ("memory", "search_semantic_memory"),
+    ("memory", "read_observation"),
     ("job_tools", "enqueue_research"), ("job_tools", "get_research_status"),
     ("job_tools", "list_background_jobs"), ("job_tools", "cancel_background_job"),
     ("reminders", "schedule_reminder"), ("reminders", "cancel_reminder"), ("reminders", "list_reminders"),
@@ -114,15 +114,41 @@ _TOOL_SELECTION_STOPWORDS = {
 }
 
 _ALWAYS_TOOL_NAMES = {
-    "read_file", "write_file", "web_search", "browse_url", "host_snapshot", "network_snapshot",
-    "search_memory", "remember", "enqueue_research", "schedule_reminder", "execute_shell", "execute_python",
+    "read_file", "web_search", "host_snapshot", "network_snapshot", "enqueue_research", "execute_shell",
 }
+
+_TOOL_BUNDLES = (
+    (
+        {"file", "files", "code", "coding", "python", "script", "repo", "project"},
+        ("read_file", "write_file", "read_observation", "execute_python"),
+    ),
+    (
+        {"web", "internet", "search", "url", "site", "research", "source", "sources"},
+        ("web_search", "browse_url", "enqueue_research", "get_research_status", "read_observation"),
+    ),
+    (
+        {"cpu", "memory", "ram", "disk", "gpu", "process", "log", "shell", "command", "system", "host"},
+        ("host_snapshot", "execute_shell", "read_host_file", "read_host_journal", "tail_host_log", "read_observation"),
+    ),
+    (
+        {"network", "wifi", "dns", "route", "port", "mdns", "lan"},
+        ("network_snapshot", "network_reachability", "map_network", "scan_mdns"),
+    ),
+    (
+        {"remember", "preference", "recall"},
+        ("search_memory", "remember"),
+    ),
+    (
+        {"remind", "reminder", "schedule", "timer"},
+        ("schedule_reminder", "cancel_reminder", "list_reminders"),
+    ),
+)
 
 def _selection_tokens(text: str) -> set[str]:
     return {token for token in re.findall(r"[a-z0-9_]+", str(text).lower()) if token not in _TOOL_SELECTION_STOPWORDS and len(token) > 1}
 
-def select_tool_schemas(user_text: str, max_tools: int = 20) -> list[dict]:
-    """Select a bounded native tool schema set using deterministic lexical relevance."""
+def select_tool_schemas(user_text: str, max_tools: int = 12) -> list[dict]:
+    """Select a small, deterministic core plus stable intent bundles and lexical matches."""
     if len(TOOL_SCHEMAS) <= max_tools:
         return list(TOOL_SCHEMAS)
 
@@ -145,10 +171,23 @@ def select_tool_schemas(user_text: str, max_tools: int = 20) -> list[dict]:
         if name in _ALWAYS_TOOL_NAMES:
             selected[name] = schema
 
-    for _, name, schema in scored:
-        if len(selected) >= max_tools:
-            break
-        selected[name] = schema
+    by_name = {schema.get("function", {}).get("name"): schema for schema in TOOL_SCHEMAS}
+    matched_bundle = False
+    for bundle_tokens, bundle_names in _TOOL_BUNDLES:
+        if not tokens & bundle_tokens:
+            continue
+        matched_bundle = True
+        for name in bundle_names:
+            if len(selected) >= max_tools:
+                break
+            if name in by_name:
+                selected[name] = by_name[name]
+
+    if not matched_bundle:
+        for _, name, schema in scored:
+            if len(selected) >= max_tools:
+                break
+            selected[name] = schema
 
     return [schema for schema in TOOL_SCHEMAS if schema.get("function", {}).get("name") in selected]
 
@@ -173,17 +212,22 @@ def get_tools_prompt_summary(compact: bool = False) -> str:
 load_tools()
 
 from .memory import (
-    init_db,
     _init_chat_db,
     _init_checkpoint_db,
     _load_chat_history_from_db,
     _save_message_to_db,
+    apply_conversation_compaction,
     clear_chat_history,
     get_all_memories_prompt_summary,
+    get_compacted_through_id,
     get_conversation_summary,
-    set_conversation_summary,
+    get_messages_for_compaction,
     get_relevant_memories,
+    init_db,
+    read_observation,
     search_memory,
+    set_conversation_summary,
+    store_tool_observation,
 )
 
 __all__ = [
@@ -191,6 +235,7 @@ __all__ = [
     "load_tools", "get_tools_prompt_summary", "select_tool_schemas", "normalize_arguments",
     "init_db", "_init_chat_db", "_init_checkpoint_db", "_load_chat_history_from_db",
     "_save_message_to_db", "clear_chat_history", "get_all_memories_prompt_summary",
-    "get_conversation_summary", "set_conversation_summary", "get_relevant_memories",
-    "search_memory", "agent_tool",
+    "get_conversation_summary", "set_conversation_summary", "get_compacted_through_id",
+    "get_messages_for_compaction", "apply_conversation_compaction", "store_tool_observation",
+    "read_observation", "get_relevant_memories", "search_memory", "agent_tool",
 ]

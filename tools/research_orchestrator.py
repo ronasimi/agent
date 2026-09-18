@@ -4,17 +4,17 @@ from __future__ import annotations
 import json
 import os
 import re
-from pathlib import Path
 
 from ollama import Client
 
-from .job_tools import enqueue_research, get_research_status
 from .config import load_config
+from .job_tools import enqueue_research
 from .reminders import schedule_reminder
 
 CONFIG = load_config()
-FAST_MODEL = CONFIG.get("agent", {}).get("fast_model", "qwen2.5-coder:1.5b")
+FAST_MODEL = CONFIG.get("agent", {}).get("fast_model", "qwen3.5:2b")
 FAST_OPTIONS = CONFIG.get("agent", {}).get("fast_options", {"num_ctx": 4096, "temperature": 0.0})
+FAST_KEEP_ALIVE = CONFIG.get("worker", {}).get("fast_model_keep_alive", -1)
 
 
 def decompose_research_goal(research_goal: str) -> list[str]:
@@ -27,7 +27,7 @@ def decompose_research_goal(research_goal: str) -> list[str]:
     prompt = f"Break this research goal into 3-5 complementary web searches. Goal: {research_goal}"
     try:
         client = Client(host=os.environ.get("OLLAMA_HOST", CONFIG.get("agent", {}).get("host", "http://localhost:11434")))
-        response = client.generate(model=FAST_MODEL, prompt=prompt, format=schema, options=FAST_OPTIONS, keep_alive=0)
+        response = client.generate(model=FAST_MODEL, prompt=prompt, format=schema, options=FAST_OPTIONS, keep_alive=FAST_KEEP_ALIVE, think=False)
         
         raw = response.get("response", "{}").strip()
         raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.MULTILINE).strip()

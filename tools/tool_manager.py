@@ -8,15 +8,18 @@ import ast
 import importlib.util
 import os
 from pathlib import Path
+
 from ollama import Client
+
 from .config import load_config
 
 TOOLS_DIR = Path("/app/workspace/custom_tools")
 TOOLS_DIR.mkdir(parents=True, exist_ok=True)
 
 CONFIG = load_config()
-FAST_MODEL = CONFIG.get("agent", {}).get("fast_model", "qwen2.5-coder:1.5b")
+FAST_MODEL = CONFIG.get("agent", {}).get("fast_model", "qwen3.5:2b")
 FAST_OPTIONS = CONFIG.get("agent", {}).get("fast_options", {"num_ctx": 4096, "temperature": 0.0})
+FAST_KEEP_ALIVE = CONFIG.get("worker", {}).get("fast_model_keep_alive", -1)
 OLLAMA_HOST = CONFIG.get("agent", {}).get("host", os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434"))
 
 
@@ -109,7 +112,8 @@ def create_or_update_tool(tool_name: str, specification: str) -> str:
                 model=FAST_MODEL,
                 prompt=f"{system_prompt}\n\n{prompt}",
                 options=options,
-                keep_alive=-1,
+                keep_alive=FAST_KEEP_ALIVE,
+                think=False,
             )
             raw_text = response.get("response", "")
 
@@ -141,19 +145,9 @@ def create_or_update_tool(tool_name: str, specification: str) -> str:
                 file_path.unlink(missing_ok=True)
                 raise import_exc
 
-            try:
-                client.generate(model=FAST_MODEL, prompt="", keep_alive=0)
-            except Exception:
-                pass
-
             return f"Successfully generated, validated, and saved custom tool to {file_path}. Call /reload to activate."
         except Exception as exc:
             error_feedback = str(exc)
-
-    try:
-        client.generate(model=FAST_MODEL, prompt="", keep_alive=0)
-    except Exception:
-        pass
 
     return f"Error: Failed to generate a valid custom tool after 3 attempts. Last error: {error_feedback}"
 
@@ -170,7 +164,7 @@ def read_tool_source(filename: str) -> str:
 
 def reload_tools() -> str:
     """Reload the explicit builtin registry and workspace custom tools."""
-    from . import load_tools, AVAILABLE_TOOLS_MAP
+    from . import AVAILABLE_TOOLS_MAP, load_tools
     count, errors = load_tools()
     text = f"Tools reloaded: {count} active tools.\nActive: {', '.join(AVAILABLE_TOOLS_MAP.keys())}"
     if errors:

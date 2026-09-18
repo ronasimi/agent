@@ -5,7 +5,7 @@ agent:
   # The Ollama server is intentionally external to this container.
   host: "http://127.0.0.1:11434"
   model: "qwen3.5:4b"
-  fast_model: "qwen2.5-coder:1.5b"
+  fast_model: "qwen3.5:2b"
   embed_model: "nomic-embed-text"
   timezone: "America/Toronto"
   semantic_memory_enabled: false
@@ -15,7 +15,7 @@ agent:
   max_iterations: 30
 
   # Native tool schemas are selected deterministically per turn to reduce prefill.
-  max_tools_per_turn: 20
+  max_tools_per_turn: 12
 
   # Context compaction normally reuses the main model so a single-model Ollama
   # server does not evict the interactive model. Set this to the fast model only
@@ -32,11 +32,12 @@ agent:
   # VRAM budget, bounded context + compaction is preferable to a huge KV cache.
   context:
     num_ctx: 16384
-    reserve_tokens: 2048
-    recent_messages: 12
+    reserve_tokens: 1536
+    recent_messages: 16
     summary_keep_messages: 8
-    compact_at_tokens: 9000
-    max_tool_output_chars: 10000
+    compact_at_tokens: 7500
+    max_tool_output_chars: 5000
+    tool_loop_reserve_tokens: 4096
 
   main_options:
     num_ctx: 16384
@@ -45,7 +46,7 @@ agent:
     top_k: 20
 
   fast_options:
-    num_ctx: 4096
+    num_ctx: 8192
     temperature: 0.0
     top_p: 0.9
     top_k: 20
@@ -75,6 +76,9 @@ worker:
   # This is a scheduling guard, not an Ollama server limit. Keep the actual
   # Ollama MAX_LOADED_MODELS setting on the Ollama server/container.
   max_agent_vram_mb: 7200
+  # Keep the Qwen3.5 fast/research model resident between worker calls. Set to
+  # 0 if the Ollama server can hold only one model without memory pressure.
+  fast_model_keep_alive: -1
 
 host_monitor:
   enabled: true

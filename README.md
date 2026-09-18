@@ -1,250 +1,219 @@
-# Autonomous Local AI Agent Harness — Performance Update
+# Autonomous Local AI Agent Harness
 
-This bundle contains the performance-focused changes for the local Ollama agent harness. The update targets the two latency-sensitive parts of an interactive agent loop:
+Local Ollama agent with an interactive CLI, typed tools, durable SQLite state,
+background research, rolling context summaries, host/network awareness, and
+systemd-based reminders.
 
-1. **Prefill:** reduce the amount of prompt and tool-schema data that must be processed before generation starts.
-2. **Inference responsiveness:** keep background research from competing with an active interactive turn and avoid unnecessary model eviction/reload cycles.
+This version is optimized for low time-to-first-token, high prompt-cache reuse,
+bounded context growth, and foreground responsiveness.
 
-The harness remains a local, containerized Ollama agent with durable SQLite state, explicit typed tools, a persistent research worker, host/network awareness, reminders, and bounded conversation context.
+## Performance architecture
 
-## What changed
+### Stable prompt prefixes
 
-### Lower prefill cost
+- The system prompt is static. Query-specific memories are inserted immediately
+  before the current user request instead of modifying the system message.
+- The active historical prefix is built once at the start of a user turn.
+- Each tool iteration appends assistant calls and tool results as a suffix.
+  Earlier messages are not rebuilt from a shifting message window.
+- Tool schemas use a fixed six-tool core plus deterministic domain bundles.
+  Generic turns do not carry the full tool inventory.
 
-The interactive loop previously rebuilt prompt-related state on every tool-call iteration and exposed the complete native tool inventory to every model request. The updated loop now:
+These rules give Ollama a byte-stable prefix across tool iterations, which is
+the prompt shape most likely to benefit from prefix caching.
 
-- Builds the turn-level system prompt once.
-- Resolves the conversation summary once per turn and reuses it through the tool loop.
-- Selects a deterministic subset of native Ollama tool schemas for each user request.
-- Keeps a small always-available set of core tools for safe fallback behavior.
-- Replaces the full model-facing tool inventory with a compact tool policy. Native Ollama schemas remain authoritative for actual arguments and tool calling.
-- Explicitly reserves prompt budget for the selected native tool schemas when building the active context.
-- Continues truncating oversized tool output before it can consume the conversation budget.
+### Turn-aware context trimming
 
-The tool selector is deterministic and lexical rather than embedding-based, so selection itself adds negligible CPU work and does not require another model call.
+Context selection is token-budgeted and groups messages by complete user turns.
+Old turns are removed as units, while the current user/tool transaction is
+preserved. If the current turn itself is too large, trimming happens in this
+order:
 
-### Faster normal turns
+1. tool observations,
+2. assistant prose,
+3. current user content as a last resort.
 
-Normal interactive turns now default to `think: false`. This avoids paying reasoning-token latency on routine requests while preserving the existing `/think on` control for reasoning-heavy work.
+The recent_messages setting remains for API compatibility, but selection now
+uses the token budget and whole-turn boundaries.
 
-### Avoid unnecessary model eviction
+### Foreground-free compaction
 
-Context compaction defaults to the main model instead of the fast model. This matters on an Ollama deployment configured for a single resident model: using a second model for compaction can evict the main model and force another load before the user's next request.
+Conversation compaction never runs before interactive generation. Once a final
+answer has streamed, the CLI may enqueue a low-priority context_compaction job.
+The worker waits for the interactive lease to become idle, summarizes a fixed
+history prefix, and atomically advances the compacted_through_id watermark.
 
-Set `compaction_model` to the fast model only when the Ollama server has enough memory/VRAM to keep both models resident without causing reload pressure.
+On restart, only chat rows newer than that watermark are loaded. Already
+summarized rows cannot re-enter context or be summarized repeatedly.
 
-### Protect the interactive path
+### Large observation handles
 
-The CLI records an interactive-inference activity lease in SQLite. The worker checks that lease before starting resource-intensive research operations and defers work while the interactive path is active or was used recently.
+Tool results larger than max_tool_output_chars are stored in
+tool_observations. The model receives a head/tail preview and an opaque
+observation ID. read_observation retrieves a bounded slice without carrying
+the entire result through every later inference.
 
-The worker also runs at a lower OS scheduling priority (`nice(5)`) so background processing yields more readily to the interactive process.
+### Foreground-priority model scheduling
 
-### Faster retry behavior
+The worker checks the interactive activity lease immediately before every
+research or compaction model request: planning, each page distillation,
+evaluation, final synthesis, and context compaction. If the foreground is busy,
+the job is checkpointed and released without consuming a retry.
 
-Transient Ollama errors on the interactive path use a short retry delay rather than a one-second stall, reducing perceived latency after a recoverable connection hiccup.
+The worker no longer performs a duplicate main-model warmup at startup.
 
-### Prefill/inference telemetry
+## Default models
 
-The interactive CLI now prints Ollama timing counters when available, including:
+    agent:
+      model: "qwen3.5:4b"
+      fast_model: "qwen3.5:2b"
 
-- `prompt_eval_count`
-- `prompt_eval_cached_count`
-- `prompt_eval_duration`
-- `eval_count`
-- `eval_duration`
+Qwen3.5 2B is used for non-thinking research planning, source distillation,
+coverage evaluation, and ordinary custom-tool generation. The larger model
+handles interactive responses, final research synthesis, and rolling-summary
+compaction by default. Routine fast-model calls explicitly use think: false.
 
-These values make it possible to distinguish prompt/prefill cost from generated-token cost and to verify whether repeated tool-loop requests are benefiting from prompt caching on the installed Ollama version.
+## Important configuration
 
-## Performance configuration
+The optimized defaults are in config/config.yaml:
 
-The optimized defaults are in `config/config.yaml`:
+    agent:
+      thinking_default: false
+      show_perf_stats: true
+      max_tools_per_turn: 12
 
-```yaml
-agent:
-  model: "qwen3.5:4b"
-  fast_model: "qwen2.5-coder:1.5b"
-  thinking_default: false
-  show_perf_stats: true
-  max_tools_per_turn: 20
+      context:
+        num_ctx: 16384
+        reserve_tokens: 1536
+        recent_messages: 16
+        summary_keep_messages: 8
+        compact_at_tokens: 7500
+        max_tool_output_chars: 5000
+        tool_loop_reserve_tokens: 4096
 
-  compaction_model: ""
-  compaction_options:
-    num_ctx: 4096
-    temperature: 0.0
-    top_p: 0.9
-    top_k: 20
-    num_predict: 512
+      main_options:
+        num_ctx: 16384
+        temperature: 0.4
+        top_p: 0.9
+        top_k: 20
 
-  context:
-    num_ctx: 16384
-    reserve_tokens: 2048
-    recent_messages: 12
-    summary_keep_messages: 8
-    compact_at_tokens: 9000
-    max_tool_output_chars: 10000
+      fast_options:
+        num_ctx: 8192
+        temperature: 0.0
+        top_p: 0.9
+        top_k: 20
 
-worker:
-  poll_interval_seconds: 3
-  heartbeat_seconds: 15
-  stale_job_seconds: 180
-  interactive_cooldown_seconds: 10
-  min_available_memory_mb: 900
-  max_agent_vram_mb: 7200
-```
+    worker:
+      interactive_cooldown_seconds: 10
+      fast_model_keep_alive: -1
 
-### `max_tools_per_turn`
+fast_model_keep_alive: -1 keeps Qwen3.5 2B resident between worker calls.
+Use 0 when the machine cannot keep both models resident without memory pressure.
 
-This is the primary prefill control. A value of `20` is a conservative default for a tool-rich harness. Lower values can reduce schema prefill further but increase the chance that a specialized tool is omitted from a turn. The selector always preserves the core fallback tools.
+## Ollama server settings
 
-### `reserve_tokens`
+Apply ollama.env.example to the Ollama server/container, not the agent:
 
-This reserves context budget for the native tool schemas. Without the reservation, a long conversation can consume nearly the entire `num_ctx` before schemas are accounted for.
+    OLLAMA_MAX_LOADED_MODELS=2
+    OLLAMA_NUM_PARALLEL=1
+    OLLAMA_FLASH_ATTENTION=1
+    OLLAMA_KV_CACHE_TYPE=q8_0
 
-### `compaction_model`
+If both models do not fit comfortably, use OLLAMA_MAX_LOADED_MODELS=1 and set
+worker.fast_model_keep_alive to 0.
 
-An empty value means **reuse the main model**. This is the preferred setting for a one-model-at-a-time Ollama deployment.
+KV-cache quantization should be benchmarked on the target backend. The harness
+does not set experimental llama-server RAM-cache variables.
 
-For a system capable of keeping both models loaded, set for example:
+## Telemetry
 
-```yaml
-compaction_model: "qwen2.5-coder:1.5b"
-```
+When show_perf_stats is enabled, each streamed response reports available
+Ollama counters:
 
-## Recommended Ollama server settings
+    TTFT 620 ms; prompt 2180; cached 1734 (79.5%); uncached 446;
+    prefill 198.0 tok/s; generation 31 in 2820 ms (11.0 tok/s); load 0 ms
 
-For a roughly 8 GiB VRAM budget, keep Ollama's residency and request parallelism conservative:
+This distinguishes time to first output, prompt cache reuse, uncached prefill,
+generation speed, and model load time. Not every Ollama version or backend
+returns every field.
 
-```text
-OLLAMA_MAX_LOADED_MODELS=1
-OLLAMA_NUM_PARALLEL=1
-OLLAMA_FLASH_ATTENTION=1
-```
+## Runtime layout
 
-These variables belong on the **Ollama server/container**, not on `agent` or `agent-worker`.
+- agent.py — interactive CLI and foreground tool loop.
+- worker.py — durable research, compaction, and host monitoring.
+- tools/context.py — turn grouping, token budgeting, and trimming.
+- tools/memory.py — memories, history watermark, and observations.
+- tools/runtime.py — durable jobs, checkpoints, leases, and deferral.
+- tools/deep_research.py — planning, collection, distillation, and evaluation.
+- config/config.yaml — models, context budgets, and worker policy.
 
-The harness intentionally does not try to manage Ollama's server-wide model residency policy.
+SQLite WAL mode allows both containers to share memory/knowledge.db.
 
-## Runtime architecture
+## Research lifecycle
 
-The runtime has two processes/containers:
+Research runs as a durable state machine:
 
-- `agent` — interactive CLI and primary inference path.
-- `agent-worker` — durable background research and monitoring.
+    plan -> search/fetch/distill -> evaluate -> gap search -> synthesize -> persist
 
-Long-running research is represented as a durable job in SQLite rather than being kept inside the foreground conversation. The worker claims jobs, checkpoints progress, renews heartbeats, retries transient failures, and can resume stale work after a crash or restart.
-
-Research follows the state machine:
-
-`plan → search/fetch → evaluate coverage → targeted gap search → synthesize → persist report`
-
-Interactive inference is treated as the latency-sensitive path. The worker therefore yields when the foreground interaction lease is active or recently active.
-
-## Existing features retained
-
-- Local Ollama integration with native structured tool calls.
-- Bounded rolling conversation summaries and query-specific memory retrieval.
-- Durable research jobs and checkpoints.
-- Host snapshots for CPU, RAM, disk, temperatures, optional GPU telemetry, and loaded Ollama models.
-- Host-network awareness for interfaces, routes, DNS, listening sockets, and bounded reachability checks.
-- Optional mDNS discovery and bounded network mapping.
-- Persistent desktop reminders using systemd user timers and `notify-send`.
-- Explicit typed tool registry; malformed/missing arguments are rejected instead of extracting shell commands from model prose.
-- SSRF-aware outbound HTTP handling with private/loopback protection, bounded redirects, response-size limits, and content-type checks.
-- Workspace path validation with symlink resolution.
-- Opt-in custom tools using `@agent_tool`.
+Jobs checkpoint after each phase and source query. They can be cancelled,
+retried after transient failures, or recovered after a stale worker heartbeat.
+Reports are written to workspace/research as Markdown and, when available, PDF.
 
 ## CLI commands
 
-```text
-/research <topic>       queue durable research
-/jobs                   list durable background jobs
-/job <id>               inspect one job/checkpoint
-/cancel-job <id>       cancel a job
-/reminders              list active reminder records
-/think [on/off]         toggle model thinking
-/tools                  show active typed tools
-/reload                 reload builtins/custom tools
-/forget                 clear chat history and rolling summary
-exit                    exit the interactive CLI
-```
+    /research <topic>      queue durable research
+    /jobs                  list durable jobs
+    /job <id>              inspect a job
+    /cancel-job <id>       cancel a job
+    /reminders             list reminders
+    /think [on/off]        toggle explicit thinking
+    /tools                 show the complete tool inventory
+    /reload                reload built-in and custom tools
+    /forget                clear history, summary, and stored observations
+    exit                   close the CLI
 
 ## Custom tools
 
-Custom tools live under `workspace/custom_tools/` and must explicitly opt in:
+Custom tools live in workspace/custom_tools and must opt in explicitly:
 
-```python
-from tools.tool_registry import agent_tool
+    from tools.tool_registry import agent_tool
 
-@agent_tool(name="hello", description="Say hello to a person.", readonly=True)
-def hello(name: str = "world") -> str:
-    return f"Hello, {name}!"
-```
+    @agent_tool(name="hello", description="Say hello.", readonly=True)
+    def hello(name: str = "world") -> str:
+        return f"Hello, {name}!"
 
-After saving the file, run `/reload`.
+Run /reload after adding or changing a tool.
 
 ## Deployment
 
-The original project uses Docker Compose with separate `agent` and `agent-worker` services. Both containers use the host network namespace for network awareness, and the project mounts the host paths required for telemetry, workspace data, and user-level systemd reminders.
+Ensure the configured models exist:
 
-Before starting the updated runtime, verify that the configured Ollama models exist:
+    ollama pull qwen3.5:4b
+    ollama pull qwen3.5:2b
+    ollama ls
 
-```bash
-ollama ls
-```
+Build and start:
 
-Typical startup:
+    docker compose build
+    docker compose up -d worker
+    docker compose run --rm agent
 
-```bash
-docker compose build
-docker compose up -d worker
-docker compose run --rm agent
-```
+Or keep both services running:
 
-Or run both services persistently:
+    docker compose up -d agent worker
 
-```bash
-docker compose up -d agent worker
-```
-
-## Updating an existing checkout
-
-This performance bundle is an **update bundle**, not a replacement for the original repository. Copy the updated files into the existing project while retaining the original Docker, dependency, and auxiliary tool files.
-
-The files changed by this update are:
-
-```text
-agent.py
-worker.py
-tools/__init__.py
-tools/context.py
-config/config.yaml
-tests/test_context.py
-tests/test_registry.py
-```
-
-`agent.patch` contains the corresponding unified patch, and `PERFORMANCE_REVIEW.md` records the implementation and validation details.
+The project uses host networking and read-only host mounts for existing
+system/network inspection features. Review docker-compose.yml before deployment.
 
 ## Validation
 
-The updated test set passes:
+    python -m compileall -q .
+    python -m pytest -q
 
-```text
-10 tests passed
-```
+The included suite covers token budgeting, turn boundaries, durable jobs,
+foreground deferral, compaction watermarks, observation slices, reminders,
+network URL validation, and tool selection.
 
-The tests cover context/schema behavior and the registry changes. End-to-end Ollama latency was not benchmarked in this build environment because it does not contain the target Ollama/GPU runtime.
-
-Use the CLI performance counters on the target machine to measure real prefill and generation latency after deployment. Compare `prompt_eval_duration` and `prompt_eval_cached_count` before and after changes, using the same model, context size, and workload.
-
-## Tuning guidance
-
-For an interactive laptop with limited VRAM, prioritize these settings in order:
-
-1. Keep `OLLAMA_NUM_PARALLEL=1`.
-2. Avoid keeping a second model resident unless there is enough VRAM for both.
-3. Keep `thinking_default: false` and enable thinking only for tasks that benefit from it.
-4. Keep `max_tools_per_turn` bounded; lower it if tool-schema prefill dominates your traces.
-5. Keep `compact_at_tokens` comfortably below `num_ctx` so compaction happens before the model reaches a hard context limit.
-6. Watch the printed Ollama counters rather than optimizing solely from subjective typing/token speed.
-
-The target is not maximum throughput. The target is **low interactive latency with predictable background progress**.
+End-to-end latency must be benchmarked on the target Ollama/GPU runtime. Use
+the printed counters with identical prompts and model state when comparing
+settings.

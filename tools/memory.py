@@ -8,11 +8,11 @@ import json
 import math
 import os
 import sqlite3
-from typing import Any, Optional
+import uuid
+from typing import Any
 
-
-from .runtime import DB_PATH, DB_TIMEOUT, init_runtime_db
 from .config import load_config
+from .runtime import DB_PATH, DB_TIMEOUT, init_runtime_db
 
 config = load_config()
 EMBED_MODEL = config.get("agent", {}).get("embed_model", "nomic-embed-text")
@@ -37,7 +37,19 @@ def init_db() -> None:
         conn.execute("CREATE TABLE IF NOT EXISTS memory (topic TEXT PRIMARY KEY, fact TEXT, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)")
         conn.execute("CREATE TABLE IF NOT EXISTS semantic_memory (id INTEGER PRIMARY KEY AUTOINCREMENT, topic TEXT, fact TEXT, embedding TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
         conn.execute("CREATE TABLE IF NOT EXISTS chat_history (id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT, content TEXT, name TEXT, extra TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
-        conn.execute("CREATE TABLE IF NOT EXISTS conversation_state (id INTEGER PRIMARY KEY CHECK(id = 1), summary TEXT NOT NULL DEFAULT '', updated_at TEXT DEFAULT CURRENT_TIMESTAMP)")
+        conn.execute("CREATE TABLE IF NOT EXISTS conversation_state (id INTEGER PRIMARY KEY CHECK(id = 1), summary TEXT NOT NULL DEFAULT '', compacted_through_id INTEGER NOT NULL DEFAULT 0, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)")
+        state_columns = {row[1] for row in conn.execute("PRAGMA table_info(conversation_state)").fetchall()}
+        if "compacted_through_id" not in state_columns:
+            conn.execute("ALTER TABLE conversation_state ADD COLUMN compacted_through_id INTEGER NOT NULL DEFAULT 0")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tool_observations (
+                id TEXT PRIMARY KEY,
+                tool_name TEXT NOT NULL,
+                content TEXT NOT NULL,
+                char_count INTEGER NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         conn.execute("CREATE TABLE IF NOT EXISTS background_tasks (task_name TEXT PRIMARY KEY, status TEXT, output TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)")
         conn.execute("INSERT OR IGNORE INTO conversation_state(id, summary) VALUES (1, '')")
     init_runtime_db()
@@ -51,7 +63,7 @@ def _init_checkpoint_db() -> None:
     init_runtime_db()
 
 
-def _save_message_to_db(msg: dict) -> None:
+def _save_message_to_db(msg: dict) -> int:
     init_db()
     role = msg.get("role", "")
     content = msg.get("content", "")
@@ -62,24 +74,27 @@ def _save_message_to_db(msg: dict) -> None:
             extra_data[key] = msg[key]
     extra = json.dumps(extra_data, ensure_ascii=False) if extra_data else None
     with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
-        conn.execute(
+        cursor = conn.execute(
             "INSERT INTO chat_history(role, content, name, extra) VALUES (?, ?, ?, ?)",
             (role, content, name, extra),
         )
+        return int(cursor.lastrowid)
 
 
 def _load_chat_history_from_db(limit: int = 20) -> list[dict]:
     init_db()
     limit = max(1, min(int(limit), 200))
     with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+        row = conn.execute("SELECT compacted_through_id FROM conversation_state WHERE id = 1").fetchone()
+        watermark = int(row[0] or 0) if row else 0
         rows = conn.execute(
-            "SELECT role, content, name, extra FROM chat_history ORDER BY id DESC LIMIT ?",
-            (limit,),
+            "SELECT id, role, content, name, extra FROM chat_history WHERE id > ? ORDER BY id DESC LIMIT ?",
+            (watermark, limit),
         ).fetchall()
     rows.reverse()
     result = []
-    for role, content, name, extra in rows:
-        msg = {"role": role, "content": content or ""}
+    for message_id, role, content, name, extra in rows:
+        msg = {"role": role, "content": content or "", "_db_id": int(message_id)}
         if name:
             msg["name"] = name
         if extra:
@@ -94,7 +109,8 @@ def _load_chat_history_from_db(limit: int = 20) -> list[dict]:
 def clear_chat_history() -> str:
     with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
         conn.execute("DELETE FROM chat_history")
-        conn.execute("UPDATE conversation_state SET summary = '', updated_at = CURRENT_TIMESTAMP WHERE id = 1")
+        conn.execute("DELETE FROM tool_observations")
+        conn.execute("UPDATE conversation_state SET summary = '', compacted_through_id = 0, updated_at = CURRENT_TIMESTAMP WHERE id = 1")
     return "Chat history and rolling context summary cleared."
 
 
@@ -112,6 +128,104 @@ def set_conversation_summary(summary: str) -> None:
             "INSERT INTO conversation_state(id, summary, updated_at) VALUES(1, ?, CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET summary=excluded.summary, updated_at=excluded.updated_at",
             (str(summary or "").strip(),),
         )
+
+
+def get_compacted_through_id() -> int:
+    """Return the durable chat-history watermark included in the rolling summary."""
+    init_db()
+    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+        row = conn.execute("SELECT compacted_through_id FROM conversation_state WHERE id = 1").fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def get_messages_for_compaction(through_id: int) -> list[dict[str, Any]]:
+    """Load uncompacted messages up to a fixed id for a background compaction job."""
+    init_db()
+    through_id = max(0, int(through_id))
+    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+        state = conn.execute("SELECT compacted_through_id FROM conversation_state WHERE id = 1").fetchone()
+        watermark = int(state[0] or 0) if state else 0
+        rows = conn.execute(
+            "SELECT id, role, content, name, extra FROM chat_history WHERE id > ? AND id <= ? ORDER BY id",
+            (watermark, through_id),
+        ).fetchall()
+    messages = []
+    for message_id, role, content, name, extra in rows:
+        message: dict[str, Any] = {"_db_id": int(message_id), "role": role, "content": content or ""}
+        if name:
+            message["name"] = name
+        if extra:
+            try:
+                message.update(json.loads(extra))
+            except json.JSONDecodeError:
+                pass
+        messages.append(message)
+    return messages
+
+
+def apply_conversation_compaction(summary: str, through_id: int) -> bool:
+    """Atomically advance the rolling summary and its chat-history watermark."""
+    summary = str(summary or "").strip()
+    through_id = max(0, int(through_id))
+    if not summary or not through_id:
+        return False
+    init_db()
+    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE conversation_state
+            SET summary = ?, compacted_through_id = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1 AND compacted_through_id < ?
+              AND EXISTS (SELECT 1 FROM chat_history WHERE id = ?)
+            """,
+            (summary[:8000], through_id, through_id, through_id),
+        )
+    return cursor.rowcount == 1
+
+
+def store_tool_observation(tool_name: str, content: str) -> str:
+    """Persist a large tool result and return an opaque retrieval handle."""
+    init_db()
+    observation_id = uuid.uuid4().hex
+    text = str(content)
+    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+        conn.execute(
+            "INSERT INTO tool_observations(id, tool_name, content, char_count) VALUES (?, ?, ?, ?)",
+            (observation_id, str(tool_name or "tool"), text, len(text)),
+        )
+    return observation_id
+
+
+def read_observation(observation_id: str = "", offset: int = 0, length: int = 5000) -> str:
+    """Read a bounded slice of a large tool result previously stored by the harness."""
+    observation_id = str(observation_id or "").strip()
+    if not observation_id:
+        return "Error: Missing required 'observation_id' parameter."
+    offset = max(0, int(offset))
+    length = max(100, min(int(length), 10000))
+    init_db()
+    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+        row = conn.execute(
+            "SELECT tool_name, content, char_count FROM tool_observations WHERE id = ?",
+            (observation_id,),
+        ).fetchone()
+    if not row:
+        return f"Observation '{observation_id}' was not found."
+    tool_name, content, char_count = row
+    chunk = str(content)[offset:offset + length]
+    return json.dumps(
+        {
+            "observation_id": observation_id,
+            "tool": tool_name,
+            "offset": offset,
+            "returned_chars": len(chunk),
+            "total_chars": int(char_count),
+            "has_more": offset + len(chunk) < int(char_count),
+            "content": chunk,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
 
 
 def remember(topic: str = "general_knowledge", fact: str = "Recorded by agent action") -> str:

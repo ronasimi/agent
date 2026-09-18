@@ -12,7 +12,7 @@ import socket
 import sqlite3
 import threading
 import uuid
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Optional
 
@@ -169,6 +169,51 @@ def create_job(
                 now,
             ),
         )
+    return job_id
+
+
+def create_singleton_job(
+    job_type: str,
+    title: str,
+    payload: Optional[dict[str, Any]] = None,
+    priority: int = 0,
+    max_attempts: int = 3,
+) -> Optional[str]:
+    """Create one job only when the same type is not already pending or running."""
+    init_runtime_db()
+    job_id = str(uuid.uuid4())
+    now = utc_now()
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT id FROM agent_jobs WHERE job_type = ? AND status IN ('pending', 'running') LIMIT 1",
+            (str(job_type),),
+        ).fetchone()
+        if existing:
+            conn.commit()
+            return None
+        conn.execute(
+            """
+            INSERT INTO agent_jobs (
+                id, job_type, title, payload_json, state_json, status,
+                priority, attempts, max_attempts, next_run_at,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, '{}', ?, ?, 0, ?, ?, ?, ?)
+            """,
+            (
+                job_id,
+                str(job_type),
+                str(title),
+                _json(payload or {}),
+                JobStatus.PENDING.value,
+                int(priority),
+                max(1, int(max_attempts)),
+                now,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
     return job_id
 
 
@@ -361,6 +406,34 @@ def fail_job(job_id: str, error: str, retry: bool = True, retry_delay_seconds: i
                 (JobStatus.FAILED.value, now.isoformat(timespec="seconds"), str(error), job_id),
             )
     return cur.rowcount == 1
+
+
+def defer_job(job_id: str, delay_seconds: int = 3, state: Optional[dict[str, Any]] = None) -> bool:
+    """Release a running job without consuming another retry after foreground contention."""
+    now = datetime.now(timezone.utc)
+    next_run = (now + timedelta(seconds=max(1, int(delay_seconds)))).isoformat(timespec="seconds")
+    with _connect() as conn:
+        if state is None:
+            cursor = conn.execute(
+                """
+                UPDATE agent_jobs
+                SET status = 'pending', worker_id = NULL, heartbeat_at = NULL,
+                    attempts = MAX(0, attempts - 1), next_run_at = ?, updated_at = ?
+                WHERE id = ? AND status = 'running'
+                """,
+                (next_run, now.isoformat(timespec="seconds"), job_id),
+            )
+        else:
+            cursor = conn.execute(
+                """
+                UPDATE agent_jobs
+                SET status = 'pending', worker_id = NULL, heartbeat_at = NULL,
+                    attempts = MAX(0, attempts - 1), next_run_at = ?, updated_at = ?, state_json = ?
+                WHERE id = ? AND status = 'running'
+                """,
+                (next_run, now.isoformat(timespec="seconds"), _json(state), job_id),
+            )
+    return cursor.rowcount == 1
 
 
 def cancel_job(job_id: str) -> bool:
