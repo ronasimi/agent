@@ -39,11 +39,13 @@ from tools.runtime import (
     get_monitor_state,
     heartbeat_job,
     init_runtime_db,
+    maintain_runtime,
     record_monitor_event,
     record_monitor_state,
     recover_stale_jobs,
     save_checkpoint,
 )
+from tools.self_optimization import mark_self_optimization_failed, run_self_optimization_job
 
 CONFIG = load_config()
 
@@ -52,7 +54,7 @@ RESEARCH_CFG = CONFIG.get("research", {})
 WORKER_CFG = CONFIG.get("worker", {})
 MONITOR_CFG = CONFIG.get("host_monitor", {})
 MODEL = AGENT_CFG.get("model", "qwen3.5:4b")
-MAIN_OPTIONS = AGENT_CFG.get("main_options", {"num_ctx": 16384, "temperature": 0.4})
+MAIN_OPTIONS = AGENT_CFG.get("main_options", {"num_ctx": 8192, "temperature": 0.4})
 COMPACTION_MODEL = str(AGENT_CFG.get("compaction_model") or MODEL)
 COMPACTION_OPTIONS = AGENT_CFG.get("compaction_options") or dict(MAIN_OPTIONS)
 OLLAMA_HOST = AGENT_CFG.get("host", os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434"))
@@ -63,7 +65,8 @@ STALE_SECONDS = int(WORKER_CFG.get("stale_job_seconds", 180))
 INTERACTIVE_COOLDOWN = float(WORKER_CFG.get("interactive_cooldown_seconds", 10))
 MIN_AVAILABLE_RAM_MB = int(WORKER_CFG.get("min_available_memory_mb", 900))
 MAX_AGENT_VRAM_MB = int(WORKER_CFG.get("max_agent_vram_mb", 7200))
-MONITOR_INTERVAL = float(MONITOR_CFG.get("interval_seconds", 30))
+MONITOR_INTERVAL = float(MONITOR_CFG.get("interval_seconds", 60))
+MAINTENANCE_INTERVAL = float(WORKER_CFG.get("maintenance_interval_seconds", 21600))
 
 
 class InferenceDeferred(RuntimeError):
@@ -207,9 +210,9 @@ def run_research_job(job_id: str, worker_id: str) -> str:
             "report_path": None,
         }
 
-    max_rounds = max(1, int(RESEARCH_CFG.get("max_rounds", 5)))
-    max_queries = max(1, int(RESEARCH_CFG.get("max_queries_per_round", 3)))
-    max_sources = max(1, int(RESEARCH_CFG.get("max_total_sources", 30)))
+    max_rounds = max(1, int(RESEARCH_CFG.get("max_rounds", 3)))
+    max_queries = max(1, int(RESEARCH_CFG.get("max_queries_per_round", 2)))
+    max_sources = max(1, int(RESEARCH_CFG.get("max_total_sources", 12)))
 
     while True:
         if (current := get_job(job_id)) and current.get("status") == "cancelled":
@@ -247,7 +250,7 @@ def run_research_job(job_id: str, worker_id: str) -> str:
                 deep_search_and_scrape(
                     job_id,
                     query,
-                    max_results=int(RESEARCH_CFG.get("max_results_per_query", 3)),
+                    max_results=int(RESEARCH_CFG.get("max_results_per_query", 2)),
                     before_inference=_ensure_interactive_idle,
                 )
                 completed.add(query)
@@ -441,6 +444,7 @@ def main() -> None:
     worker_id = f"{socket.gethostname()}:{os.getpid()}"
     last_monitor = 0.0
     last_heartbeat = 0.0
+    last_maintenance = 0.0
     print(f"[worker] started as {worker_id}; database={DB_PATH}")
 
     while True:
@@ -449,16 +453,34 @@ def main() -> None:
             monitor_once()
             last_monitor = now
 
+        if now - last_maintenance >= MAINTENANCE_INTERVAL and not _interactive_busy():
+            try:
+                maintain_runtime(
+                    retention_days=int(WORKER_CFG.get("ephemeral_retention_days", 30)),
+                    checkpoints_per_job=int(WORKER_CFG.get("checkpoints_per_job", 25)),
+                )
+            except Exception as exc:
+                print(f"[worker] maintenance error: {exc}")
+            last_maintenance = now
+
         job = None
         if now - last_heartbeat >= HEARTBEAT_SECONDS:
             last_heartbeat = now
         try:
-            job = claim_next_job(worker_id, allowed_types=["research", "context_compaction"])
+            job = claim_next_job(worker_id, allowed_types=["research", "context_compaction", "self_optimization"])
             if job:
                 print(f"[worker] claimed {job['id'][:8]}: {job['title']}")
                 try:
                     if job.get("job_type") == "context_compaction":
                         run_context_compaction_job(job["id"])
+                    elif job.get("job_type") == "self_optimization":
+                        required_mb = int(CONFIG.get("self_optimization", {}).get("min_available_memory_mb", 2200))
+                        available_mb = _memory_available_mb()
+                        if available_mb is not None and available_mb < required_mb:
+                            raise InferenceDeferred(
+                                f"Self-optimization needs {required_mb} MiB available RAM; detected {available_mb} MiB."
+                            )
+                        run_self_optimization_job(job["id"], worker_id, before_inference=_ensure_interactive_idle)
                     else:
                         run_research_job(job["id"], worker_id)
                 except InferenceDeferred:
@@ -467,6 +489,9 @@ def main() -> None:
                 except Exception as exc:
                     detail = f"{exc}\n{traceback.format_exc(limit=5)}"
                     print(f"[worker] job {job['id'][:8]} failed: {exc}")
+                    if job.get("job_type") == "self_optimization":
+                        candidate_id = str((job.get("payload") or {}).get("candidate_id") or "")
+                        mark_self_optimization_failed(candidate_id, detail)
                     retry = int(job.get("attempts", 1)) < int(job.get("max_attempts", 3))
                     fail_job(job["id"], detail, retry=retry, retry_delay_seconds=min(300, 30 * int(job.get("attempts", 1))))
                     if not retry:

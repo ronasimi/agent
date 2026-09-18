@@ -60,3 +60,26 @@ def test_singleton_job_and_foreground_deferral(monkeypatch):
         assert deferred["status"] == "pending"
         assert deferred["attempts"] == 0
         assert deferred["state"] == {"phase": "waiting"}
+
+
+def test_optimization_candidate_audit_lifecycle(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        db = str(Path(td) / "agent.db")
+        monkeypatch.setenv("AGENT_DB_PATH", db)
+        from tools import runtime
+        runtime.DB_PATH = db
+        runtime.init_runtime_db()
+        job_id = runtime.create_job("self_optimization", "optimize", {"objective": "smaller context"})
+        candidate_id = runtime.create_optimization_candidate(job_id, "smaller context", "prompt tokens")
+        digest = "a" * 64
+        assert runtime.update_optimization_candidate(
+            candidate_id,
+            status="awaiting_approval",
+            patch_sha256=digest,
+            baseline_json={"passed": True},
+        )
+        assert not runtime.approve_optimization_candidate(candidate_id, "b" * 64)
+        assert runtime.approve_optimization_candidate(candidate_id, digest)
+        candidate = runtime.get_optimization_candidate(candidate_id)
+        assert candidate["status"] == "approved"
+        assert candidate["baseline"] == {"passed": True}

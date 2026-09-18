@@ -3,10 +3,11 @@
 # ==========================================
 FROM archlinux:latest
 
-RUN pacman -Syu --noconfirm && \
-    pacman -S --noconfirm \
+RUN pacman -Syu --noconfirm --needed \
       python \
       python-pip \
+      git \
+      bubblewrap \
       poppler \
       poppler-glib \
       libnotify \

@@ -118,6 +118,26 @@ def init_runtime_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_reminders_status_when
               ON reminders(status, when_iso);
+
+            CREATE TABLE IF NOT EXISTS optimization_candidates (
+                id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL UNIQUE,
+                objective TEXT NOT NULL,
+                target_metric TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'building',
+                worktree_path TEXT,
+                patch_path TEXT,
+                patch_sha256 TEXT,
+                baseline_json TEXT NOT NULL DEFAULT '{}',
+                candidate_json TEXT NOT NULL DEFAULT '{}',
+                report_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                approved_at TEXT,
+                FOREIGN KEY(job_id) REFERENCES agent_jobs(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_optimization_candidates_status_time
+              ON optimization_candidates(status, created_at DESC);
             """
         )
 
@@ -507,6 +527,140 @@ def list_monitor_events(event_type: str = "", limit: int = 25) -> list[dict[str,
         item["details"] = _parse_json(item.pop("details_json"), {})
         out.append(item)
     return out
+
+
+def create_optimization_candidate(
+    job_id: str,
+    objective: str,
+    target_metric: str = "",
+    candidate_id: str | None = None,
+) -> str:
+    """Create the durable audit record for one isolated optimization candidate."""
+    init_runtime_db()
+    candidate_id = candidate_id or str(uuid.uuid4())
+    now = utc_now()
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO optimization_candidates(
+                id, job_id, objective, target_metric, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, 'building', ?, ?)
+            """,
+            (candidate_id, str(job_id), str(objective), str(target_metric), now, now),
+        )
+    return candidate_id
+
+
+def update_optimization_candidate(candidate_id: str, **fields: Any) -> bool:
+    """Update only explicitly permitted fields on a candidate audit record."""
+    allowed = {
+        "status", "worktree_path", "patch_path", "patch_sha256",
+        "baseline_json", "candidate_json", "report_json", "approved_at",
+    }
+    updates: list[str] = []
+    values: list[Any] = []
+    for key, value in fields.items():
+        if key not in allowed:
+            raise ValueError(f"Unsupported candidate field: {key}")
+        if key.endswith("_json") and not isinstance(value, str):
+            value = _json(value)
+        updates.append(f"{key} = ?")
+        values.append(value)
+    if not updates:
+        return False
+    updates.append("updated_at = ?")
+    values.extend([utc_now(), str(candidate_id)])
+    with _connect() as conn:
+        cur = conn.execute(
+            f"UPDATE optimization_candidates SET {', '.join(updates)} WHERE id = ?",
+            values,
+        )
+    return cur.rowcount == 1
+
+
+def _candidate_row(row: sqlite3.Row | None) -> Optional[dict[str, Any]]:
+    if not row:
+        return None
+    item = dict(row)
+    for key in ("baseline_json", "candidate_json", "report_json"):
+        item[key.removesuffix("_json")] = _parse_json(item.pop(key), {})
+    return item
+
+
+def get_optimization_candidate(candidate_id: str) -> Optional[dict[str, Any]]:
+    init_runtime_db()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM optimization_candidates WHERE id = ?",
+            (str(candidate_id),),
+        ).fetchone()
+    return _candidate_row(row)
+
+
+def list_optimization_candidates(status: str = "", limit: int = 20) -> list[dict[str, Any]]:
+    init_runtime_db()
+    limit = max(1, min(int(limit), 100))
+    with _connect() as conn:
+        if status:
+            rows = conn.execute(
+                "SELECT * FROM optimization_candidates WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+                (str(status), limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM optimization_candidates ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+    return [_candidate_row(row) for row in rows if row]
+
+
+def approve_optimization_candidate(candidate_id: str, expected_sha256: str) -> bool:
+    """Approve an awaiting candidate only when its displayed patch digest matches."""
+    now = utc_now()
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            UPDATE optimization_candidates
+            SET status = 'approved', approved_at = ?, updated_at = ?
+            WHERE id = ? AND status = 'awaiting_approval' AND patch_sha256 = ?
+            """,
+            (now, now, str(candidate_id), str(expected_sha256).lower()),
+        )
+    return cur.rowcount == 1
+
+
+def maintain_runtime(retention_days: int = 30, checkpoints_per_job: int = 25) -> dict[str, int]:
+    """Prune bounded ephemeral records and checkpoint the WAL during worker idle time."""
+    retention_days = max(1, min(int(retention_days), 3650))
+    checkpoints_per_job = max(1, min(int(checkpoints_per_job), 1000))
+    deleted = {"monitor_events": 0, "tool_observations": 0, "checkpoints": 0}
+    cutoff = f"-{retention_days} days"
+    with _connect() as conn:
+        deleted["monitor_events"] = conn.execute(
+            "DELETE FROM monitor_events WHERE created_at < datetime('now', ?)", (cutoff,)
+        ).rowcount
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "tool_observations" in tables:
+            deleted["tool_observations"] = conn.execute(
+                "DELETE FROM tool_observations WHERE created_at < datetime('now', ?)", (cutoff,)
+            ).rowcount
+        deleted["checkpoints"] = conn.execute(
+            """
+            DELETE FROM agent_job_checkpoints
+            WHERE id IN (
+                SELECT older.id
+                FROM agent_job_checkpoints AS older
+                WHERE (
+                    SELECT COUNT(*) FROM agent_job_checkpoints AS newer
+                    WHERE newer.job_id = older.job_id AND newer.step >= older.step
+                ) > ?
+            )
+            """,
+            (checkpoints_per_job,),
+        ).rowcount
+    with _connect() as conn:
+        conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+    return deleted
 
 
 init_runtime_db()

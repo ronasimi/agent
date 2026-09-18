@@ -7,6 +7,11 @@ services:
     image: agent
     container_name: agent
     restart: unless-stopped
+    init: true
+    stop_grace_period: 20s
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
     stdin_open: true
     tty: true
     pid: host
@@ -25,6 +30,7 @@ services:
       - ./memory:/app/memory
       - ./tools:/app/tools:ro
       - ./agent.py:/app/agent.py:ro
+      - ./:/app/source:ro
       - /:/host:ro
       - /var/log:/host_log:ro
       - /run/user/1000/bus:/run/user/1000/bus
@@ -36,6 +42,11 @@ services:
     image: agent
     container_name: agent-worker
     restart: unless-stopped
+    init: true
+    stop_grace_period: 20s
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
     user: "1000:1000"
     pid: host
     network_mode: host
@@ -46,14 +57,48 @@ services:
       - WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-1}
       - TZ=${TZ:-America/Toronto}
     command: ["python", "/app/worker.py"]
+    depends_on:
+      - optimizer-validator
     volumes:
       - ./config:/app/config:ro
       - ./workspace:/app/workspace
       - ./memory:/app/memory
       - ./tools:/app/tools:ro
       - ./worker.py:/app/worker.py:ro
+      - ./:/app/source:ro
       - /:/host:ro
       - /var/log:/host_log:ro
       - /run/user/1000/bus:/run/user/1000/bus
       - ${HOME}/.config/systemd/user:/home/agent/.config/systemd/user
       - /etc/machine-id:/etc/machine-id:ro
+
+  optimizer-validator:
+    build: .
+    image: agent
+    container_name: agent-optimizer-validator
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 10s
+    network_mode: none
+    user: "0:0"
+    read_only: true
+    pids_limit: 128
+    mem_limit: 1800m
+    cpus: 1.0
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=1700m,mode=1777
+    command: ["python", "/app/scripts/optimization_validator.py"]
+    volumes:
+      - ./config:/app/config:ro
+      - ./workspace/self_optimization/candidates:/candidates:ro
+      - ./workspace/self_optimization/validation/inbox:/validation/inbox:ro
+      - ./workspace/self_optimization/validation/outbox:/validation/outbox

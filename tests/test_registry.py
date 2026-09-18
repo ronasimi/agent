@@ -7,6 +7,8 @@ def test_registry_contract():
     assert count >= 30
     assert "schedule_reminder" in tools.AVAILABLE_TOOLS_MAP
     assert "enqueue_research" in tools.AVAILABLE_TOOLS_MAP
+    assert "enqueue_self_optimization" in tools.AVAILABLE_TOOLS_MAP
+    assert "approve_self_optimization" not in tools.AVAILABLE_TOOLS_MAP
     assert all("parameters" in schema["function"] for schema in tools.TOOL_SCHEMAS)
 
 

@@ -13,3 +13,4 @@ markdown
 weasyprint
 pygments
 psutil
+pytest

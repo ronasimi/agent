@@ -60,6 +60,11 @@ from tools.context import (
 )
 from tools.job_tools import enqueue_research, get_research_status
 from tools.runtime import create_singleton_job, list_jobs, record_monitor_state, utc_now
+from tools.self_optimization import (
+    approve_self_optimization,
+    enqueue_self_optimization,
+    list_self_optimization_candidates,
+)
 
 CONFIG_PATH = os.environ.get("AGENT_CONFIG", "/app/config/config.yaml")
 CONFIG = load_config()
@@ -67,19 +72,19 @@ CONFIG = load_config()
 AGENT_CFG = CONFIG.get("agent", {})
 MODEL = AGENT_CFG.get("model", "qwen3.5:4b")
 FAST_MODEL = AGENT_CFG.get("fast_model", "qwen3.5:2b")
-MAIN_OPTIONS = AGENT_CFG.get("main_options") or {"num_ctx": 16384, "temperature": 0.4, "top_p": 0.9, "top_k": 20}
+MAIN_OPTIONS = AGENT_CFG.get("main_options") or {"num_ctx": 8192, "temperature": 0.4, "top_p": 0.9, "top_k": 20}
 FAST_OPTIONS = AGENT_CFG.get("fast_options") or {"num_ctx": 4096, "temperature": 0.0, "top_p": 0.9, "top_k": 20}
 MAX_TOOLS_PER_TURN = max(8, int(AGENT_CFG.get("max_tools_per_turn", 12)))
 OLLAMA_HOST = AGENT_CFG.get("host", "http://127.0.0.1:11434")
 os.environ["OLLAMA_HOST"] = OLLAMA_HOST
-MAX_CTX = int(AGENT_CFG.get("context", {}).get("num_ctx", MAIN_OPTIONS.get("num_ctx", 16384)))
-RESERVE_TOKENS = int(AGENT_CFG.get("context", {}).get("reserve_tokens", 2048))
+MAX_CTX = int(AGENT_CFG.get("context", {}).get("num_ctx", MAIN_OPTIONS.get("num_ctx", 8192)))
+RESERVE_TOKENS = int(AGENT_CFG.get("context", {}).get("reserve_tokens", 1280))
 RECENT_MESSAGES = int(AGENT_CFG.get("context", {}).get("recent_messages", 12))
 COMPACT_AT = int(AGENT_CFG.get("context", {}).get("compact_at_tokens", max(8000, int(MAX_CTX * 0.62))))
 SUMMARY_KEEP_MESSAGES = int(AGENT_CFG.get("context", {}).get("summary_keep_messages", 8))
 MAX_TOOL_OUTPUT = int(AGENT_CFG.get("context", {}).get("max_tool_output_chars", 5000))
 TOOL_LOOP_RESERVE = int(AGENT_CFG.get("context", {}).get("tool_loop_reserve_tokens", 4096))
-MAX_ITERATIONS = int(AGENT_CFG.get("max_iterations", 30))
+MAX_ITERATIONS = int(AGENT_CFG.get("max_iterations", 12))
 SEMANTIC_MEMORY = bool(AGENT_CFG.get("semantic_memory_enabled", False))
 THINKING_DEFAULT = bool(AGENT_CFG.get("thinking_default", False))
 SHOW_PERF_STATS = bool(AGENT_CFG.get("show_perf_stats", True))
@@ -131,6 +136,8 @@ SYSTEM_POLICY = """
 - You are an autonomous local assistant with explicit, typed tools.
 - Use deterministic host_snapshot() and network_snapshot() for system awareness instead of repeatedly guessing shell commands.
 - For long-running research, use enqueue_research() and get_research_status(). Never use Python threads or sleep to schedule future work.
+- For harness improvements, enqueue_self_optimization() may create and test an isolated candidate. Never claim that a candidate is deployed.
+- Never approve or promote a self-optimization candidate. Approval requires an explicit human CLI command and promotion requires a separate host command.
 - For reminders, use schedule_reminder(), cancel_reminder(), and list_reminders(). Never write systemd unit files yourself.
 - Tool calls must contain a valid JSON object matching the tool schema. Never infer missing tool arguments from prose.
 - execute_shell() is a privileged container-local shell tool. Only call it when a structured tool does not provide the required operation and provide an explicit command argument.
@@ -560,7 +567,7 @@ def main() -> None:
     except Exception as exc:
         print(f"[System]: Warning - failed to preload main model: {exc}")
 
-    print("Commands: /research, /jobs, /job <id>, /cancel-job <id>, /reminders, /tools, /think [on/off], /reload, /forget, exit")
+    print("Commands: /research, /optimize, /optimizations, /approve-optimization, /jobs, /job, /cancel-job, /reminders, /tools, /think, /reload, /forget, exit")
     print("Background research runs in the durable worker process and survives CLI restarts.")
 
     while True:
@@ -580,6 +587,28 @@ def main() -> None:
                     continue
                 result = json.loads(enqueue_research(topic))
                 print(f"[System]: queued research job {result['job_id'][:8]} for '{topic}'")
+                continue
+
+            if lowered.startswith("/optimize"):
+                objective = user_input[len("/optimize"):].strip()
+                if not objective:
+                    print("[System]: Usage: /optimize <bounded objective>")
+                    continue
+                result = json.loads(enqueue_self_optimization(objective))
+                if result.get("job_id"):
+                    print(f"[System]: queued isolated candidate {result['candidate_id'][:8]} as job {result['job_id'][:8]}")
+                else:
+                    print(f"[System]: {result.get('reason', 'Optimization was not queued.')}")
+                continue
+            if lowered == "/optimizations":
+                print("\n" + list_self_optimization_candidates())
+                continue
+            if lowered.startswith("/approve-optimization "):
+                parts = user_input.split()
+                if len(parts) != 3:
+                    print("[System]: Usage: /approve-optimization <candidate-id> <full-sha256>")
+                    continue
+                print("\n" + approve_self_optimization(parts[1], parts[2]))
                 continue
 
             if lowered == "/jobs":

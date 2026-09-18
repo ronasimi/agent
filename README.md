@@ -1,8 +1,8 @@
 # Autonomous Local AI Agent Harness
 
 Local Ollama agent with an interactive CLI, typed tools, durable SQLite state,
-background research, rolling context summaries, host/network awareness, and
-systemd-based reminders.
+background research, rolling context summaries, host/network awareness,
+systemd-based reminders, and a bounded self-optimization pipeline.
 
 This version is optimized for low time-to-first-token, high prompt-cache reuse,
 bounded context growth, and foreground responsiveness.
@@ -56,9 +56,9 @@ the entire result through every later inference.
 ### Foreground-priority model scheduling
 
 The worker checks the interactive activity lease immediately before every
-research or compaction model request: planning, each page distillation,
-evaluation, final synthesis, and context compaction. If the foreground is busy,
-the job is checkpointed and released without consuming a retry.
+background model request, including research, compaction, and optimization.
+If the foreground is busy, the job is checkpointed and released without
+consuming a retry.
 
 The worker no longer performs a duplicate main-model warmup at startup.
 
@@ -80,25 +80,26 @@ The optimized defaults are in config/config.yaml:
     agent:
       thinking_default: false
       show_perf_stats: true
+      max_iterations: 12
       max_tools_per_turn: 12
 
       context:
-        num_ctx: 16384
-        reserve_tokens: 1536
-        recent_messages: 16
+        num_ctx: 8192
+        reserve_tokens: 1280
+        recent_messages: 12
         summary_keep_messages: 8
-        compact_at_tokens: 7500
-        max_tool_output_chars: 5000
-        tool_loop_reserve_tokens: 4096
+        compact_at_tokens: 4500
+        max_tool_output_chars: 4000
+        tool_loop_reserve_tokens: 2048
 
       main_options:
-        num_ctx: 16384
+        num_ctx: 8192
         temperature: 0.4
         top_p: 0.9
         top_k: 20
 
       fast_options:
-        num_ctx: 8192
+        num_ctx: 4096
         temperature: 0.0
         top_p: 0.9
         top_k: 20
@@ -115,6 +116,7 @@ Use 0 when the machine cannot keep both models resident without memory pressure.
 Apply ollama.env.example to the Ollama server/container, not the agent:
 
     OLLAMA_MAX_LOADED_MODELS=2
+    OLLAMA_MAX_QUEUE=8
     OLLAMA_NUM_PARALLEL=1
     OLLAMA_FLASH_ATTENTION=1
     OLLAMA_KV_CACHE_TYPE=q8_0
@@ -145,6 +147,10 @@ returns every field.
 - tools/memory.py — memories, history watermark, and observations.
 - tools/runtime.py — durable jobs, checkpoints, leases, and deferral.
 - tools/deep_research.py — planning, collection, distillation, and evaluation.
+- tools/repo_map.py — bounded file/symbol inventory and source retrieval.
+- tools/self_optimization.py — candidate generation, gating, and approval export.
+- scripts/benchmark_harness.py — fixed model-free repository-size benchmark.
+- scripts/promote_optimization.py — explicit host-side approved-patch application.
 - config/config.yaml — models, context budgets, and worker policy.
 
 SQLite WAL mode allows both containers to share memory/knowledge.db.
@@ -159,9 +165,69 @@ Jobs checkpoint after each phase and source query. They can be cancelled,
 retried after transient failures, or recovered after a stale worker heartbeat.
 Reports are written to workspace/research as Markdown and, when available, PDF.
 
+## Self-optimization safety model
+
+Self-optimization is deliberately a proposal pipeline, not live self-modifying
+code. A job performs these steps:
+
+1. copy only allowlisted source files from the read-only `/app/source` mount;
+2. commit that snapshot and create a detached Git worktree;
+3. run the fixed baseline test and benchmark commands;
+4. ask the fast model for a narrow file plan and the main model for one bounded
+   unified diff;
+5. reject paths outside the allowlist, binary changes, symlinks, oversized
+   patches, and patches that do not apply cleanly;
+6. submit baseline and candidate snapshots to the dedicated
+   `optimizer-validator` container, which has no network, a read-only root, no
+   host/runtime mounts, dropped capabilities, a PID limit, a timeout, and a
+   memory/CPU limit;
+7. persist the patch, SHA-256 digest, metrics, logs, and approval state in
+   SQLite and `workspace/self_optimization`.
+
+If the validator is unavailable, validation times out and fails closed. A
+Bubblewrap path remains available only for operators who explicitly disable
+the dedicated runner; it also fails closed when namespaces are unavailable.
+The model-facing tools can enqueue and inspect candidates but cannot approve
+them. The `/approve-optimization` CLI command exports a digest-pinned patch;
+it still does not alter the live source.
+
+Queue and inspect a candidate:
+
+    /optimize reduce prompt tokens without changing tool behavior
+    /optimizations
+
+After reviewing the report, changed files, test logs, and full digest:
+
+    /approve-optimization <candidate-id> <full-sha256>
+
+Then stop the harness and apply the approved patch from the host in a clean Git
+checkout:
+
+    python scripts/promote_optimization.py \
+      --repo . \
+      --patch workspace/self_optimization/approved/<candidate-id>.patch \
+      --sha256 <full-sha256> \
+      --confirm APPLY_APPROVED_PATCH
+
+Review the diff and commit it normally. If the extracted project is not already
+a Git repository, initialize and commit the baseline before running promotion.
+
+### Repository context size
+
+`scripts/benchmark_harness.py` estimates source context at roughly one token per
+four bytes. The current harness is below the configured 75,000-token full-tree
+gate, but normal agent and optimization turns do not inject the full tree.
+`get_repo_map`, `search_repo_symbols`, and `read_repo_symbol` retrieve only the
+map and relevant slices, while optimization source context is capped at 32,000
+characters.
+
 ## CLI commands
 
     /research <topic>      queue durable research
+    /optimize <objective>  queue an isolated optimization candidate
+    /optimizations         list candidate reports and approval states
+    /approve-optimization <candidate-id> <sha256>
+                            export a reviewed patch; never applies it
     /jobs                  list durable jobs
     /job <id>              inspect a job
     /cancel-job <id>       cancel a job
@@ -198,12 +264,20 @@ Build and start:
     docker compose up -d worker
     docker compose run --rm agent
 
+The Dockerfile performs the Arch upgrade and package install in one `pacman`
+transaction, uses `--needed`, and clears the package cache. A long package
+download is not necessarily a crash; `docker compose build --progress=plain`
+shows the active package and final exit status. Re-run the build after an
+interrupted transaction rather than attaching to a half-created container.
+
 Or keep both services running:
 
     docker compose up -d agent worker
 
 The project uses host networking and read-only host mounts for existing
-system/network inspection features. Review docker-compose.yml before deployment.
+system/network inspection features. The validator is intentionally separate
+and uses `network_mode: none`; do not add the host mounts or Docker socket to
+that service. Review docker-compose.yml before deployment.
 
 ## Validation
 
@@ -212,7 +286,8 @@ system/network inspection features. Review docker-compose.yml before deployment.
 
 The included suite covers token budgeting, turn boundaries, durable jobs,
 foreground deferral, compaction watermarks, observation slices, reminders,
-network URL validation, and tool selection.
+network URL validation, repository traversal rejection, candidate audit state,
+digest-pinned approval, patch policy, and tool selection.
 
 End-to-end latency must be benchmarked on the target Ollama/GPU runtime. Use
 the printed counters with identical prompts and model state when comparing

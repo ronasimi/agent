@@ -23,6 +23,7 @@ TOOL_METADATA = {}
 MUTATING_TOOLS = {
     "remember", "remember_semantic",
     "enqueue_research", "cancel_background_job",
+    "enqueue_self_optimization",
     "schedule_reminder", "cancel_reminder",
     "notify_desktop", "write_file", "generate_pdf_report", "take_web_screenshot",
     "install_package", "execute_shell", "execute_python",
@@ -35,6 +36,11 @@ BUILTINS = [
     ("memory", "read_observation"),
     ("job_tools", "enqueue_research"), ("job_tools", "get_research_status"),
     ("job_tools", "list_background_jobs"), ("job_tools", "cancel_background_job"),
+    ("repo_map", "get_repo_map"), ("repo_map", "search_repo_symbols"),
+    ("repo_map", "read_repo_symbol"),
+    ("self_optimization", "enqueue_self_optimization"),
+    ("self_optimization", "get_self_optimization_status"),
+    ("self_optimization", "list_self_optimization_candidates"),
     ("reminders", "schedule_reminder"), ("reminders", "cancel_reminder"), ("reminders", "list_reminders"),
     ("notify", "notify_desktop"),
     ("host_tools", "host_snapshot"), ("host_tools", "gpu_snapshot_dict"),
@@ -88,7 +94,11 @@ def load_tools() -> tuple[int, dict[str, str]]:
             errors[f"{module_name}.{function_name}"] = str(exc)
 
     custom_dir = Path("/app/workspace/custom_tools")
-    custom_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        custom_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # Read-only validator containers intentionally have no writable workspace.
+        pass
     for path in sorted(custom_dir.glob("*.py")):
         if path.name.startswith("_"):
             continue
@@ -120,7 +130,12 @@ _ALWAYS_TOOL_NAMES = {
 _TOOL_BUNDLES = (
     (
         {"file", "files", "code", "coding", "python", "script", "repo", "project"},
-        ("read_file", "write_file", "read_observation", "execute_python"),
+        ("read_file", "write_file", "read_observation", "execute_python", "get_repo_map", "search_repo_symbols"),
+    ),
+    (
+        {"optimize", "optimization", "self", "benchmark", "performance", "refactor"},
+        ("get_repo_map", "search_repo_symbols", "read_repo_symbol", "enqueue_self_optimization",
+         "get_self_optimization_status", "list_self_optimization_candidates"),
     ),
     (
         {"web", "internet", "search", "url", "site", "research", "source", "sources"},
