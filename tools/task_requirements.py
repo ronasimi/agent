@@ -57,6 +57,14 @@ _RULES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
 # Explicit tool names in the user's request are requirements as well.  This list
 # is intentionally limited to read/diagnostic tools that are meaningful as
 # completion checks; arbitrary mutating tools are not auto-required here.
+
+# Some structured probes subsume narrower requirements.  This lets the ledger
+# recognize verified equivalent evidence instead of forcing redundant calls.
+_EQUIVALENT_REQUIREMENT_TOOLS: dict[str, tuple[str, ...]] = {
+    "http_probe": ("dns_diagnose",),
+    "endpoint_probe": ("dns_diagnose",),
+}
+
 _EXPLICIT_TOOL_NAMES = {
     "host_snapshot", "pressure_snapshot", "process_snapshot", "filesystem_snapshot",
     "service_health", "network_snapshot", "neighbor_snapshot", "connection_snapshot",
@@ -125,18 +133,37 @@ class TaskRequirementLedger:
         return [item.tool for item in rows]
 
     def record_tool(self, tool_name: str, *, status: str, reason: str = "", fingerprint: str = "") -> None:
+        tool_name = str(tool_name or "")
+        targets = {tool_name}
+        if status in {"ok", "partial"}:
+            targets.update(_EQUIVALENT_REQUIREMENT_TOOLS.get(tool_name, ()))
         for item in self.requirements:
-            if item.tool != tool_name:
+            if item.tool not in targets:
                 continue
-            item.attempts += 1
+            # Only the directly called tool consumes an attempt. Equivalent
+            # requirements are satisfied by the same structured evidence.
+            if item.tool == tool_name:
+                item.attempts += 1
             item.last_reason = str(reason or "")[:120]
             item.fingerprint = str(fingerprint or "")[:32]
             if status == "ok":
                 item.status = "satisfied"
             elif status == "partial":
                 item.status = "partial"
-            elif item.status not in {"satisfied", "partial"}:
+            elif item.tool == tool_name and item.status not in {"satisfied", "partial"}:
                 item.status = "failed"
+
+    def status_for_tool(self, tool_name: str) -> str:
+        for item in self.requirements:
+            if item.tool == tool_name:
+                return item.status
+        return ""
+
+    def completed_tools(self) -> set[str]:
+        return {item.tool for item in self.requirements if item.status in {"satisfied", "partial"}}
+
+    def closed_tools(self) -> set[str]:
+        return {item.tool for item in self.requirements if item.status in {"satisfied", "partial", "blocked"}}
 
     def pending(self) -> list[Requirement]:
         return [item for item in self.requirements if item.status not in {"satisfied", "partial", "blocked"}]
@@ -149,6 +176,19 @@ class TaskRequirementLedger:
 
     def as_list(self) -> list[dict[str, Any]]:
         return [item.as_dict() for item in self.requirements]
+
+    def pending_hint(self, limit: int = 8) -> str:
+        pending = self.pending()
+        if not pending:
+            return ""
+        limit = max(1, min(int(limit), 20))
+        rows = ", ".join(f"{item.tool}[{item.status}]" for item in pending[:limit])
+        more = f", +{len(pending) - limit} more" if len(pending) > limit else ""
+        return (
+            "[Harness pending requirements] Do not draft the final report yet. "
+            f"Complete an unfinished explicit check with a supplied native tool. Pending: {rows}{more}. "
+            "Reuse satisfied evidence; do not repeat completed checks. If validator recovery guidance is present, follow it first."
+        )
 
     def completion_message(self) -> str:
         pending = self.pending()

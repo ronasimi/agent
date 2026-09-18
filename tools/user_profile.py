@@ -106,7 +106,7 @@ def get_user_identity() -> dict:
             key = k.replace("identity.", "")
             try:
                 identity[key] = json.loads(v)
-            except:
+            except (TypeError, json.JSONDecodeError):
                 identity[key] = v
         
         return identity
@@ -311,8 +311,9 @@ def import_user_profile(profile_json: str) -> str:
         return f"Error importing profile: {e}"
 
 
-# Initialize on import
+# Initialize on import. Read-only/test environments may not expose the
+# persistent profile database, so only expected storage failures are ignored.
 try:
     init_user_profile_db()
-except:
+except (OSError, sqlite3.Error):
     pass

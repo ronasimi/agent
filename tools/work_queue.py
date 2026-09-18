@@ -362,8 +362,9 @@ def get_work_statistics() -> str:
         conn.close()
 
 
-# Initialize on import
+# Initialize on import. Import-time setup is best-effort in read-only validator
+# environments, but only expected runtime/storage errors are suppressed.
 try:
     init_work_queue_db()
-except:
+except (OSError, RuntimeError, sqlite3.Error):
     pass

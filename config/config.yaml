@@ -50,6 +50,11 @@ agent:
     # the bounded untrusted evidence digest to reduce repeated prompt ingestion.
     raw_tool_results: 2
     evidence_render_chars: 3600
+    # Drop native schemas for explicit checks once their evidence is satisfied
+    # or deterministically blocked; this reduces later-turn prefill and discourages
+    # small-model repetition of already-completed diagnostics.
+    prune_satisfied_tool_schemas: true
+    suppress_completed_requirement_repeats: true
     max_render_chars: 7000
     objective_chars: 1600
     background_chars: 2200

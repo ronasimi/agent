@@ -69,3 +69,20 @@ def test_read_only_question_does_not_trigger_turn_lockdown():
     policy = derive_turn_tool_policy("Why is this filesystem read-only?", set(metadata), metadata)
     assert policy.readonly_only is False
     assert policy.allowed("write_file", metadata["write_file"])
+
+
+def test_mtr_text_report_fallback_is_structured():
+    from tools.network_diagnostics import _parse_mtr_report_text
+
+    sample = """Start: 2026-09-18T11:23:08-0400
+HOST: muninn                      Loss%   Snt   Last   Avg  Best  Wrst StDev
+  1.|-- _gateway                   0.0%     3    1.3   1.3   1.3   1.4   0.1
+  2.|-- dhcp-198-2-106-1.example   0.0%     3   15.2  14.9  14.1  15.2   0.6
+"""
+    payload = _parse_mtr_report_text(sample, "example.com")
+    assert payload is not None
+    assert payload["format"] == "mtr_report_text_fallback"
+    assert payload["source_host"] == "muninn"
+    assert payload["hops"][0]["hop"] == 1
+    assert payload["hops"][0]["host"] == "_gateway"
+    assert payload["hops"][1]["avg_ms"] == 14.9

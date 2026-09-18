@@ -77,8 +77,10 @@ constrained control decision (`retry`, `switch_tool`, `finish`, or `blocked`)
 plus a structured diagnosis such as `bad_arguments`, `wrong_tool`, or
 `task_complete`. Only those structured fields are shared back to the main
 model; free-form validator reasoning and untrusted tool text are never copied
-into the main-model control prompt. A separate final-iteration validator remains
-as a last safety net.
+into the main-model control prompt. If a validator-approved retry of the same
+stalled step also fails, that requirement is deterministically marked blocked
+for the rest of the turn rather than consuming another three retries. A separate
+final-iteration validator remains as a last safety net.
 
 If validation times out or fails, the safe fallback permits one bounded
 corrective attempt rather than terminating the task silently. Set
@@ -209,7 +211,7 @@ SQLite WAL mode allows both containers to share memory/knowledge.db.
 The harness exposes narrow tools so the 4B model does not need to construct shell commands for common diagnosis:
 
 - Host: `process_snapshot`, `pressure_snapshot`, `filesystem_snapshot`, `service_health`.
-- Network: `neighbor_snapshot`, `connection_snapshot`, `dns_diagnose`, `network_path`, `endpoint_probe`, `http_probe`.
+- Network: `neighbor_snapshot`, `connection_snapshot`, `dns_diagnose`, `network_path`, `endpoint_probe`, `http_probe`. `network_path` prefers MTR JSON but also parses the standard text report emitted by distro builds that ignore/override `--json`.
 - Web/document research: `page_metadata`, `page_links`, `discover_site`, `read_feed`, `extract_document`, `page_fingerprint`, `page_diff`.
 - Harness/repository: `repo_status`, `repo_diff`, `repo_checks`, `dependency_audit`, `tool_health`, `diff_observations`.
 
@@ -299,7 +301,12 @@ provenance-tagged tool evidence, failed approaches, current recovery plan, and
 structured validator decisions. With working state enabled, the main prompt
 keeps only the current raw conversation turn instead of re-ingesting older raw
 turns already represented by the state/rolling summary. Tool evidence previews
-remain untrusted data, and only harness code can commit state changes.
+remain untrusted data, and only harness code can commit state changes. For broad
+explicit checklists, satisfied/blocked requirement schemas are also removed from
+subsequent Ollama calls and exact successful repeats are suppressed unless the
+user explicitly requests a recheck/monitoring workflow. This reduces prefill and
+helps the 4B model move through remaining checks instead of revisiting completed
+ones.
 
 ## CLI commands
 

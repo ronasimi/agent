@@ -46,8 +46,10 @@ def host_snapshot() -> str:
         result["memory"] = {
             "total_mb": round(vm.total / 1024**2),
             "available_mb": round(vm.available / 1024**2),
+            "available_percent": round((vm.available / vm.total) * 100, 1) if vm.total else 0.0,
             "used_mb": round(vm.used / 1024**2),
             "used_percent": vm.percent,
+            "percent_semantics": "used_percent is memory in use; available_percent is memory immediately available",
         }
         disk = psutil.disk_usage("/host" if os.path.isdir("/host") else "/")
         result["disk"] = {

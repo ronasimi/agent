@@ -131,6 +131,8 @@ WORKING_STATE_ENABLED = bool(WORKING_STATE_CFG.get("enabled", True))
 WORKING_STATE_HISTORY_TURNS = max(1, int(WORKING_STATE_CFG.get("main_history_turns", 1)))
 WORKING_STATE_RAW_TOOL_RESULTS = max(1, int(WORKING_STATE_CFG.get("raw_tool_results", 2)))
 WORKING_STATE_EVIDENCE_CHARS = max(600, int(WORKING_STATE_CFG.get("evidence_render_chars", 3600)))
+PRUNE_SATISFIED_REQUIREMENT_TOOLS = bool(WORKING_STATE_CFG.get("prune_satisfied_tool_schemas", True))
+SUPPRESS_COMPLETED_REQUIREMENT_REPEATS = bool(WORKING_STATE_CFG.get("suppress_completed_requirement_repeats", True))
 REQUIREMENT_TOOL_CAP = max(MAX_TOOLS_PER_TURN, int(AGENT_CFG.get("requirement_tool_cap", 24)))
 
 OLLAMA = Client(host=OLLAMA_HOST)
@@ -502,8 +504,95 @@ def _ensure_tool_schemas(tool_schemas: list[dict], tool_names: list[str], policy
 
 def _adaptive_iteration_limit(requirement_count: int) -> int:
     """Give broad explicit multi-check requests enough room without unbounded loops."""
-    needed = max(MAX_ITERATIONS, int(requirement_count) + 6)
+    # Broad diagnostic prompts commonly need one call per explicit requirement,
+    # plus a few recovery/finalization turns.  Keep a hard cap, but do not make
+    # one transient parser/tool failure consume the entire completion budget.
+    needed = max(MAX_ITERATIONS, int(requirement_count) + 10)
     return min(MAX_ITERATIONS_HARD, needed)
+
+
+def _user_requests_recheck(user_text: str) -> bool:
+    """Return True when repeated observations are explicitly part of the task."""
+    lower = " ".join(str(user_text or "").lower().split())
+    phrases = (
+        "recheck", "re-check", "check again", "run again", "repeat the", "refresh",
+        "monitor", "over time", "compare before", "compare after", "watch for",
+        "take another", "second snapshot", "again after",
+    )
+    return any(phrase in lower for phrase in phrases)
+
+
+def _suppress_completed_requirement_calls(
+    calls: list[dict[str, Any]],
+    requirement_ledger: TaskRequirementLedger,
+    successful_readonly_signatures: set[str],
+    user_text: str,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Suppress exact successful repeats when other explicit checks are pending.
+
+    Small models often revisit a familiar successful snapshot instead of moving
+    to the next pending requirement.  Rechecks remain available when the user
+    explicitly asks for monitoring/change detection.
+    """
+    if not SUPPRESS_COMPLETED_REQUIREMENT_REPEATS or not requirement_ledger.pending() or _user_requests_recheck(user_text):
+        return calls, []
+    accepted: list[dict[str, Any]] = []
+    notes: list[str] = []
+    for call in calls:
+        name = str(call.get("function", {}).get("name") or "")
+        signature = tool_call_signature(call)
+        if (
+            signature in successful_readonly_signatures
+            and requirement_ledger.status_for_tool(name) in {"satisfied", "partial"}
+        ):
+            notes.append(f"suppressed redundant completed requirement call: {name}")
+            continue
+        accepted.append(call)
+    return accepted, notes
+
+
+def _refresh_requirement_tool_schemas(
+    tool_schemas: list[dict[str, Any]],
+    requirement_ledger: TaskRequirementLedger,
+    turn_tool_policy,
+) -> bool:
+    """Prune completed requirement schemas and prioritize remaining checks.
+
+    Native tool schemas are a substantial part of Ollama prefill.  Once a
+    required check is complete, keeping that schema in every later request is
+    unnecessary and also invites a 4B model to repeat the familiar call.
+    """
+    changed = False
+    if PRUNE_SATISFIED_REQUIREMENT_TOOLS:
+        closed = requirement_ledger.closed_tools()
+        if closed:
+            before = len(tool_schemas)
+            tool_schemas[:] = [
+                schema for schema in tool_schemas
+                if str(schema.get("function", {}).get("name") or "") not in closed
+            ]
+            changed = len(tool_schemas) != before
+
+    pending_names = requirement_ledger.required_tools(pending_only=True)
+    before_ensure = len(tool_schemas)
+    blocked = _ensure_tool_schemas(tool_schemas, pending_names, turn_tool_policy)
+    if len(tool_schemas) != before_ensure:
+        changed = True
+    for name in blocked:
+        requirement_ledger.mark_blocked(name, "blocked or unavailable under harness policy")
+
+    # Pending requirements first helps small models pick the next unfinished
+    # check and keeps ordering deterministic for prompt-cache friendliness.
+    pending_order = {name: idx for idx, name in enumerate(requirement_ledger.required_tools(pending_only=True))}
+    original_order = {id(schema): idx for idx, schema in enumerate(tool_schemas)}
+    tool_schemas.sort(
+        key=lambda schema: (
+            0 if str(schema.get("function", {}).get("name") or "") in pending_order else 1,
+            pending_order.get(str(schema.get("function", {}).get("name") or ""), 10_000),
+            original_order.get(id(schema), 10_000),
+        )
+    )
+    return changed or bool(blocked)
 
 def _prune_compacted_history(messages: list[dict]) -> None:
     """Drop rows already represented by the durable rolling summary."""
@@ -550,8 +639,12 @@ def _bounded_tool_result(tool_name: str, result: Any) -> str:
     return _bounded_tool_result_with_ref(tool_name, result)[0]
 
 
-def _finalize_after_limit(messages: list[dict]) -> None:
-    """Produce a bounded final answer when the tool loop hits its safety cap."""
+def _finalize_after_limit(
+    messages: list[dict],
+    turn_tail: list[dict[str, Any]] | None = None,
+    reason: str = "The tool-call safety limit was reached.",
+) -> None:
+    """Produce a bounded no-tools final answer while preserving latest media."""
     history = messages[1:]
     if WORKING_STATE_ENABLED:
         last_user = next((model_message(item) for item in reversed(history) if item.get("role") == "user"), None)
@@ -570,8 +663,20 @@ def _finalize_after_limit(messages: list[dict]) -> None:
             evidence_context=WORKING_STATE.render_evidence(WORKING_STATE_EVIDENCE_CHARS) if WORKING_STATE_ENABLED else "",
             max_history_turns=WORKING_STATE_HISTORY_TURNS if WORKING_STATE_ENABLED else None,
         )[1:],
-        {"role": "user", "content": "The tool-call safety limit was reached. Summarize what has been established, what remains incomplete, and any useful next steps. Do not call tools."},
     ]
+    latest_media = next(
+        (model_message(item) for item in reversed(turn_tail or []) if item.get("images")),
+        None,
+    )
+    if latest_media:
+        prompt.append(latest_media)
+    prompt.append({
+        "role": "user",
+        "content": (
+            f"{str(reason).strip()} Summarize what has been established, what remains incomplete, "
+            "and any useful next steps. Do not call tools. If media is attached, ground visual claims only in those pixels."
+        ),
+    })
     try:
         response = OLLAMA.chat(model=MODEL, messages=prompt, options=MAIN_OPTIONS, tools=[], think=False, keep_alive=-1)
         msg = response.get("message", {}) if isinstance(response, dict) else getattr(response, "message", {})
@@ -690,10 +795,12 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
         tool_iterations = 0
         seen_tool_calls: set[str] = set()
         successful_mutating_signatures: set[str] = set()
+        successful_readonly_signatures: set[str] = set()
         recovery_validation: dict[str, str] | None = None
         stall_validation: dict[str, str] | None = None
         stall_enforce_once = False
         pending_stall_signal: dict[str, Any] | None = None
+        active_stall_recovery: dict[str, Any] | None = None
         validator_interventions = 0
         tracker = StepFailureTracker(STALL_VALIDATOR_AFTER)
         iteration_limit = _adaptive_iteration_limit(len(requirement_ledger.requirements))
@@ -736,14 +843,25 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
                         WORKING_STATE.record_validator(stall_validation, pending_stall_signal)
                     else:
                         shared_context.add_validator_event(stall_validation, pending_stall_signal)
-                    if str(stall_validation.get("decision") or "") == "blocked":
+                    validator_decision = str(stall_validation.get("decision") or "")
+                    if validator_decision in {"blocked", "finish"}:
                         stalled_key = str(pending_stall_signal.get("key") or "")
-                        requirement_ledger.mark_blocked(
-                            stalled_key,
-                            str(stall_validation.get("diagnosis") or "validator_blocked"),
-                        )
-                        if WORKING_STATE_ENABLED:
-                            WORKING_STATE.update_requirements(requirement_ledger.as_list())
+                        stalled_tool = stalled_key
+                        if stalled_tool not in AVAILABLE_TOOLS_MAP and ":" in stalled_tool:
+                            candidate = stalled_tool.split(":", 1)[0]
+                            if candidate in AVAILABLE_TOOLS_MAP:
+                                stalled_tool = candidate
+                        if stalled_tool in AVAILABLE_TOOLS_MAP:
+                            requirement_ledger.mark_blocked(
+                                stalled_tool,
+                                (
+                                    str(stall_validation.get("diagnosis") or "validator_blocked")
+                                    if validator_decision == "blocked"
+                                    else "fast validator determined no further tool use was useful"
+                                ),
+                            )
+                            if WORKING_STATE_ENABLED:
+                                WORKING_STATE.update_requirements(requirement_ledger.as_list())
                     suggested = str(stall_validation.get("suggested_tool") or "")
                     if suggested:
                         already_selected = suggested in selected_names
@@ -766,6 +884,10 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
                     f"  \033[93m[System]: Stalled-step validator decision: "
                     f"{stall_validation['decision']} after {pending_stall_signal.get('attempts', 0)} failed/no-progress attempts.\033[0m"
                 )
+                active_stall_recovery = {
+                    "signal": dict(pending_stall_signal),
+                    "report": dict(stall_validation),
+                }
                 pending_stall_signal = None
                 stall_enforce_once = True
 
@@ -794,8 +916,14 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
 
             prompt_tail = (
                 compact_working_tool_tail(turn_tail, keep_tool_results=WORKING_STATE_RAW_TOOL_RESULTS)
-                if WORKING_STATE_ENABLED else turn_tail
+                if WORKING_STATE_ENABLED else list(turn_tail)
             )
+            pending_hint = requirement_ledger.pending_hint()
+            if pending_hint and not stall_enforce_once:
+                # Ephemeral control guidance: it is not persisted in history or
+                # working state, so it prevents premature report drafting without
+                # accumulating another repeated prompt message every iteration.
+                prompt_tail = [*prompt_tail, {"role": "user", "content": pending_hint}]
             active = fit_tool_loop_messages(
                 turn_prefix,
                 prompt_tail,
@@ -869,7 +997,10 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
             supplied_tool_names = {str(schema.get("function", {}).get("name") or "") for schema in tool_schemas}
             parsed_calls, parse_errors = _parse_tool_calls(raw_tool_calls, supplied_tool_names)
             tool_calls, batch_notes = _sanitize_tool_call_batch(parsed_calls, successful_mutating_signatures)
-            control_notes = [*parse_errors, *batch_notes]
+            tool_calls, repeat_notes = _suppress_completed_requirement_calls(
+                tool_calls, requirement_ledger, successful_readonly_signatures, user_input
+            )
+            control_notes = [*parse_errors, *batch_notes, *repeat_notes]
             if stall_enforce_once and stall_validation is not None:
                 emitted_count = len(tool_calls)
                 tool_calls = select_stall_recovery_tool_calls(tool_calls, stall_validation, seen_tool_calls)
@@ -931,10 +1062,10 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
                         WORKING_STATE.complete_turn(blocked=(recovery_decision == "blocked"))
                     stall_validation = None
                     if not full_content:
-                        _finalize_after_limit(messages)
+                        _finalize_after_limit(messages, turn_tail, "The fast validator ended further tool use for this step.")
                     break
                 if recovery_validation is not None and not full_content:
-                    _finalize_after_limit(messages)
+                    _finalize_after_limit(messages, turn_tail, "The final recovery step produced no usable final response.")
                     break
 
                 if raw_tool_calls or control_notes:
@@ -972,6 +1103,7 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
             tool_iterations += 1
             attached_media: list[str] = []
             attached_from: list[str] = []
+            post_validator_blocked: list[str] = []
             iteration_progress = False
             for call in tool_calls:
                 name = call["function"]["name"]
@@ -1064,11 +1196,30 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
                     reason=reason,
                     fingerprint=str(outcome.get("fingerprint") or ""),
                 )
+                if active_stall_recovery and not success:
+                    signal_info = active_stall_recovery.get("signal", {})
+                    report_info = active_stall_recovery.get("report", {})
+                    signal_kind = str(signal_info.get("kind") or "")
+                    signal_key = str(signal_info.get("key") or "")
+                    is_corrective_retry = str(report_info.get("decision") or "") == "retry" and (
+                        (signal_kind == "tool_failure" and signal_key == name)
+                        or (signal_kind == "repeated_result" and signal_key == signature)
+                        or signal_kind == "failed_iterations"
+                    )
+                    if is_corrective_retry:
+                        requirement_ledger.mark_blocked(
+                            name,
+                            "failed after fast-validator corrective retry",
+                        )
+                        post_validator_blocked.append(name)
+                        tracker.reset_window()
                 if WORKING_STATE_ENABLED:
                     WORKING_STATE.update_requirements(requirement_ledger.as_list())
                 if success:
                     iteration_progress = True
-                    if not bool(TOOL_METADATA.get(name, {}).get("readonly", True)):
+                    if bool(TOOL_METADATA.get(name, {}).get("readonly", True)):
+                        successful_readonly_signatures.add(signature)
+                    else:
                         successful_mutating_signatures.add(signature)
 
             if control_notes:
@@ -1078,6 +1229,17 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
                         "[Harness batch note] Some emitted calls were not executed: "
                         + "; ".join(control_notes[:4])
                         + ". Continue only with a distinct necessary action."
+                    ),
+                })
+
+            if post_validator_blocked:
+                blocked_list = ", ".join(dict.fromkeys(post_validator_blocked))
+                turn_tail.append({
+                    "role": "user",
+                    "content": (
+                        "[Harness recovery limit] The fast-validator-approved corrective retry also failed for: "
+                        f"{blocked_list}. Those checks are blocked for this turn. Do not retry them again; "
+                        "continue with other pending requirements and report the blocker in the final answer."
                     ),
                 })
 
@@ -1108,26 +1270,31 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
                         tool_schemas.append(schema)
                         current_names.add(delayed_name)
                         print(f"  \033[93m[System]: User-conditioned tool is now available after an unsuccessful approach: {delayed_name}\033[0m")
-                if WORKING_STATE_ENABLED:
-                    WORKING_STATE.update_tools(tool_schemas)
-                else:
-                    shared_context.update_tools(tool_schemas)
-                turn_prefix, tool_prompt_tokens = rebuild_prefix()
-            elif WORKING_STATE_ENABLED:
-                # Tool evidence/failures were just committed to the canonical
-                # state. Refresh the 4B prefix so both models see the same
-                # harness-owned state on the next iteration.
+
+            schemas_changed = _refresh_requirement_tool_schemas(
+                tool_schemas, requirement_ledger, turn_tool_policy
+            )
+            if WORKING_STATE_ENABLED:
+                WORKING_STATE.update_tools(tool_schemas)
+                WORKING_STATE.update_requirements(requirement_ledger.as_list())
+            elif policy_changed or schemas_changed:
+                shared_context.update_tools(tool_schemas)
+            # Tool evidence/failures and requirement completion were just
+            # committed. Refresh the 4B prefix so both models see the same
+            # state and the next inference pays only for still-useful schemas.
+            if WORKING_STATE_ENABLED or policy_changed or schemas_changed:
                 turn_prefix, tool_prompt_tokens = rebuild_prefix()
             signal = tracker.consume_signal()
             if signal:
                 pending_stall_signal = signal
+            active_stall_recovery = None
             stall_validation = None
 
         else:
             print("\n\033[91m[!] Reached the maximum tool-call iteration limit.\033[0m")
             if WORKING_STATE_ENABLED:
                 WORKING_STATE.complete_turn(blocked=True)
-            _finalize_after_limit(messages)
+            _finalize_after_limit(messages, turn_tail)
 
     finally:
         record_monitor_state("agent.interaction_active", False)

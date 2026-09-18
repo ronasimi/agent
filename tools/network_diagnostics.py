@@ -151,8 +151,84 @@ def dns_diagnose(name: str, record_types: list[str] | None = None, resolver: str
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
+def _mtr_number(value: str) -> float | None:
+    value = str(value or "").strip()
+    if value in {"", "?", "???", "-"}:
+        return None
+    try:
+        return float(value.rstrip("%"))
+    except ValueError:
+        return None
+
+
+def _parse_mtr_report_text(text: str, target: str) -> dict | None:
+    """Parse the common human-readable MTR report format as a JSON fallback.
+
+    Some distro builds accept ``--json`` but still emit report text.  Treat that
+    as a format compatibility issue rather than a failed network probe.
+    """
+    lines = [line.rstrip() for line in str(text or "").splitlines() if line.strip()]
+    if not lines:
+        return None
+    start = ""
+    source_host = ""
+    header_index = -1
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("Start:"):
+            start = stripped.split(":", 1)[1].strip()
+        if "HOST:" in stripped and "Loss%" in stripped and "Snt" in stripped:
+            header_index = idx
+            match = re.search(r"HOST:\s*(.*?)\s+Loss%", stripped)
+            if match:
+                source_host = match.group(1).strip()
+            break
+    if header_index < 0:
+        return None
+
+    hops = []
+    for raw in lines[header_index + 1:]:
+        parts = raw.split()
+        if len(parts) < 9 or not re.fullmatch(r"\d+\.\|--", parts[0]):
+            continue
+        # Metrics occupy the final seven columns in standard report output:
+        # Loss%, Snt, Last, Avg, Best, Wrst, StDev. Everything between the hop
+        # marker and those columns is an opaque hostname/address label.
+        metric_start = len(parts) - 7
+        if metric_start <= 1:
+            continue
+        hop = int(parts[0].split(".", 1)[0])
+        node = " ".join(parts[1:metric_start]).strip() or "???"
+        loss, sent, last, avg, best, worst, stdev = parts[metric_start:]
+        hops.append({
+            "hop": hop,
+            "host": node,
+            "loss_percent": _mtr_number(loss),
+            "sent": int(float(sent)) if _mtr_number(sent) is not None else None,
+            "last_ms": _mtr_number(last),
+            "avg_ms": _mtr_number(avg),
+            "best_ms": _mtr_number(best),
+            "worst_ms": _mtr_number(worst),
+            "stdev_ms": _mtr_number(stdev),
+        })
+    if not hops:
+        return None
+    return {
+        "target": target,
+        "format": "mtr_report_text_fallback",
+        "source_host": source_host,
+        "started_at": start,
+        "hops": hops,
+    }
+
+
 def network_path(target: str, max_hops: int = 20, probes: int = 3) -> str:
-    """Run a bounded MTR path/loss probe to an IP or hostname and return JSON."""
+    """Run a bounded MTR path/loss probe and return structured JSON.
+
+    JSON output is preferred, but a structured parser handles MTR builds that
+    unexpectedly emit the traditional report format even when ``--json`` is
+    requested.
+    """
     try:
         host = _safe_host(target)
     except ValueError as exc:
@@ -166,9 +242,15 @@ def network_path(target: str, max_hops: int = 20, probes: int = 3) -> str:
         return f"Error: mtr failed: {stderr.strip()}"
     try:
         payload = json.loads(stdout)
+        return json.dumps(payload, ensure_ascii=False, indent=2)
     except json.JSONDecodeError:
-        return f"Error: mtr returned malformed JSON: {stdout[:500]}"
-    return json.dumps(payload, ensure_ascii=False, indent=2)
+        payload = _parse_mtr_report_text(stdout, host)
+        if payload is not None:
+            if code != 0:
+                payload["warning"] = f"mtr exited with status {code}: {stderr.strip()[:300]}"
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+        detail = (stdout or stderr).strip()[:500]
+        return f"Error: mtr returned an unrecognized output format: {detail}"
 
 
 def endpoint_probe(host: str, port: int, tls: bool = False, timeout: float = 5.0) -> str:

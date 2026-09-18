@@ -68,3 +68,33 @@ def test_turn_policy_supports_counted_conditional_tool_restriction():
     assert not policy.allowed("execute_shell", metadata["execute_shell"])
     policy.record_iteration(False)
     assert policy.allowed("execute_shell", metadata["execute_shell"])
+
+
+def test_http_probe_satisfies_explicit_dns_resolution_requirement():
+    ledger = TaskRequirementLedger.from_request(
+        "Resolve example.com and probe HTTPS connectivity to https://example.com"
+    )
+    assert {"dns_diagnose", "http_probe"} <= set(ledger.required_tools())
+    ledger.record_tool("http_probe", status="ok", fingerprint="probe-one")
+    assert ledger.status_for_tool("http_probe") == "satisfied"
+    assert ledger.status_for_tool("dns_diagnose") == "satisfied"
+    assert ledger.pending() == []
+
+
+def test_blocked_requirement_is_closed_and_not_pending():
+    ledger = TaskRequirementLedger.from_request("Inspect the network path to example.com")
+    ledger.mark_blocked("network_path", "tool parser unavailable")
+    assert ledger.status_for_tool("network_path") == "blocked"
+    assert "network_path" in ledger.closed_tools()
+    assert ledger.pending() == []
+
+
+def test_pending_hint_is_ephemeral_style_and_lists_only_unfinished_checks():
+    ledger = TaskRequirementLedger.from_request(
+        "Inspect host CPU and memory and pressure state"
+    )
+    ledger.record_tool("host_snapshot", status="ok", fingerprint="host")
+    hint = ledger.pending_hint()
+    assert "pressure_snapshot" in hint
+    assert "host_snapshot" not in hint
+    assert "Do not draft the final report yet" in hint
