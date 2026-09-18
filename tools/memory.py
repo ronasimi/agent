@@ -111,7 +111,12 @@ def clear_chat_history() -> str:
         conn.execute("DELETE FROM chat_history")
         conn.execute("DELETE FROM tool_observations")
         conn.execute("UPDATE conversation_state SET summary = '', compacted_through_id = 0, updated_at = CURRENT_TIMESTAMP WHERE id = 1")
-    return "Chat history and rolling context summary cleared."
+    try:
+        from .working_state import WorkingStateStore
+        WorkingStateStore().clear()
+    except Exception:
+        pass
+    return "Chat history, rolling context summary, and harness working state cleared."
 
 
 def get_conversation_summary() -> str:

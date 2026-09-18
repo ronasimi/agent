@@ -16,7 +16,7 @@ bounded context growth, and foreground responsiveness.
 - The active historical prefix is built once at the start of a user turn.
 - Each tool iteration appends assistant calls and tool results as a suffix.
   Earlier messages are not rebuilt from a shifting message window.
-- Tool schemas use a fixed six-tool core plus deterministic domain bundles.
+- Tool schemas use a small fixed read-oriented core plus deterministic domain bundles and lexical matches.
   Generic turns do not carry the full tool inventory.
 
 These rules give Ollama a byte-stable prefix across tool iterations, which is
@@ -119,6 +119,7 @@ The optimized defaults are in config/config.yaml:
         enabled: true
         failed_step_attempts: 3
         max_interventions_per_turn: 3
+        max_candidate_tools: 24
         timeout_seconds: 45
         max_transcript_chars: 12000
         keep_alive: -1
@@ -186,6 +187,12 @@ returns every field.
 - tools/context.py — turn grouping, token budgeting, and trimming.
 - tools/model_context.py — bounded semantic state bridge shared by main/fast models.
 - tools/loop_validator.py — bounded fast-model tool-loop classification.
+- tools/turn_policy.py — deterministic per-turn user tool restrictions and conditional unlocks.
+- tools/host_diagnostics.py — process, PSI, filesystem, and systemd health snapshots.
+- tools/network_diagnostics.py — neighbors, connections, DNS, path, endpoint, and HTTP diagnostics.
+- tools/web_research.py — metadata, links, feeds, documents, fingerprints, and page diffs.
+- tools/repo_diagnostics.py — Git status/diff, bounded repo checks, dependency and tool health.
+- tools/observation_tools.py — deterministic diffs between durable tool observations.
 - tools/memory.py — memories, history watermark, and observations.
 - tools/runtime.py — durable jobs, checkpoints, leases, and deferral.
 - tools/deep_research.py — planning, collection, distillation, and evaluation.
@@ -196,6 +203,19 @@ returns every field.
 - config/config.yaml — models, context budgets, and worker policy.
 
 SQLite WAL mode allows both containers to share memory/knowledge.db.
+
+## Structured diagnostics and research utilities
+
+The harness exposes narrow tools so the 4B model does not need to construct shell commands for common diagnosis:
+
+- Host: `process_snapshot`, `pressure_snapshot`, `filesystem_snapshot`, `service_health`.
+- Network: `neighbor_snapshot`, `connection_snapshot`, `dns_diagnose`, `network_path`, `endpoint_probe`, `http_probe`.
+- Web/document research: `page_metadata`, `page_links`, `discover_site`, `read_feed`, `extract_document`, `page_fingerprint`, `page_diff`.
+- Harness/repository: `repo_status`, `repo_diff`, `repo_checks`, `dependency_audit`, `tool_health`, `diff_observations`.
+
+`page_diff` stores only a bounded normalized prior page snapshot in monitor state and returns a bounded unified diff. `repo_checks` accepts only the known `compile`, `config`, `ruff`, and `pytest` checks and runs against a temporary source copy. `tool_health` reports missing command dependencies before the model wastes retries on an unavailable tool.
+
+Explicit per-turn restrictions are enforced by the harness. For example, `do not use execute_shell unless your first approach fails` removes `execute_shell` from the first inference schema and exposes it only after an unsuccessful allowed-tool iteration. Read-only requests disable mutating tools for the whole turn. Non-zero shell/Python exits with genuinely useful stdout are labeled `status=partial`; non-zero exits without useful stdout remain `status=error`.
 
 ## Research lifecycle
 
@@ -264,14 +284,22 @@ checkout:
 Review the diff and commit it normally. If the extracted project is not already
 a Git repository, initialize and commit the baseline before running promotion.
 
-### Repository context size
+### Repository context size and shared working state
 
 `scripts/benchmark_harness.py` estimates source context at roughly one token per
-four bytes. The current harness is below the configured 80,000-token full-tree
-gate, but normal agent and optimization turns do not inject the full tree.
-`get_repo_map`, `search_repo_symbols`, and `read_repo_symbol` retrieve only the
-map and relevant slices, while optimization source context is capped at 32,000
-characters.
+four bytes. The full-tree guard is 160,000 estimated tokens; normal agent and
+optimization turns never inject the full tree. `get_repo_map`,
+`search_repo_symbols`, and `read_repo_symbol` retrieve only the map and relevant
+slices, while optimization source context is capped at 32,000 characters.
+
+Interactive turns also maintain a small persisted harness working state in
+SQLite. It is the common source of truth for the 4B main model and 2B validator:
+current objective, explicit constraints, selected tool capabilities,
+provenance-tagged tool evidence, failed approaches, current recovery plan, and
+structured validator decisions. With working state enabled, the main prompt
+keeps only the current raw conversation turn instead of re-ingesting older raw
+turns already represented by the state/rolling summary. Tool evidence previews
+remain untrusted data, and only harness code can commit state changes.
 
 ## CLI commands
 

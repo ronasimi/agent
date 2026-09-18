@@ -28,7 +28,7 @@ MUTATING_TOOLS = {
     "notify_desktop", "write_file", "generate_pdf_report", "take_web_screenshot",
     "install_package", "execute_shell", "execute_python",
     "queue_work", "update_work_status", "map_network",
-    "create_or_update_tool", "reload_tools",
+    "create_or_update_tool", "reload_tools", "page_diff",
 }
 # Mutating only because they write/replace a deterministic artifact. Repeating an
 # identical call is safe and can be necessary after a transient blank capture.
@@ -41,6 +41,9 @@ BUILTINS = [
     ("job_tools", "list_background_jobs"), ("job_tools", "cancel_background_job"),
     ("repo_map", "get_repo_map"), ("repo_map", "search_repo_symbols"),
     ("repo_map", "read_repo_symbol"),
+    ("repo_diagnostics", "repo_status"), ("repo_diagnostics", "repo_diff"),
+    ("repo_diagnostics", "repo_checks"), ("repo_diagnostics", "dependency_audit"),
+    ("repo_diagnostics", "tool_health"), ("observation_tools", "diff_observations"),
     ("self_optimization", "enqueue_self_optimization"),
     ("self_optimization", "get_self_optimization_status"),
     ("self_optimization", "list_self_optimization_candidates"),
@@ -50,7 +53,16 @@ BUILTINS = [
     ("host_tools", "ollama_runtime_snapshot"), ("host_tools", "network_snapshot"),
     ("host_tools", "network_reachability"), ("host_tools", "list_host_monitor_events"), ("host_tools", "read_host_file"),
     ("host_tools", "read_host_journal"), ("host_tools", "tail_host_log"),
+    ("host_diagnostics", "process_snapshot"), ("host_diagnostics", "pressure_snapshot"),
+    ("host_diagnostics", "filesystem_snapshot"), ("host_diagnostics", "service_health"),
+    ("network_diagnostics", "neighbor_snapshot"), ("network_diagnostics", "connection_snapshot"),
+    ("network_diagnostics", "dns_diagnose"), ("network_diagnostics", "network_path"),
+    ("network_diagnostics", "endpoint_probe"), ("network_diagnostics", "http_probe"),
     ("web", "web_search"), ("web", "wiki_search"), ("web", "browse_url"),
+    ("web_research", "page_metadata"), ("web_research", "page_links"),
+    ("web_research", "discover_site"), ("web_research", "read_feed"),
+    ("web_research", "extract_document"), ("web_research", "page_fingerprint"),
+    ("web_research", "page_diff"),
     ("web_screenshot", "take_web_screenshot"),
     ("media", "attach_media"),
     ("pdf_generator", "generate_pdf_report"),
@@ -145,16 +157,17 @@ _ALWAYS_TOOL_NAMES = {
 _TOOL_BUNDLES = (
     (
         {"file", "files", "code", "coding", "python", "script", "repo", "project"},
-        ("read_file", "write_file", "read_observation", "execute_python", "get_repo_map", "search_repo_symbols"),
+        ("read_file", "write_file", "read_observation", "execute_python", "get_repo_map", "search_repo_symbols", "repo_status", "repo_diff", "repo_checks"),
     ),
     (
         {"optimize", "optimization", "self", "benchmark", "performance", "refactor"},
-        ("get_repo_map", "search_repo_symbols", "read_repo_symbol", "enqueue_self_optimization",
-         "get_self_optimization_status", "list_self_optimization_candidates"),
+        ("get_repo_map", "search_repo_symbols", "read_repo_symbol", "repo_status", "repo_diff", "repo_checks", "dependency_audit", "tool_health",
+         "enqueue_self_optimization", "get_self_optimization_status", "list_self_optimization_candidates"),
     ),
     (
         {"web", "internet", "search", "url", "site", "research", "source", "sources"},
-        ("web_search", "browse_url", "take_web_screenshot", "enqueue_research", "get_research_status", "read_observation"),
+        ("web_search", "browse_url", "page_metadata", "page_links", "discover_site", "read_feed", "extract_document", "page_fingerprint", "page_diff",
+         "take_web_screenshot", "enqueue_research", "get_research_status", "read_observation"),
     ),
     (
         {"image", "images", "screenshot", "screenshots", "photo", "picture", "media", "vision", "visual"},
@@ -162,11 +175,12 @@ _TOOL_BUNDLES = (
     ),
     (
         {"cpu", "ram", "disk", "gpu", "process", "log", "shell", "command", "system", "host"},
-        ("host_snapshot", "execute_shell", "read_host_file", "read_host_journal", "tail_host_log", "read_observation"),
+        ("host_snapshot", "process_snapshot", "pressure_snapshot", "filesystem_snapshot", "service_health",
+         "execute_shell", "read_host_file", "read_host_journal", "tail_host_log", "read_observation"),
     ),
     (
         {"network", "wifi", "dns", "route", "port", "mdns", "lan"},
-        ("network_snapshot", "network_reachability", "map_network", "scan_mdns"),
+        ("network_snapshot", "neighbor_snapshot", "connection_snapshot", "network_reachability", "dns_diagnose", "network_path", "endpoint_probe", "http_probe", "map_network", "scan_mdns"),
     ),
     (
         {"remember", "preference", "recall"},
@@ -179,7 +193,11 @@ _TOOL_BUNDLES = (
 )
 
 def _selection_tokens(text: str) -> set[str]:
-    return {token for token in re.findall(r"[a-z0-9_]+", str(text).lower()) if token not in _TOOL_SELECTION_STOPWORDS and len(token) > 1}
+    # Treat literal tool names such as ``dns_diagnose`` the same as natural
+    # language "dns diagnose" so a user/validator can reliably request a tool
+    # by its registered name.
+    normalized = str(text).lower().replace("_", " ")
+    return {token for token in re.findall(r"[a-z0-9]+", normalized) if token not in _TOOL_SELECTION_STOPWORDS and len(token) > 1}
 
 def select_tool_schemas(user_text: str, max_tools: int = 12, context_text: str = "") -> list[dict]:
     """Select a small core, strongest intent bundles, then lexical matches.

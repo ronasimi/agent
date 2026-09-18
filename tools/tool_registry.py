@@ -41,6 +41,10 @@ _SCHEMA_OVERRIDES: dict[tuple[str, str], dict[str, Any]] = {
     ("list_work_queue", "status"): {"enum": ["pending", "running", "completed", "cancelled"]},
     ("update_work_status", "status"): {"enum": ["pending", "running", "completed", "cancelled"]},
     ("list_reminders", "status"): {"enum": ["", "scheduled", "error", "cancelled"]},
+    ("process_snapshot", "sort_by"): {"enum": ["cpu", "memory", "io"]},
+    ("connection_snapshot", "state"): {"enum": ["", "established", "listen", "time-wait", "close-wait", "syn-sent", "syn-recv"]},
+    ("dns_diagnose", "record_types"): {"items": {"type": "string", "enum": ["A", "AAAA", "CNAME", "MX", "NS", "TXT", "SOA", "SRV", "PTR"]}},
+    ("repo_checks", "checks"): {"items": {"type": "string", "enum": ["compile", "config", "ruff", "pytest"]}},
 }
 
 _PARAMETER_HINTS = {
@@ -70,6 +74,7 @@ _PARAMETER_HINTS = {
     "service": "Optional systemd service/unit filter.",
     "grep": "Optional text/regular-expression filter supported by the tool.",
     "targets": "Optional list of network reachability targets.",
+    "target": "Hostname or IP address to probe.",
     "symbol": "Optional Python symbol name; omit to read a line slice.",
     "start_line": "1-based starting line for a bounded source read.",
     "max_lines": "Maximum number of source lines to return.",
@@ -94,6 +99,26 @@ _PARAMETER_HINTS = {
     "tool_name": "Custom tool name.",
     "specification": "Natural-language specification for the custom tool.",
     "context": "Short context explaining what should be inspected or why.",
+    "sort_by": "Sort mode accepted by this tool.",
+    "include_command": "Whether to include a bounded, redacted process command line.",
+    "state": "Optional connection-state filter.",
+    "name": "DNS name or hostname expected by this tool.",
+    "record_types": "List of DNS record types such as A, AAAA, CNAME, MX, NS, TXT, SOA, SRV, or PTR.",
+    "resolver": "Optional DNS resolver IP/hostname; empty uses the system resolver.",
+    "max_hops": "Maximum network-path hops to probe.",
+    "probes": "Small number of probes/cycles per network-path hop.",
+    "host": "Hostname or IP address.",
+    "port": "TCP port number from 1 to 65535.",
+    "tls": "Whether to perform a TLS handshake after TCP connect.",
+    "allow_private": "Whether this explicit probe may target private/local addresses.",
+    "same_domain": "Limit extracted links to the page's hostname.",
+    "path_or_url": "Workspace-local file path or public HTTP(S) URL.",
+    "max_pages": "Maximum number of PDF pages to extract.",
+    "max_chars": "Maximum extracted text characters.",
+    "max_diff_chars": "Maximum characters of unified diff to return.",
+    "checks": "Known repository checks only: compile, config, ruff, pytest.",
+    "old_id": "Older durable observation identifier.",
+    "new_id": "Newer durable observation identifier.",
 }
 
 

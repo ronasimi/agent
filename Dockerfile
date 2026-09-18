@@ -14,6 +14,8 @@ RUN pacman -Syu --noconfirm --needed \
       graphviz \
       nmap \
       iputils \
+      iproute2 \
+      mtr \
       bind \
       sqlite \
       systemd \

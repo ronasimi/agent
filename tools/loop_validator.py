@@ -57,6 +57,10 @@ _SOFT_FAILURE_PREFIXES = (
     "no logs found",
 )
 
+_PARTIAL_PREFIXES = (
+    "partial:",
+)
+
 
 def tool_call_signature(call: dict[str, Any]) -> str:
     """Return a stable signature used to reject repeated recovery calls."""
@@ -86,9 +90,9 @@ def classify_tool_outcome(
     """Classify only explicit harness/tool failures; ordinary data remains successful."""
     text = str(content or "").strip()
     if execution_error:
-        return {"success": False, "reason": "execution_error", "fingerprint": result_fingerprint(text)}
+        return {"success": False, "status": "error", "reason": "execution_error", "fingerprint": result_fingerprint(text)}
     if media_error:
-        return {"success": False, "reason": "media_attachment_failed", "fingerprint": result_fingerprint(text)}
+        return {"success": False, "status": "error", "reason": "media_attachment_failed", "fingerprint": result_fingerprint(text)}
 
     lowered = text.lower().lstrip()
     name = str(tool_name or "")
@@ -97,14 +101,14 @@ def classify_tool_outcome(
     # look like successful JSON/text. Mark only those known shapes as no-progress
     # so three fruitless tries reach the fast validator instead of looping.
     if name == "web_search" and text.strip() == "[]":
-        return {"success": False, "reason": "no_progress_result", "fingerprint": result_fingerprint(text)}
+        return {"success": False, "status": "error", "reason": "no_progress_result", "fingerprint": result_fingerprint(text)}
     if name == "browse_url" and "the page returned no readable text content." in lowered:
-        return {"success": False, "reason": "no_progress_result", "fingerprint": result_fingerprint(text)}
+        return {"success": False, "status": "error", "reason": "no_progress_result", "fingerprint": result_fingerprint(text)}
     if name == "network_reachability" and text.startswith("["):
         try:
             payload = json.loads(text)
             if isinstance(payload, list) and payload and all(isinstance(item, dict) and item.get("ok") is False for item in payload):
-                return {"success": False, "reason": "no_progress_result", "fingerprint": result_fingerprint(text)}
+                return {"success": False, "status": "error", "reason": "no_progress_result", "fingerprint": result_fingerprint(text)}
         except (TypeError, ValueError, json.JSONDecodeError):
             pass
 
@@ -115,15 +119,17 @@ def classify_tool_outcome(
         try:
             payload = json.loads(text)
             if isinstance(payload, dict) and payload.get("error"):
-                return {"success": False, "reason": "tool_reported_error", "fingerprint": result_fingerprint(text)}
+                return {"success": False, "status": "error", "reason": "tool_reported_error", "fingerprint": result_fingerprint(text)}
         except (TypeError, ValueError, json.JSONDecodeError):
             pass
 
+    if lowered.startswith(_PARTIAL_PREFIXES):
+        return {"success": True, "status": "partial", "reason": "nonzero_with_output", "fingerprint": result_fingerprint(text)}
     if lowered.startswith(_ERROR_PREFIXES):
-        return {"success": False, "reason": "tool_reported_error", "fingerprint": result_fingerprint(text)}
+        return {"success": False, "status": "error", "reason": "tool_reported_error", "fingerprint": result_fingerprint(text)}
     if lowered.startswith(_SOFT_FAILURE_PREFIXES):
-        return {"success": False, "reason": "no_progress_result", "fingerprint": result_fingerprint(text)}
-    return {"success": True, "reason": "ok", "fingerprint": result_fingerprint(text)}
+        return {"success": False, "status": "error", "reason": "no_progress_result", "fingerprint": result_fingerprint(text)}
+    return {"success": True, "status": "ok", "reason": "ok", "fingerprint": result_fingerprint(text)}
 
 
 @dataclass

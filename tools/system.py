@@ -37,7 +37,7 @@ def execute_shell(command: str = "", timeout: int = 30) -> str:
     timeout = max(1, min(int(timeout), 120))
     try:
         result = subprocess.run(
-            ["bash", "-lc", str(command)],
+            ["bash", "--noprofile", "--norc", "-c", str(command)],
             cwd=WORKSPACE_DIR,
             capture_output=True,
             text=True,
@@ -47,6 +47,8 @@ def execute_shell(command: str = "", timeout: int = 30) -> str:
         )
         output = f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}".strip()
         if result.returncode != 0:
+            if result.stdout.strip():
+                return f"Partial: command exited with status {result.returncode} but produced usable stdout.\n{output}"
             return f"Error: command exited with status {result.returncode}.\n{output}"
         return output or "Command completed successfully with no output."
     except subprocess.TimeoutExpired:
@@ -79,6 +81,8 @@ def execute_python(code: str = "", timeout: int = 30) -> str:
         )
         output = f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}".strip()
         if result.returncode != 0:
+            if result.stdout.strip():
+                return f"Partial: Python exited with status {result.returncode} but produced usable stdout.\n{output}"
             return f"Error: Python exited with status {result.returncode}.\n{output}"
         return output or "Python execution completed with no output."
     except subprocess.TimeoutExpired:

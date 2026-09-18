@@ -1,0 +1,158 @@
+import json
+import tempfile
+from pathlib import Path
+
+
+def _store(monkeypatch, directory: str, **limits):
+    from tools import working_state
+    db = str(Path(directory) / "state.db")
+    monkeypatch.setattr(working_state, "DB_PATH", db)
+    return working_state.WorkingStateStore(limits=limits)
+
+
+def _schema(name="read_file"):
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": "Read a workspace file.",
+            "parameters": {"type": "object", "required": ["filename"]},
+        },
+    }
+
+
+def test_working_state_persists_and_resets_per_turn(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        store = _store(monkeypatch, td)
+        store.begin_turn(
+            turn_id=7,
+            objective="Find validator_test.txt. Do not invent contents.",
+            rolling_summary="Prior setup.",
+            recalled_context="Relevant memory.",
+            recent_messages=[{"role": "assistant", "content": "Earlier context"}],
+            policy_note="execute_shell is delayed",
+            tool_schemas=[_schema()],
+        )
+        store.record_tool_result(
+            tool_name="read_file",
+            arguments={"filename": "/wrong"},
+            status="error",
+            reason="tool_reported_error",
+            result_text="File was not found",
+            fingerprint="abc",
+        )
+        reloaded = _store(monkeypatch, td).load()
+        assert reloaded["turn_id"] == 7
+        assert reloaded["failed_approaches"][0]["tool"] == "read_file"
+        assert any("Do not invent contents" in item for item in reloaded["constraints"])
+
+        store.begin_turn(
+            turn_id=8,
+            objective="New task",
+            rolling_summary="Prior setup.",
+            recalled_context="",
+            recent_messages=[],
+            policy_note="",
+            tool_schemas=[_schema()],
+        )
+        fresh = store.load()
+        assert fresh["turn_id"] == 8
+        assert fresh["failed_approaches"] == []
+        assert fresh["objective"] == "New task"
+
+
+def test_working_state_records_evidence_and_structured_validator(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        store = _store(monkeypatch, td, max_render_chars=7000)
+        store.begin_turn(
+            turn_id=1,
+            objective="Inspect a file",
+            rolling_summary="",
+            recalled_context="",
+            recent_messages=[],
+            policy_note="",
+            tool_schemas=[_schema()],
+        )
+        store.record_tool_result(
+            tool_name="read_file",
+            arguments={"filename": "x"},
+            status="ok",
+            reason="ok",
+            result_text="actual filesystem evidence",
+            fingerprint="deadbeef",
+        )
+        store.record_validator(
+            {"decision": "switch_tool", "diagnosis": "wrong_tool", "suggested_tool": "repo_status"},
+            {"kind": "tool_failure", "key": "read_file", "attempts": 3},
+        )
+        persisted = store.load()
+        assert "actual filesystem evidence" in persisted["verified_observations"][0]["evidence_preview"]
+        text = store.render()
+        parsed = json.loads(text)
+        assert parsed["verified_observations"][0]["tool"] == "read_file"
+        assert "evidence_preview" not in parsed["verified_observations"][0]
+        assert "actual filesystem evidence" not in text
+        assert parsed["validator_history"][0]["diagnosis"] == "wrong_tool"
+        assert parsed["current_plan"][0]["tool"] == "repo_status"
+
+
+def test_working_state_is_bounded(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        store = _store(monkeypatch, td, max_render_chars=2200, background_chars=1000)
+        store.begin_turn(
+            turn_id=1,
+            objective="x" * 5000,
+            rolling_summary="s" * 5000,
+            recalled_context="m" * 5000,
+            recent_messages=[{"role": "user", "content": "r" * 5000}],
+            policy_note="",
+            tool_schemas=[_schema()],
+        )
+        rendered = store.render()
+        assert len(rendered) <= 2200
+        assert json.loads(rendered)["turn_id"] == 1
+
+
+def test_active_context_uses_working_state_instead_of_old_history():
+    from tools.context import build_active_messages
+
+    history = [
+        {"role": "user", "content": "OLD UNIQUE CONTEXT"},
+        {"role": "assistant", "content": "OLD ANSWER"},
+        {"role": "user", "content": "CURRENT REQUEST"},
+    ]
+    result = build_active_messages(
+        system_prompt="stable-system",
+        summary="SHOULD NOT APPEAR",
+        history=history,
+        max_ctx_tokens=4000,
+        reserve_tokens=500,
+        working_state='{"objective":"CURRENT REQUEST","background":{"recent_context":"OLD UNIQUE CONTEXT"}}',
+        max_history_turns=1,
+    )
+    joined = "\n".join(str(m.get("content", "")) for m in result)
+    assert "SHOULD NOT APPEAR" not in joined
+    assert joined.count("OLD UNIQUE CONTEXT") == 1
+    assert "CURRENT REQUEST" in result[-1]["content"]
+
+def test_clear_chat_history_clears_working_state(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        from tools import memory, runtime, working_state
+        db = str(Path(td) / "shared.db")
+        monkeypatch.setattr(runtime, "DB_PATH", db)
+        monkeypatch.setattr(memory, "DB_PATH", db)
+        monkeypatch.setattr(working_state, "DB_PATH", db)
+        memory.init_db()
+        store = working_state.WorkingStateStore()
+        store.begin_turn(
+            turn_id=9,
+            objective="temporary task",
+            rolling_summary="",
+            recalled_context="",
+            recent_messages=[],
+            policy_note="",
+            tool_schemas=[_schema()],
+        )
+        assert store.load()["turn_id"] == 9
+        memory.clear_chat_history()
+        assert store.load()["turn_id"] == 0

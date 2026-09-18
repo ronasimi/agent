@@ -14,3 +14,5 @@ weasyprint
 pygments
 psutil
 pytest
+feedparser
+ruff
