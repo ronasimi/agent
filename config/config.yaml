@@ -14,6 +14,20 @@ agent:
   show_perf_stats: true
   max_iterations: 12
 
+  # Before the last allowed tool-loop iteration, the fast model classifies the
+  # loop and the harness injects constrained recovery guidance for the main model.
+  tool_loop_validator:
+    enabled: true
+    timeout_seconds: 45
+    max_transcript_chars: 12000
+    keep_alive: 0
+    options:
+      num_ctx: 4096
+      temperature: 0.0
+      top_p: 0.9
+      top_k: 20
+      num_predict: 192
+
   # Native tool schemas are selected deterministically per turn to reduce prefill.
   max_tools_per_turn: 12
 
@@ -139,4 +153,4 @@ self_optimization:
     - ["python", "-m", "compileall", "-q", "."]
     - ["python", "-m", "pytest", "-q"]
   benchmark_commands:
-    - ["python", "scripts/benchmark_harness.py", "--max-source-tokens", "75000"]
+    - ["python", "scripts/benchmark_harness.py", "--max-source-tokens", "80000"]

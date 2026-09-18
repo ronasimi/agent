@@ -59,6 +59,12 @@ from tools.context import (
     model_message,
 )
 from tools.job_tools import enqueue_research, get_research_status
+from tools.loop_validator import (
+    build_recovery_message,
+    select_recovery_tool_calls,
+    tool_call_signature,
+    validate_tool_loop,
+)
 from tools.runtime import create_singleton_job, list_jobs, record_monitor_state, utc_now
 from tools.self_optimization import (
     approve_self_optimization,
@@ -88,8 +94,14 @@ MAX_ITERATIONS = int(AGENT_CFG.get("max_iterations", 12))
 SEMANTIC_MEMORY = bool(AGENT_CFG.get("semantic_memory_enabled", False))
 THINKING_DEFAULT = bool(AGENT_CFG.get("thinking_default", False))
 SHOW_PERF_STATS = bool(AGENT_CFG.get("show_perf_stats", True))
+LOOP_VALIDATOR_CFG = AGENT_CFG.get("tool_loop_validator", {})
+LOOP_VALIDATOR_ENABLED = bool(LOOP_VALIDATOR_CFG.get("enabled", True))
+LOOP_VALIDATOR_OPTIONS = {**FAST_OPTIONS, **(LOOP_VALIDATOR_CFG.get("options") or {})}
+LOOP_VALIDATOR_MAX_CHARS = int(LOOP_VALIDATOR_CFG.get("max_transcript_chars", 12000))
+LOOP_VALIDATOR_KEEP_ALIVE = LOOP_VALIDATOR_CFG.get("keep_alive", 0)
 
 OLLAMA = Client(host=OLLAMA_HOST)
+LOOP_VALIDATOR_CLIENT = Client(host=OLLAMA_HOST, timeout=float(LOOP_VALIDATOR_CFG.get("timeout_seconds", 45)))
 
 init_db()
 
@@ -394,8 +406,27 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
             extra_prompt_tokens=tool_prompt_tokens + TOOL_LOOP_RESERVE,
         )
         turn_tail: list[dict[str, Any]] = []
+        tool_iterations = 0
+        seen_tool_calls: set[str] = set()
+        recovery_validation: dict[str, str] | None = None
 
         for iteration in range(1, MAX_ITERATIONS + 1):
+            if iteration == MAX_ITERATIONS and tool_iterations and LOOP_VALIDATOR_ENABLED:
+                tool_names = [str(schema.get("function", {}).get("name", "")) for schema in tool_schemas]
+                with Spinner("Fast-model tool-loop validation"):
+                    recovery_validation = validate_tool_loop(
+                        LOOP_VALIDATOR_CLIENT,
+                        FAST_MODEL,
+                        user_input,
+                        turn_tail,
+                        [name for name in tool_names if name],
+                        LOOP_VALIDATOR_OPTIONS,
+                        max_chars=LOOP_VALIDATOR_MAX_CHARS,
+                        keep_alive=LOOP_VALIDATOR_KEEP_ALIVE,
+                    )
+                turn_tail.append({"role": "user", "content": build_recovery_message(recovery_validation)})
+                print(f"  \033[93m[System]: Tool-loop validator decision: {recovery_validation['decision']}\033[0m")
+
             # The model request grows only by suffix during this tool loop, which
             # preserves Ollama's reusable prefix across iterations.
             active = fit_tool_loop_messages(
@@ -467,6 +498,11 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
                 perf_stats["_ttft_ms"] = (first_token_at - request_started) * 1000.0
             _print_perf_stats(perf_stats)
             tool_calls = _extract_tool_calls(raw_tool_calls)
+            if iteration == MAX_ITERATIONS and recovery_validation is not None:
+                emitted_count = len(tool_calls)
+                tool_calls = select_recovery_tool_calls(tool_calls, recovery_validation, seen_tool_calls)
+                if emitted_count > len(tool_calls):
+                    print("  \033[93m[System]: Recovery policy suppressed repeated or excess tool calls.\033[0m")
             assistant_msg = {"role": "assistant", "content": full_content}
             if tool_calls:
                 assistant_msg["tool_calls"] = tool_calls
@@ -476,6 +512,9 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
                 turn_tail.append(model_message(assistant_msg))
 
             if not tool_calls:
+                if recovery_validation is not None and not full_content:
+                    _finalize_after_limit(messages)
+                    break
                 if not full_content and in_thinking:
                     correction = {"role": "user", "content": "Please provide the final answer or issue an explicit tool call."}
                     append_and_save(messages, correction)
@@ -483,9 +522,11 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
                     continue
                 break
 
+            tool_iterations += 1
             for call in tool_calls:
                 name = call["function"]["name"]
                 raw_args = call["function"].get("arguments", {})
+                seen_tool_calls.add(tool_call_signature(call))
                 print(f"\n\033[96m[Tool] {name}\033[0m")
                 try:
                     args = normalize_arguments(AVAILABLE_TOOLS_MAP[name], raw_args)

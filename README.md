@@ -62,6 +62,22 @@ consuming a retry.
 
 The worker no longer performs a duplicate main-model warmup at startup.
 
+### Last-iteration tool-loop validation
+
+Before the final allowed iteration of a tool loop, the fast model reviews a
+bounded recent transcript and returns one constrained decision: `finish`,
+`corrective_tool`, or `blocked`. An optional suggested tool must come from the
+turn's existing allowlist. The harness converts that decision into its own
+deterministic recovery prompt for the main model; validator prose and untrusted
+tool output are never copied into the prompt, and the prompt is not persisted
+to conversation history.
+
+If validation times out or fails, the safe fallback permits at most one
+distinct corrective tool call before finalization. Set
+`agent.tool_loop_validator.enabled` to `false` to disable the check. The default
+`keep_alive: 0` releases the fast model after validation on memory-constrained
+hosts.
+
 ## Default models
 
     agent:
@@ -82,6 +98,12 @@ The optimized defaults are in config/config.yaml:
       show_perf_stats: true
       max_iterations: 12
       max_tools_per_turn: 12
+
+      tool_loop_validator:
+        enabled: true
+        timeout_seconds: 45
+        max_transcript_chars: 12000
+        keep_alive: 0
 
       context:
         num_ctx: 8192
@@ -144,6 +166,7 @@ returns every field.
 - agent.py — interactive CLI and foreground tool loop.
 - worker.py — durable research, compaction, and host monitoring.
 - tools/context.py — turn grouping, token budgeting, and trimming.
+- tools/loop_validator.py — bounded fast-model tool-loop classification.
 - tools/memory.py — memories, history watermark, and observations.
 - tools/runtime.py — durable jobs, checkpoints, leases, and deferral.
 - tools/deep_research.py — planning, collection, distillation, and evaluation.
@@ -215,7 +238,7 @@ a Git repository, initialize and commit the baseline before running promotion.
 ### Repository context size
 
 `scripts/benchmark_harness.py` estimates source context at roughly one token per
-four bytes. The current harness is below the configured 75,000-token full-tree
+four bytes. The current harness is below the configured 80,000-token full-tree
 gate, but normal agent and optimization turns do not inject the full tree.
 `get_repo_map`, `search_repo_symbols`, and `read_repo_symbol` retrieve only the
 map and relevant slices, while optimization source context is capped at 32,000
