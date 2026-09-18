@@ -42,9 +42,9 @@ MODEL = str(AGENT_CFG.get("model", "qwen3.5:4b"))
 FAST_MODEL = str(AGENT_CFG.get("fast_model", "qwen3.5:2b"))
 OLLAMA_HOST = str(AGENT_CFG.get("host", os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")))
 SELF_OPTIONS = OPT_CFG.get("model_options") or {
-    "num_ctx": 8192, "temperature": 0.1, "top_p": 0.9, "top_k": 20, "num_predict": 4096,
+    "num_ctx": 16384, "temperature": 0.1, "top_p": 0.9, "top_k": 20, "num_predict": 4096,
 }
-FAST_OPTIONS = AGENT_CFG.get("fast_options") or {"num_ctx": 4096, "temperature": 0.0}
+FAST_OPTIONS = AGENT_CFG.get("fast_options") or {"num_ctx": 8192, "temperature": 0.0}
 
 _PLAN_SCHEMA = {
     "type": "object",
@@ -526,7 +526,7 @@ def enqueue_self_optimization(objective: str = "", target_metric: str = "", prio
 def get_self_optimization_status(candidate_id: str = "") -> str:
     """Inspect one candidate, including validation results and its patch digest."""
     candidate = get_optimization_candidate(str(candidate_id).strip())
-    return json.dumps(candidate, ensure_ascii=False, indent=2) if candidate else f"Candidate '{candidate_id}' not found."
+    return json.dumps(candidate, ensure_ascii=False, indent=2) if candidate else f"Error: candidate '{candidate_id}' not found."
 
 
 def list_self_optimization_candidates(status: str = "", limit: int = 20) -> str:

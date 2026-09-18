@@ -63,7 +63,7 @@ def scan_mdns(timeout: int = 5) -> str:
             unique[f"{service['device_name']}|{service['service_type']}|{service['server']}"] = service
         return json.dumps(list(unique.values()), ensure_ascii=False, indent=2) if unique else "No mDNS services discovered during the listening window."
     except Exception as exc:
-        return f"mDNS scan encountered an error: {exc}"
+        return f"Error: mDNS scan failed: {exc}"
     finally:
         for browser in browsers:
             try:

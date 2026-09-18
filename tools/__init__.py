@@ -30,6 +30,9 @@ MUTATING_TOOLS = {
     "queue_work", "update_work_status", "map_network",
     "create_or_update_tool", "reload_tools",
 }
+# Mutating only because they write/replace a deterministic artifact. Repeating an
+# identical call is safe and can be necessary after a transient blank capture.
+REPEAT_SAFE_TOOLS = {"take_web_screenshot", "generate_pdf_report", "map_network"}
 BUILTINS = [
     ("memory", "remember"), ("memory", "search_memory"),
     ("memory", "remember_semantic"), ("memory", "search_semantic_memory"),
@@ -49,6 +52,7 @@ BUILTINS = [
     ("host_tools", "read_host_journal"), ("host_tools", "tail_host_log"),
     ("web", "web_search"), ("web", "wiki_search"), ("web", "browse_url"),
     ("web_screenshot", "take_web_screenshot"),
+    ("media", "attach_media"),
     ("pdf_generator", "generate_pdf_report"),
     ("workspace", "read_file"), ("workspace", "write_file"),
     ("packages", "search_packages"), ("packages", "install_package"),
@@ -75,6 +79,7 @@ def _register(func, *, builtin_name: str | None = None) -> None:
     TOOL_SCHEMAS.append(schema)
     TOOL_METADATA[public_name] = {
         "readonly": False if public_name in MUTATING_TOOLS else bool(getattr(func, "_agent_tool_readonly", True)),
+        "repeat_safe": public_name in REPEAT_SAFE_TOOLS or bool(getattr(func, "_agent_tool_repeat_safe", False)),
         "timeout": getattr(func, "_agent_tool_timeout", None),
         "function": func,
     }
@@ -103,6 +108,13 @@ def load_tools() -> tuple[int, dict[str, str]]:
         if path.name.startswith("_"):
             continue
         try:
+            # Never execute arbitrary top-level code merely because a .py file
+            # appeared in the custom tool directory. The same static validator
+            # used during generation runs before every import/reload.
+            from .tool_manager import _validate_tool_code
+            is_valid, validation_message = _validate_tool_code(path.read_text(encoding="utf-8"))
+            if not is_valid:
+                raise RuntimeError(validation_message)
             module_name = f"agent_custom_{path.stem}"
             spec = importlib.util.spec_from_file_location(module_name, path)
             if spec is None or spec.loader is None:
@@ -124,7 +136,10 @@ _TOOL_SELECTION_STOPWORDS = {
 }
 
 _ALWAYS_TOOL_NAMES = {
-    "read_file", "web_search", "host_snapshot", "network_snapshot", "enqueue_research", "execute_shell",
+    # Small read-oriented core. Powerful generic execution is selected only when
+    # the request actually points at code/shell/system work; keeping it out of
+    # every prompt reduces accidental tool choice by small models.
+    "read_file", "web_search", "host_snapshot", "network_snapshot",
 }
 
 _TOOL_BUNDLES = (
@@ -139,10 +154,14 @@ _TOOL_BUNDLES = (
     ),
     (
         {"web", "internet", "search", "url", "site", "research", "source", "sources"},
-        ("web_search", "browse_url", "enqueue_research", "get_research_status", "read_observation"),
+        ("web_search", "browse_url", "take_web_screenshot", "enqueue_research", "get_research_status", "read_observation"),
     ),
     (
-        {"cpu", "memory", "ram", "disk", "gpu", "process", "log", "shell", "command", "system", "host"},
+        {"image", "images", "screenshot", "screenshots", "photo", "picture", "media", "vision", "visual"},
+        ("attach_media", "take_web_screenshot", "read_file"),
+    ),
+    (
+        {"cpu", "ram", "disk", "gpu", "process", "log", "shell", "command", "system", "host"},
         ("host_snapshot", "execute_shell", "read_host_file", "read_host_journal", "tail_host_log", "read_observation"),
     ),
     (
@@ -162,12 +181,20 @@ _TOOL_BUNDLES = (
 def _selection_tokens(text: str) -> set[str]:
     return {token for token in re.findall(r"[a-z0-9_]+", str(text).lower()) if token not in _TOOL_SELECTION_STOPWORDS and len(token) > 1}
 
-def select_tool_schemas(user_text: str, max_tools: int = 12) -> list[dict]:
-    """Select a small, deterministic core plus stable intent bundles and lexical matches."""
+def select_tool_schemas(user_text: str, max_tools: int = 12, context_text: str = "") -> list[dict]:
+    """Select a small core, strongest intent bundles, then lexical matches.
+
+    Current-turn terms dominate. Bounded recent conversational context receives
+    lower weight so short follow-ups such as "do that" retain the tool discussed
+    in the immediately preceding turn without letting stale context dominate.
+    """
+    max_tools = max(1, int(max_tools))
     if len(TOOL_SCHEMAS) <= max_tools:
         return list(TOOL_SCHEMAS)
 
-    tokens = _selection_tokens(user_text)
+    current_tokens = _selection_tokens(user_text)
+    context_tokens = _selection_tokens(context_text)
+    all_tokens = current_tokens | context_tokens
     scored: list[tuple[int, str, dict]] = []
     for schema in TOOL_SCHEMAS:
         fn = schema.get("function", {})
@@ -175,36 +202,53 @@ def select_tool_schemas(user_text: str, max_tools: int = 12) -> list[dict]:
         description = str(fn.get("description", ""))
         name_tokens = _selection_tokens(name.replace("_", " "))
         haystack = name_tokens | _selection_tokens(description)
-        score = sum(2 if token in name_tokens else 1 for token in tokens & haystack)
+        current_score = sum(4 if token in name_tokens else 2 for token in current_tokens & haystack)
+        context_score = sum(2 if token in name_tokens else 1 for token in context_tokens & haystack)
+        score = current_score + context_score
         if score:
             scored.append((score, name, schema))
-
     scored.sort(key=lambda item: (-item[0], item[1]))
-    selected: dict[str, dict] = {}
-    for schema in TOOL_SCHEMAS:
-        name = schema.get("function", {}).get("name")
-        if name in _ALWAYS_TOOL_NAMES:
-            selected[name] = schema
 
+    selected: dict[str, dict] = {}
     by_name = {schema.get("function", {}).get("name"): schema for schema in TOOL_SCHEMAS}
-    matched_bundle = False
-    for bundle_tokens, bundle_names in _TOOL_BUNDLES:
-        if not tokens & bundle_tokens:
-            continue
-        matched_bundle = True
+    for name in sorted(_ALWAYS_TOOL_NAMES):
+        if name in by_name and len(selected) < max_tools:
+            selected[name] = by_name[name]
+
+    for score, name, schema in scored[:2]:
+        if score < 2 or len(selected) >= max_tools:
+            break
+        selected[name] = schema
+
+    matched = []
+    for index, (bundle_tokens, bundle_names) in enumerate(_TOOL_BUNDLES):
+        current_overlap = len(current_tokens & bundle_tokens)
+        context_overlap = len(context_tokens & bundle_tokens)
+        weighted_overlap = current_overlap * 3 + context_overlap
+        if weighted_overlap:
+            matched.append((-weighted_overlap, index, bundle_names))
+    for _, _, bundle_names in sorted(matched):
         for name in bundle_names:
             if len(selected) >= max_tools:
                 break
             if name in by_name:
                 selected[name] = by_name[name]
 
-    if not matched_bundle:
-        for _, name, schema in scored:
-            if len(selected) >= max_tools:
-                break
-            selected[name] = schema
+    for _, name, schema in scored:
+        if len(selected) >= max_tools:
+            break
+        selected[name] = schema
 
     return [schema for schema in TOOL_SCHEMAS if schema.get("function", {}).get("name") in selected]
+
+
+def get_tool_schema(name: str) -> dict | None:
+    """Return one registered schema by public tool name."""
+    target = str(name or "")
+    for schema in TOOL_SCHEMAS:
+        if str(schema.get("function", {}).get("name") or "") == target:
+            return schema
+    return None
 
 
 def get_tools_prompt_summary(compact: bool = False) -> str:
@@ -247,7 +291,7 @@ from .memory import (
 
 __all__ = [
     "ALL_TOOLS", "AVAILABLE_TOOLS_MAP", "TOOL_SCHEMAS", "TOOL_METADATA",
-    "load_tools", "get_tools_prompt_summary", "select_tool_schemas", "normalize_arguments",
+    "load_tools", "get_tools_prompt_summary", "select_tool_schemas", "get_tool_schema", "normalize_arguments",
     "init_db", "_init_chat_db", "_init_checkpoint_db", "_load_chat_history_from_db",
     "_save_message_to_db", "clear_chat_history", "get_all_memories_prompt_summary",
     "get_conversation_summary", "set_conversation_summary", "get_compacted_through_id",

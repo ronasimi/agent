@@ -153,18 +153,18 @@ def schedule_reminder(
                 )
         except Exception:
             pass
-        return f"Error scheduling reminder: {exc}"
+        return f"Error: scheduling reminder failed: {exc}"
 
 
 def cancel_reminder(reminder_id: str = "") -> str:
     """Cancel and remove a previously scheduled reminder."""
-    reminder_id = _slug(reminder_id)
-    if not reminder_id:
+    if not str(reminder_id).strip():
         return "Error: Missing required 'reminder_id' parameter."
+    reminder_id = _slug(reminder_id)
     with _connect() as conn:
         row = conn.execute("SELECT unit_name FROM reminders WHERE id = ?", (reminder_id,)).fetchone()
     if not row:
-        return f"Reminder '{reminder_id}' not found."
+        return f"Error: reminder '{reminder_id}' not found."
     unit_name = row[0]
     errors = []
     for args in (("disable", "--now", f"{unit_name}.timer"), ("daemon-reload",)):

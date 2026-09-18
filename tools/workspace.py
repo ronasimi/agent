@@ -7,8 +7,10 @@ os.makedirs(WORKSPACE_DIR, exist_ok=True)
 
 
 def _get_safe_path(filename: str) -> str:
-    """Resolve a path and ensure symlinks cannot escape the workspace."""
-    safe_path = os.path.realpath(os.path.join(WORKSPACE_DIR, str(filename).lstrip("/")))
+    """Resolve relative or absolute workspace paths without duplicating /app/workspace."""
+    raw = str(filename).strip()
+    candidate = raw if os.path.isabs(raw) else os.path.join(WORKSPACE_DIR, raw)
+    safe_path = os.path.realpath(candidate)
     if os.path.commonpath([WORKSPACE_DIR, safe_path]) != WORKSPACE_DIR:
         raise ValueError(f"Path traversal outside workspace blocked: {filename}")
     return safe_path
@@ -24,7 +26,7 @@ def read_file(filename: str = "") -> str:
             data = handle.read(50000)
         return data + ("\n[truncated]" if len(data) >= 50000 else "")
     except Exception as exc:
-        return f"Error reading file '{filename}': {exc}"
+        return f"Error: reading file '{filename}' failed: {exc}"
 
 
 def write_file(filename: str = "", content: str = "") -> str:
@@ -38,4 +40,4 @@ def write_file(filename: str = "", content: str = "") -> str:
             handle.write(str(content))
         return f"Successfully wrote {len(str(content))} characters to {filename}"
     except Exception as exc:
-        return f"Error writing file '{filename}': {exc}"
+        return f"Error: writing file '{filename}' failed: {exc}"

@@ -4,6 +4,8 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from .media import media_result
+
 
 def _ping_host(ip: str):
     try:
@@ -83,7 +85,7 @@ def _generate_dot(hosts: list[dict]) -> str:
     return dot + '}\n'
 
 
-def map_network(network: str = "192.168.1.0/24", output_filename: str = "network_map.png") -> str:
+def map_network(network: str = "192.168.1.0/24", output_filename: str = "network_map.png") -> dict | str:
     """Scan one local subnet up to /23, perform limited OS discovery, and create a PNG topology map."""
     output_path = f"/app/workspace/{Path(output_filename).name}"
     hosts = _scan_hosts(network)
@@ -108,5 +110,8 @@ def map_network(network: str = "192.168.1.0/24", output_filename: str = "network
         try:
             subprocess.run(["dot", "-Tpng", str(dot_file), "-o", output_path], check=True, capture_output=True)
         except Exception as exc:
-            return f"Error generating graph map: {exc}"
-    return f"Network map successfully generated and saved to {output_path}"
+            return f"Error: generating graph map failed: {exc}"
+    return media_result(
+        f"Network map successfully generated and saved to {output_path}",
+        [output_path],
+    )

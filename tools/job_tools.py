@@ -27,7 +27,7 @@ def get_research_status(job_id: str = "") -> str:
         return "Error: Missing required 'job_id' parameter."
     job = get_job(job_id)
     if not job:
-        return f"Job '{job_id}' not found."
+        return f"Error: job '{job_id}' not found."
     return json.dumps(job, ensure_ascii=False, indent=2)
 
 
@@ -43,4 +43,4 @@ def cancel_background_job(job_id: str = "") -> str:
     """Cancel a pending or running durable background job."""
     if not str(job_id).strip():
         return "Error: Missing required 'job_id' parameter."
-    return "Job cancelled." if cancel_job(job_id) else "Job could not be cancelled; it may not exist or may already be finished."
+    return "Job cancelled." if cancel_job(job_id) else "Error: job could not be cancelled; it may not exist or may already be finished."

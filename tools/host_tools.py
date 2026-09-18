@@ -108,7 +108,7 @@ def gpu_snapshot_dict() -> dict:
 def ollama_runtime_snapshot() -> str:
     """Inspect models currently loaded by the configured Ollama server via /api/ps."""
     import requests
-    url = os.environ.get("OLLAMA_HOST", "[http://127.0.0.1:11434](http://127.0.0.1:11434)").rstrip("/") + "/api/ps"
+    url = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/") + "/api/ps"
     try:
         response = requests.get(url, timeout=5)
         response.raise_for_status()
@@ -154,7 +154,7 @@ def network_snapshot() -> str:
 def network_reachability(targets: list[str] | None = None) -> str:
     """Check DNS/HTTPS reachability for a small set of configured public endpoints."""
     from .netutil import fetch_bytes
-    targets = targets or ["[https://www.cloudflare.com/cdn-cgi/trace](https://www.cloudflare.com/cdn-cgi/trace)", "[https://example.com/](https://example.com/)"]
+    targets = targets or ["https://www.cloudflare.com/cdn-cgi/trace", "https://example.com/"]
     results = []
     for target in targets[:5]:
         item = {"target": str(target)}
@@ -195,7 +195,7 @@ def read_host_file(filepath: str = "/host/etc/resolv.conf") -> str:
         text = Path(safe).read_text(errors="ignore")[:20000]
         return text + ("\n[truncated]" if len(text) >= 20000 else "")
     except Exception as exc:
-        return f"Error reading host file: {exc}"
+        return f"Error: reading host file failed: {exc}"
 
 
 def read_host_journal(lines: int = 50, service: str = "", grep: str = "", priority: str = "") -> str:
@@ -210,7 +210,7 @@ def read_host_journal(lines: int = 50, service: str = "", grep: str = "", priori
         cmd.extend(["-p", priority.strip()])
     code, stdout, stderr = _run(cmd, timeout=15)
     if code != 0 and not stdout.strip():
-        return f"Error reading journal: {stderr.strip()}"
+        return f"Error: reading journal failed: {stderr.strip()}"
     return stdout.strip() or "No logs found."
 
 

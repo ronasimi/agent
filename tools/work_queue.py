@@ -224,7 +224,7 @@ def get_work_details(work_id: str) -> str:
         
         work_row = cursor.fetchone()
         if not work_row:
-            return f"Work item {work_id[:8]} not found"
+            return f"Error: work item {work_id[:8]} not found"
         
         # Get results if completed
         cursor.execute("""
@@ -273,7 +273,7 @@ def get_work_result(work_id: str) -> str:
             (work_id,)
         )
         row = cursor.fetchone()
-        return row[0] if row else f"No results found for work {work_id[:8]}"
+        return row[0] if row else f"Error: no results found for work {work_id[:8]}"
     finally:
         conn.close()
 
@@ -290,7 +290,7 @@ def update_work_status(work_id: str, status: str) -> str:
     """
     valid_statuses = ["pending", "running", "completed", "cancelled"]
     if status not in valid_statuses:
-        return f"Invalid status. Must be one of: {', '.join(valid_statuses)}"
+        return f"Error: invalid status. Must be one of: {', '.join(valid_statuses)}"
     
     conn = _connect()
     try:

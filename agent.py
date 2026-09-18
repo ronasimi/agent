@@ -13,6 +13,7 @@ import itertools
 import json
 import os
 import re
+import signal
 import sys
 import threading
 import time
@@ -36,6 +37,7 @@ except ImportError:  # pragma: no cover
 
 from tools import (
     AVAILABLE_TOOLS_MAP,
+    TOOL_METADATA,
     _load_chat_history_from_db,
     _save_message_to_db,
     clear_chat_history,
@@ -43,6 +45,7 @@ from tools import (
     get_conversation_summary,
     get_relevant_memories,
     get_tools_prompt_summary,
+    get_tool_schema,
     init_db,
     load_tools,
     normalize_arguments,
@@ -59,10 +62,17 @@ from tools.context import (
     model_message,
 )
 from tools.job_tools import enqueue_research, get_research_status
+from tools.model_context import SharedModelContext
+from tools.media import unpack_media_result
 from tools.loop_validator import (
+    StepFailureTracker,
     build_recovery_message,
+    build_stall_recovery_message,
+    classify_tool_outcome,
     select_recovery_tool_calls,
+    select_stall_recovery_tool_calls,
     tool_call_signature,
+    validate_stalled_step,
     validate_tool_loop,
 )
 from tools.runtime import create_singleton_job, list_jobs, record_monitor_state, utc_now
@@ -78,12 +88,12 @@ CONFIG = load_config()
 AGENT_CFG = CONFIG.get("agent", {})
 MODEL = AGENT_CFG.get("model", "qwen3.5:4b")
 FAST_MODEL = AGENT_CFG.get("fast_model", "qwen3.5:2b")
-MAIN_OPTIONS = AGENT_CFG.get("main_options") or {"num_ctx": 8192, "temperature": 0.4, "top_p": 0.9, "top_k": 20}
-FAST_OPTIONS = AGENT_CFG.get("fast_options") or {"num_ctx": 4096, "temperature": 0.0, "top_p": 0.9, "top_k": 20}
+MAIN_OPTIONS = AGENT_CFG.get("main_options") or {"num_ctx": 16384, "temperature": 0.4, "top_p": 0.9, "top_k": 20}
+FAST_OPTIONS = AGENT_CFG.get("fast_options") or {"num_ctx": 8192, "temperature": 0.0, "top_p": 0.9, "top_k": 20}
 MAX_TOOLS_PER_TURN = max(8, int(AGENT_CFG.get("max_tools_per_turn", 12)))
 OLLAMA_HOST = AGENT_CFG.get("host", "http://127.0.0.1:11434")
 os.environ["OLLAMA_HOST"] = OLLAMA_HOST
-MAX_CTX = int(AGENT_CFG.get("context", {}).get("num_ctx", MAIN_OPTIONS.get("num_ctx", 8192)))
+MAX_CTX = int(AGENT_CFG.get("context", {}).get("num_ctx", MAIN_OPTIONS.get("num_ctx", 16384)))
 RESERVE_TOKENS = int(AGENT_CFG.get("context", {}).get("reserve_tokens", 1280))
 RECENT_MESSAGES = int(AGENT_CFG.get("context", {}).get("recent_messages", 12))
 COMPACT_AT = int(AGENT_CFG.get("context", {}).get("compact_at_tokens", max(8000, int(MAX_CTX * 0.62))))
@@ -99,6 +109,17 @@ LOOP_VALIDATOR_ENABLED = bool(LOOP_VALIDATOR_CFG.get("enabled", True))
 LOOP_VALIDATOR_OPTIONS = {**FAST_OPTIONS, **(LOOP_VALIDATOR_CFG.get("options") or {})}
 LOOP_VALIDATOR_MAX_CHARS = int(LOOP_VALIDATOR_CFG.get("max_transcript_chars", 12000))
 LOOP_VALIDATOR_KEEP_ALIVE = LOOP_VALIDATOR_CFG.get("keep_alive", 0)
+STALL_VALIDATOR_AFTER = max(2, int(LOOP_VALIDATOR_CFG.get("failed_step_attempts", 3)))
+STALL_VALIDATOR_MAX_INTERVENTIONS = max(1, int(LOOP_VALIDATOR_CFG.get("max_interventions_per_turn", 3)))
+MAX_TOOL_CALLS_PER_ITERATION = max(1, int(AGENT_CFG.get("max_tool_calls_per_iteration", 3)))
+MAX_MUTATING_CALLS_PER_ITERATION = max(1, int(AGENT_CFG.get("max_mutating_calls_per_iteration", 1)))
+VISION_CFG = AGENT_CFG.get("vision", {})
+AUTO_ATTACH_TOOL_MEDIA = bool(VISION_CFG.get("auto_attach_tool_media", True))
+MAX_TOOL_MEDIA_PER_TURN = max(1, int(VISION_CFG.get("max_images_per_turn", 4)))
+MAX_MEDIA_BYTES = max(262144, int(VISION_CFG.get("max_image_bytes", 4 * 1024 * 1024)))
+SHARED_CTX_CFG = AGENT_CFG.get("model_context_sharing", {})
+SHARED_CTX_ENABLED = bool(SHARED_CTX_CFG.get("enabled", True))
+SHARED_CTX_MAX_CHARS = max(2000, int(SHARED_CTX_CFG.get("max_chars", 6000)))
 
 OLLAMA = Client(host=OLLAMA_HOST)
 LOOP_VALIDATOR_CLIENT = Client(host=OLLAMA_HOST, timeout=float(LOOP_VALIDATOR_CFG.get("timeout_seconds", 45)))
@@ -152,9 +173,16 @@ SYSTEM_POLICY = """
 - Never approve or promote a self-optimization candidate. Approval requires an explicit human CLI command and promotion requires a separate host command.
 - For reminders, use schedule_reminder(), cancel_reminder(), and list_reminders(). Never write systemd unit files yourself.
 - Tool calls must contain a valid JSON object matching the tool schema. Never infer missing tool arguments from prose.
+- If you need a tool, call it before claiming its result. Do not narrate an expected result as though the tool already succeeded.
+- Prefer one necessary tool action at a time. The harness may defer or reject excess calls, especially multiple side-effecting calls.
+- Every tool result begins with a trusted harness status line. Treat status=error as a failed attempt that requires a changed argument or approach; do not blindly repeat it.
+- After repeated failed/no-progress attempts the harness may inject fast-model recovery guidance. Follow that control guidance and do not repeat an identical failed tool call.
 - execute_shell() is a privileged container-local shell tool. Only call it when a structured tool does not provide the required operation and provide an explicit command argument.
 - Do not put shell commands, JSON tool-call objects, or tool-call markup in normal assistant prose expecting the harness to execute it.
+- Never claim a file write, installation, notification, reminder, job creation, or other side effect succeeded unless a corresponding tool returned harness status=ok in this turn.
 - Persist only stable, useful non-sensitive facts with remember(). Avoid secrets, credentials, or ephemeral details.
+- Media-producing tools may attach their actual image output to the next model step. Describe visual content only when an image is attached in the current turn; never infer unseen pixels from a filename, URL, or expected website layout.
+- If attached media is blank, empty, blocked, or unreadable, say so rather than inventing visual details.
 - When a task is long-running, make state recoverable through the durable job/checkpoint tools instead of keeping hidden state only in conversation memory.
 """
 
@@ -224,7 +252,7 @@ def encode_image(path_str: str) -> str | None:
             _, response, body = fetch_bytes(
                 value,
                 timeout=10,
-                max_bytes=4 * 1024 * 1024,
+                max_bytes=MAX_MEDIA_BYTES,
                 allowed_types={"image/png", "image/jpeg", "image/webp", "application/pdf"},
             )
             if not response.headers.get("Content-Type", "").split(";", 1)[0].lower() in {"image/png", "image/jpeg", "image/webp", "application/pdf"}:
@@ -258,8 +286,8 @@ def encode_image(path_str: str) -> str | None:
                 pages[0].save(buffer, format="PNG")
                 return base64.b64encode(buffer.getvalue()).decode("ascii")
             with open(safe, "rb") as handle:
-                data = handle.read(4 * 1024 * 1024 + 1)
-            if len(data) > 4 * 1024 * 1024:
+                data = handle.read(MAX_MEDIA_BYTES + 1)
+            if len(data) > MAX_MEDIA_BYTES:
                 return None
             return base64.b64encode(data).decode("ascii")
         except Exception as exc:
@@ -271,31 +299,144 @@ def encode_image(path_str: str) -> str | None:
 IMAGE_REGEX = re.compile(r"(?:https?://[^\s>\"']+\.(?:png|jpg|jpeg|webp|pdf)|/?[\w\-./]+\.(?:png|jpg|jpeg|webp|pdf))", re.I)
 
 
-def _extract_tool_calls(raw_calls: Any) -> list[dict]:
-    result = []
-    for call in raw_calls or []:
+def _parse_tool_calls(raw_calls: Any, allowed_names: set[str] | None = None) -> tuple[list[dict], list[str]]:
+    """Normalize native calls and retain actionable parse errors for the model."""
+    result: list[dict] = []
+    errors: list[str] = []
+    allowed = set(allowed_names) if allowed_names is not None else set(AVAILABLE_TOOLS_MAP)
+    names_by_lower = {name.lower(): name for name in allowed}
+    for index, call in enumerate(raw_calls or [], start=1):
         try:
             if isinstance(call, dict):
                 function = call.get("function") or {}
-                name = function.get("name", "")
+                name = str(function.get("name", "")).strip()
                 args = function.get("arguments", {})
                 call_id = call.get("id") or uuid.uuid4().hex
             else:
                 function = getattr(call, "function", None)
-                name = getattr(function, "name", "") if function else ""
+                name = str(getattr(function, "name", "") if function else "").strip()
                 args = getattr(function, "arguments", {}) if function else {}
                 call_id = getattr(call, "id", None) or uuid.uuid4().hex
+
+            canonical = name if name in allowed else names_by_lower.get(name.lower(), "")
+            if not canonical:
+                errors.append(f"call {index}: tool '{name or '[missing]'}' was not supplied in this turn")
+                continue
             if isinstance(args, str):
-                args = json.loads(args)
-            if name and name in AVAILABLE_TOOLS_MAP:
-                result.append({
-                    "id": call_id,
-                    "type": "function",
-                    "function": {"name": name, "arguments": args if isinstance(args, dict) else {}},
-                })
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError as exc:
+                    errors.append(f"call {index} ({canonical}): arguments are not valid JSON: {exc.msg}")
+                    continue
+            if not isinstance(args, dict):
+                errors.append(f"call {index} ({canonical}): arguments must be a JSON object")
+                continue
+            try:
+                args = normalize_arguments(AVAILABLE_TOOLS_MAP[canonical], args)
+            except Exception as exc:
+                errors.append(f"call {index} ({canonical}): invalid arguments: {exc}")
+                continue
+            result.append({
+                "id": call_id,
+                "type": "function",
+                "function": {"name": canonical, "arguments": args},
+            })
         except Exception as exc:
-            print(f"  \033[93m[System]: Ignoring malformed tool call: {exc}\033[0m")
-    return result
+            errors.append(f"call {index}: malformed tool call: {exc}")
+    return result, errors
+
+
+def _extract_tool_calls(raw_calls: Any) -> list[dict]:
+    """Compatibility wrapper used by tests/integrations that need valid calls only."""
+    calls, _ = _parse_tool_calls(raw_calls)
+    return calls
+
+
+def _sanitize_tool_call_batch(
+    calls: list[dict],
+    successful_mutating_signatures: set[str],
+) -> tuple[list[dict], list[str]]:
+    """Bound one 4B-model batch and prevent duplicate mutating side effects."""
+    accepted: list[dict] = []
+    notes: list[str] = []
+    batch_signatures: set[str] = set()
+    mutating = 0
+    for call in calls:
+        name = str(call.get("function", {}).get("name") or "")
+        signature = tool_call_signature(call)
+        metadata = TOOL_METADATA.get(name, {})
+        is_mutating = not bool(metadata.get("readonly", True))
+        repeat_safe = bool(metadata.get("repeat_safe", False))
+        if signature in batch_signatures:
+            notes.append(f"suppressed duplicate call in the same batch: {name}")
+            continue
+        if is_mutating and not repeat_safe and signature in successful_mutating_signatures:
+            notes.append(f"suppressed already-successful duplicate mutating call: {name}")
+            continue
+        if len(accepted) >= MAX_TOOL_CALLS_PER_ITERATION:
+            notes.append(f"suppressed excess call beyond per-iteration limit: {name}")
+            continue
+        if is_mutating and mutating >= MAX_MUTATING_CALLS_PER_ITERATION:
+            notes.append(f"deferred extra mutating call to a later iteration: {name}")
+            continue
+        accepted.append(call)
+        batch_signatures.add(signature)
+        if is_mutating:
+            mutating += 1
+    return accepted, notes
+
+
+def _tool_status_prefix(success: bool, reason: str) -> str:
+    if success:
+        return "[Harness status=ok]"
+    safe_reason = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(reason or "tool_error"))[:80]
+    return f"[Harness status=error reason={safe_reason}]"
+
+
+def _execute_registered_tool(name: str, args: dict[str, Any]) -> Any:
+    """Execute one tool, enforcing decorator timeouts for custom tools.
+
+    Built-ins already implement operation-specific subprocess/network timeouts.
+    Custom tools default to a 60-second SIGALRM guard so a buggy generated tool
+    cannot wedge the interactive loop indefinitely.
+    """
+    func = AVAILABLE_TOOLS_MAP[name]
+    timeout = TOOL_METADATA.get(name, {}).get("timeout")
+    if not timeout or threading.current_thread() is not threading.main_thread() or not hasattr(signal, "SIGALRM"):
+        return func(**args)
+    seconds = max(1, min(int(timeout), 300))
+    previous_handler = signal.getsignal(signal.SIGALRM)
+
+    def _raise_timeout(_signum, _frame):
+        raise TimeoutError(f"Tool '{name}' exceeded its {seconds}-second harness timeout.")
+
+    signal.signal(signal.SIGALRM, _raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        return func(**args)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
+def _add_recovery_schema(tool_schemas: list[dict], tool_name: str) -> bool:
+    """Expose one validator-suggested read-only tool for the corrective iteration.
+
+    Mutating tools must have been selected from the user's original request; an
+    untrusted tool transcript cannot indirectly expand the side-effect surface.
+    """
+    name = str(tool_name or "")
+    if not name:
+        return False
+    if any(str(schema.get("function", {}).get("name") or "") == name for schema in tool_schemas):
+        return False
+    if not bool(TOOL_METADATA.get(name, {}).get("readonly", True)):
+        return False
+    schema = get_tool_schema(name)
+    if not schema:
+        return False
+    tool_schemas.append(schema)
+    return True
 
 
 def _prune_compacted_history(messages: list[dict]) -> None:
@@ -383,8 +524,16 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
         append_and_save(messages, msg)
 
         system_prompt = build_system_prompt()
-        tool_schemas = select_tool_schemas(user_input, max_tools=MAX_TOOLS_PER_TURN)
-        tool_prompt_tokens = estimate_tokens(json.dumps(tool_schemas, ensure_ascii=False, separators=(",", ":")))
+        recent_selection_context = "\n".join(
+            str(item.get("content") or "")
+            for item in messages[-7:-1]
+            if item.get("role") in {"user", "assistant"} and item.get("content")
+        )[-3000:]
+        tool_schemas = select_tool_schemas(
+            user_input,
+            max_tools=MAX_TOOLS_PER_TURN,
+            context_text=recent_selection_context,
+        )
         summary = get_conversation_summary()
         memory_context = build_memory_context(user_input)
         model_user_msg = model_message(msg)
@@ -396,22 +545,94 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
                 + user_input
             )
         model_history = [*messages[1:-1], model_user_msg]
-        turn_prefix = build_active_messages(
-            system_prompt=system_prompt,
-            summary=summary,
-            history=model_history,
-            max_ctx_tokens=MAX_CTX,
-            reserve_tokens=RESERVE_TOKENS,
-            recent_messages=RECENT_MESSAGES,
-            extra_prompt_tokens=tool_prompt_tokens + TOOL_LOOP_RESERVE,
+        shared_context = SharedModelContext(
+            request=user_input,
+            summary=summary if SHARED_CTX_ENABLED else "",
+            relevant_memory=memory_context if SHARED_CTX_ENABLED else "",
+            recent_messages=messages[-10:-1] if SHARED_CTX_ENABLED else [],
+            tool_schemas=tool_schemas if SHARED_CTX_ENABLED else [],
+            max_chars=SHARED_CTX_MAX_CHARS,
+            summary_chars=int(SHARED_CTX_CFG.get("summary_chars", 2200)),
+            recent_chars=int(SHARED_CTX_CFG.get("recent_chars", 1800)),
+            memory_chars=int(SHARED_CTX_CFG.get("memory_chars", 1200)),
+            tool_chars=int(SHARED_CTX_CFG.get("tool_chars", 1600)),
         )
+
+        def rebuild_prefix() -> tuple[list[dict[str, Any]], int]:
+            schema_tokens = estimate_tokens(json.dumps(tool_schemas, ensure_ascii=False, separators=(",", ":")))
+            prefix = build_active_messages(
+                system_prompt=system_prompt,
+                summary=summary,
+                history=model_history,
+                max_ctx_tokens=MAX_CTX,
+                reserve_tokens=RESERVE_TOKENS,
+                recent_messages=RECENT_MESSAGES,
+                extra_prompt_tokens=schema_tokens + TOOL_LOOP_RESERVE,
+            )
+            return prefix, schema_tokens
+
+        turn_prefix, tool_prompt_tokens = rebuild_prefix()
         turn_tail: list[dict[str, Any]] = []
         tool_iterations = 0
         seen_tool_calls: set[str] = set()
+        successful_mutating_signatures: set[str] = set()
         recovery_validation: dict[str, str] | None = None
+        stall_validation: dict[str, str] | None = None
+        stall_enforce_once = False
+        pending_stall_signal: dict[str, Any] | None = None
+        validator_interventions = 0
+        tracker = StepFailureTracker(STALL_VALIDATOR_AFTER)
 
         for iteration in range(1, MAX_ITERATIONS + 1):
-            if iteration == MAX_ITERATIONS and tool_iterations and LOOP_VALIDATOR_ENABLED:
+            # Mid-loop validator: run before a fourth unvalidated attempt after
+            # three deterministic failed/no-progress attempts on one step.
+            if pending_stall_signal and LOOP_VALIDATOR_ENABLED:
+                if validator_interventions >= STALL_VALIDATOR_MAX_INTERVENTIONS:
+                    stall_validation = {"decision": "blocked", "suggested_tool": "", "reason": "intervention limit reached"}
+                else:
+                    selected_names = {str(schema.get("function", {}).get("name") or "") for schema in tool_schemas}
+                    validator_tool_names = sorted(
+                        name for name in AVAILABLE_TOOLS_MAP
+                        if name in selected_names or bool(TOOL_METADATA.get(name, {}).get("readonly", True))
+                    )
+                    with Spinner("Fast-model stalled-step validation"):
+                        stall_validation = validate_stalled_step(
+                            LOOP_VALIDATOR_CLIENT,
+                            FAST_MODEL,
+                            user_input,
+                            turn_tail,
+                            pending_stall_signal,
+                            validator_tool_names,
+                            LOOP_VALIDATOR_OPTIONS,
+                            max_chars=LOOP_VALIDATOR_MAX_CHARS,
+                            keep_alive=LOOP_VALIDATOR_KEEP_ALIVE,
+                            shared_context=shared_context.render() if SHARED_CTX_ENABLED else "",
+                        )
+                    validator_interventions += 1
+                    shared_context.add_validator_event(stall_validation, pending_stall_signal)
+                    suggested = str(stall_validation.get("suggested_tool") or "")
+                    if suggested:
+                        already_selected = suggested in selected_names
+                        if not already_selected and _add_recovery_schema(tool_schemas, suggested):
+                            shared_context.update_tools(tool_schemas)
+                            turn_prefix, tool_prompt_tokens = rebuild_prefix()
+                            print(f"  \033[93m[System]: Recovery exposed additional read-only tool schema: {suggested}\033[0m")
+                        elif not already_selected:
+                            stall_validation["suggested_tool"] = ""
+                turn_tail.append({
+                    "role": "user",
+                    "content": build_stall_recovery_message(stall_validation, pending_stall_signal),
+                })
+                print(
+                    f"  \033[93m[System]: Stalled-step validator decision: "
+                    f"{stall_validation['decision']} after {pending_stall_signal.get('attempts', 0)} failed/no-progress attempts.\033[0m"
+                )
+                pending_stall_signal = None
+                stall_enforce_once = True
+
+            # Keep the existing final safety-net validator as a separate last
+            # chance if the loop reaches its absolute iteration cap.
+            if iteration == MAX_ITERATIONS and tool_iterations and LOOP_VALIDATOR_ENABLED and not stall_enforce_once:
                 tool_names = [str(schema.get("function", {}).get("name", "")) for schema in tool_schemas]
                 with Spinner("Fast-model tool-loop validation"):
                     recovery_validation = validate_tool_loop(
@@ -423,12 +644,12 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
                         LOOP_VALIDATOR_OPTIONS,
                         max_chars=LOOP_VALIDATOR_MAX_CHARS,
                         keep_alive=LOOP_VALIDATOR_KEEP_ALIVE,
+                        shared_context=shared_context.render() if SHARED_CTX_ENABLED else "",
                     )
+                shared_context.add_validator_event(recovery_validation)
                 turn_tail.append({"role": "user", "content": build_recovery_message(recovery_validation)})
                 print(f"  \033[93m[System]: Tool-loop validator decision: {recovery_validation['decision']}\033[0m")
 
-            # The model request grows only by suffix during this tool loop, which
-            # preserves Ollama's reusable prefix across iterations.
             active = fit_tool_loop_messages(
                 turn_prefix,
                 turn_tail,
@@ -488,7 +709,11 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
                         full_content += content
             except Exception as exc:
                 print(f"\n\033[91m[!] Ollama error: {exc}\033[0m")
-                if iteration < 2:
+                tracker.record_model_failure("main_inference", str(exc))
+                signal = tracker.consume_signal()
+                if signal:
+                    pending_stall_signal = signal
+                if iteration < MAX_ITERATIONS:
                     time.sleep(0.2)
                     continue
                 break
@@ -497,45 +722,134 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
             if first_token_at is not None:
                 perf_stats["_ttft_ms"] = (first_token_at - request_started) * 1000.0
             _print_perf_stats(perf_stats)
-            tool_calls = _extract_tool_calls(raw_tool_calls)
-            if iteration == MAX_ITERATIONS and recovery_validation is not None:
+
+            supplied_tool_names = {str(schema.get("function", {}).get("name") or "") for schema in tool_schemas}
+            parsed_calls, parse_errors = _parse_tool_calls(raw_tool_calls, supplied_tool_names)
+            tool_calls, batch_notes = _sanitize_tool_call_batch(parsed_calls, successful_mutating_signatures)
+            control_notes = [*parse_errors, *batch_notes]
+
+            if stall_enforce_once and stall_validation is not None:
+                emitted_count = len(tool_calls)
+                tool_calls = select_stall_recovery_tool_calls(tool_calls, stall_validation, seen_tool_calls)
+                if emitted_count > len(tool_calls):
+                    control_notes.append("stalled-step recovery suppressed repeated or excess corrective calls")
+                stall_enforce_once = False
+            elif iteration == MAX_ITERATIONS and recovery_validation is not None:
                 emitted_count = len(tool_calls)
                 tool_calls = select_recovery_tool_calls(tool_calls, recovery_validation, seen_tool_calls)
                 if emitted_count > len(tool_calls):
-                    print("  \033[93m[System]: Recovery policy suppressed repeated or excess tool calls.\033[0m")
+                    control_notes.append("final recovery suppressed repeated or excess tool calls")
+
             assistant_msg = {"role": "assistant", "content": full_content}
             if tool_calls:
                 assistant_msg["tool_calls"] = tool_calls
-            
             if full_content or tool_calls:
                 append_and_save(messages, assistant_msg)
                 turn_tail.append(model_message(assistant_msg))
 
             if not tool_calls:
+                recovery_decision = stall_validation.get("decision") if stall_validation else ""
+                if recovery_decision in {"finish", "blocked"}:
+                    stall_validation = None
+                    if not full_content:
+                        _finalize_after_limit(messages)
+                    break
                 if recovery_validation is not None and not full_content:
                     _finalize_after_limit(messages)
                     break
-                if not full_content and in_thinking:
-                    correction = {"role": "user", "content": "Please provide the final answer or issue an explicit tool call."}
-                    append_and_save(messages, correction)
-                    turn_tail.append(model_message(correction))
+
+                if raw_tool_calls or control_notes:
+                    tracker.record_model_failure("invalid_tool_call", "; ".join(control_notes)[:240])
+                    note = "; ".join(control_notes[:4]) or "the emitted call could not be used"
+                    turn_tail.append({
+                        "role": "user",
+                        "content": (
+                            "[Harness tool-call correction] The previous tool call was rejected: "
+                            f"{note}. Re-read the supplied native tool schemas. Do not invent tool names or arguments. "
+                            "Either issue one corrected explicit tool call or answer without tools."
+                        ),
+                    })
+                    signal = tracker.consume_signal()
+                    if signal:
+                        pending_stall_signal = signal
                     continue
+
+                if not full_content:
+                    tracker.record_model_failure("empty_response", "main model emitted neither content nor a valid tool call")
+                    turn_tail.append({
+                        "role": "user",
+                        "content": "[Harness correction] Provide a final answer or issue one explicit valid tool call. Do not emit an empty response.",
+                    })
+                    signal = tracker.consume_signal()
+                    if signal:
+                        pending_stall_signal = signal
+                    continue
+
+                tracker.clear_model_failure("empty_response")
                 break
 
             tool_iterations += 1
+            attached_media: list[str] = []
+            attached_from: list[str] = []
+            iteration_progress = False
             for call in tool_calls:
                 name = call["function"]["name"]
                 raw_args = call["function"].get("arguments", {})
-                seen_tool_calls.add(tool_call_signature(call))
+                signature = tool_call_signature(call)
+                seen_tool_calls.add(signature)
                 print(f"\n\033[96m[Tool] {name}\033[0m")
+
+                execution_error = False
+                error_reason = ""
                 try:
                     args = normalize_arguments(AVAILABLE_TOOLS_MAP[name], raw_args)
                     with Spinner(f"Executing {name}"):
-                        result = AVAILABLE_TOOLS_MAP[name](**args)
+                        result = _execute_registered_tool(name, args)
                 except Exception as exc:
+                    execution_error = True
+                    error_reason = "argument_or_execution_error"
                     result = f"Tool execution error: {exc}"
-                result_text = _bounded_tool_result(name, result)
+
+                result_content, media_refs = unpack_media_result(result)
+                encoded_for_tool: list[str] = []
+                media_error = False
+                if AUTO_ATTACH_TOOL_MEDIA and media_refs and len(attached_media) < MAX_TOOL_MEDIA_PER_TURN:
+                    remaining = MAX_TOOL_MEDIA_PER_TURN - len(attached_media)
+                    attempted_refs = media_refs[:remaining]
+                    for reference in attempted_refs:
+                        encoded = encode_image(reference)
+                        if encoded:
+                            encoded_for_tool.append(encoded)
+                            attached_media.append(encoded)
+                    if encoded_for_tool:
+                        attached_from.append(name)
+                        result_content += (
+                            f"\n\n[Harness: attached {len(encoded_for_tool)} media item(s) from this tool "
+                            "for direct visual inspection on the next model step.]"
+                        )
+                    elif attempted_refs:
+                        media_error = True
+                        result_content += (
+                            "\n\n[Harness: this tool produced media, but it could not be attached. "
+                            "Do not claim to have visually inspected it.]"
+                        )
+                elif media_refs and len(attached_media) >= MAX_TOOL_MEDIA_PER_TURN:
+                    result_content += "\n\n[Harness: additional media was not attached because the per-turn image limit was reached.]"
+
+                outcome = classify_tool_outcome(
+                    result_content,
+                    tool_name=name,
+                    execution_error=execution_error,
+                    media_error=media_error,
+                )
+                success = bool(outcome["success"])
+                reason = str(outcome["reason"] if not success else "ok")
+                if error_reason and not success:
+                    reason = error_reason
+                result_with_status = _tool_status_prefix(success, reason) + "\n" + result_content
+                result_text = _bounded_tool_result(name, result_with_status)
                 print(f"  \033[90m{result_text[:300].replace(chr(10), ' ')}{'...' if len(result_text) > 300 else ''}\033[0m")
+
                 tool_message = {
                     "role": "tool",
                     "name": name,
@@ -544,6 +858,49 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
                 }
                 append_and_save(messages, tool_message)
                 turn_tail.append(model_message(tool_message))
+
+                tracker.record_tool(
+                    name,
+                    success=success,
+                    signature=signature,
+                    fingerprint=str(outcome.get("fingerprint") or ""),
+                    reason=reason,
+                )
+                if success:
+                    iteration_progress = True
+                    if not bool(TOOL_METADATA.get(name, {}).get("readonly", True)):
+                        successful_mutating_signatures.add(signature)
+
+            if control_notes:
+                turn_tail.append({
+                    "role": "user",
+                    "content": (
+                        "[Harness batch note] Some emitted calls were not executed: "
+                        + "; ".join(control_notes[:4])
+                        + ". Continue only with a distinct necessary action."
+                    ),
+                })
+
+            if attached_media:
+                source_names = ", ".join(dict.fromkeys(attached_from))
+                media_message = {
+                    "role": "user",
+                    "content": (
+                        f"[Harness: actual media output from tool(s): {source_names}.] "
+                        "Inspect the attached image content directly and use the preceding tool text as context. "
+                        "Report what is actually visible. If the image is blank, blocked, or unreadable, state that explicitly. "
+                        "Do not infer visual details from the filename, URL, or prior knowledge."
+                    ),
+                    "images": attached_media,
+                }
+                turn_tail.append(media_message)
+                print(f"  \033[92m[System]: Attached {len(attached_media)} tool media item(s) to the model.\033[0m")
+
+            tracker.record_iteration(made_progress=iteration_progress)
+            signal = tracker.consume_signal()
+            if signal:
+                pending_stall_signal = signal
+            stall_validation = None
 
         else:
             print("\n\033[91m[!] Reached the maximum tool-call iteration limit.\033[0m")

@@ -6,6 +6,7 @@ import re
 from typing import Any, Iterable
 
 _MESSAGE_FIELDS = {"role", "content", "name", "tool_calls", "tool_call_id", "images"}
+IMAGE_TOKEN_ESTIMATE = 1200
 
 
 def estimate_tokens(text: str) -> int:
@@ -23,6 +24,10 @@ def estimate_messages_tokens(messages: Iterable[dict[str, Any]]) -> int:
         total += estimate_tokens(message.get("content", ""))
         if message.get("tool_calls"):
             total += estimate_tokens(json.dumps(message["tool_calls"], ensure_ascii=False))
+        if message.get("images"):
+            # Vision encoders add image tokens that are not represented by the
+            # base64/string length. Reserve a conservative fixed budget per image.
+            total += IMAGE_TOKEN_ESTIMATE * len(message["images"])
     return total
 
 

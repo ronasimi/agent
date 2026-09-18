@@ -2,64 +2,198 @@
 from __future__ import annotations
 
 import inspect
+import json
+import re
 import types
-from typing import Any, Callable, Union, get_args, get_origin, get_type_hints
+from typing import Annotated, Any, Callable, Literal, Union, get_args, get_origin, get_type_hints
 
 
-def agent_tool(*, name: str | None = None, description: str = "", readonly: bool = True, timeout: int | None = None):
-    """Decorator for optional custom tools loaded from the workspace."""
+_REQUIRED_OVERRIDES = {
+    # Several legacy helpers use empty-string defaults so callers receive a
+    # friendly error instead of a Python exception. Native schemas should still
+    # tell a small model these arguments are semantically required.
+    "remember": {"fact"},
+    "remember_semantic": {"fact"},
+    "read_observation": {"observation_id"},
+    "enqueue_research": {"topic"},
+    "get_research_status": {"job_id"},
+    "cancel_background_job": {"job_id"},
+    "enqueue_self_optimization": {"objective"},
+    "get_self_optimization_status": {"candidate_id"},
+    "schedule_reminder": {"title"},
+    "cancel_reminder": {"reminder_id"},
+    "web_search": {"query"},
+    "wiki_search": {"query"},
+    "browse_url": {"url"},
+    "read_file": {"filename"},
+    # Requiring content prevents a malformed small-model call from silently
+    # truncating an existing file to zero bytes. An explicit empty string still
+    # permits intentional empty-file creation.
+    "write_file": {"filename", "content"},
+    "execute_shell": {"command"},
+    "execute_python": {"code"},
+}
+
+_SCHEMA_OVERRIDES: dict[tuple[str, str], dict[str, Any]] = {
+    ("list_background_jobs", "status"): {"enum": ["", "pending", "running", "completed", "failed", "cancelled"]},
+    ("schedule_reminder", "repeat"): {"enum": ["once", "daily", "weekly"]},
+    ("list_self_optimization_candidates", "status"): {"enum": ["", "building", "benchmarking", "generating", "awaiting_approval", "approved", "rejected", "failed"]},
+    ("list_work_queue", "status"): {"enum": ["pending", "running", "completed", "cancelled"]},
+    ("update_work_status", "status"): {"enum": ["pending", "running", "completed", "cancelled"]},
+    ("list_reminders", "status"): {"enum": ["", "scheduled", "error", "cancelled"]},
+}
+
+_PARAMETER_HINTS = {
+    "query": "Search query text.",
+    "topic": "Short topic/category label, or the research topic where applicable.",
+    "fact": "Fact/text to store; supply the actual content rather than a placeholder.",
+    "lines": "Maximum number of lines to return.",
+    "title": "Short human-readable title.",
+    "message": "Optional human-readable message/body text.",
+    "when": "Reminder time in ISO-8601 form (for example 2026-09-18T09:00:00-04:00); alternatively use delay_seconds.",
+    "repeat": "Reminder recurrence mode.",
+    "reminder_id": "Reminder identifier returned by schedule_reminder; omit only when creating a new reminder.",
+    "delay_seconds": "Relative delay in seconds; when >0 it is used instead of when.",
+    "priority": "Tool-specific priority integer; larger usually means higher priority unless the tool says otherwise.",
+    "status": "Status filter/value accepted by this specific tool.",
+    "objective": "Bounded optimization objective describing the desired change.",
+    "target_metric": "Optional measurable success criterion for optimization.",
+    "candidate_id": "Self-optimization candidate identifier.",
+    "work_id": "Legacy work-queue item identifier.",
+    "description": "Optional detailed description.",
+    "due_in_hours": "Optional number of hours from now until due.",
+    "tags": "Optional list of short tags.",
+    "estimated_hours": "Estimated work duration in hours.",
+    "event_type": "Optional monitor-event type filter.",
+    "filepath": "Path expected by this tool.",
+    "log_path": "Host log path/name expected by this tool.",
+    "service": "Optional systemd service/unit filter.",
+    "grep": "Optional text/regular-expression filter supported by the tool.",
+    "targets": "Optional list of network reachability targets.",
+    "symbol": "Optional Python symbol name; omit to read a line slice.",
+    "start_line": "1-based starting line for a bounded source read.",
+    "max_lines": "Maximum number of source lines to return.",
+    "max_files": "Maximum number of repository files to include.",
+    "markdown_content": "Markdown source text to render.",
+    "url": "HTTP(S) URL.",
+    "path": "Path or URL expected by this tool.",
+    "filename": "File path/name expected by this tool.",
+    "output_filename": "Output filename; use a simple workspace-relative name unless the tool says otherwise.",
+    "content": "Text content to write or process.",
+    "code": "Python source code to execute.",
+    "command": "Explicit shell command to execute.",
+    "timeout": "Timeout in seconds.",
+    "limit": "Maximum number of results to return.",
+    "offset": "Starting offset for a bounded read.",
+    "length": "Maximum number of characters/items to return.",
+    "network": "CIDR network, for example 192.168.1.0/24.",
+    "job_id": "Durable job identifier.",
+    "task_id": "Durable task identifier.",
+    "observation_id": "Observation handle previously returned by the harness.",
+    "package_name": "One or more package names only; do not include shell flags.",
+    "tool_name": "Custom tool name.",
+    "specification": "Natural-language specification for the custom tool.",
+    "context": "Short context explaining what should be inspected or why.",
+}
+
+
+def agent_tool(*, name: str | None = None, description: str = "", readonly: bool = False, timeout: int | None = 60):
+    """Decorator for optional custom tools loaded from the workspace.
+
+    Custom tools default to mutating (readonly=False). A tool author must opt
+    into readonly=True only when calling it cannot change external state. This
+    conservative default prevents a generated tool from gaining repeat/read-only
+    treatment merely because a small model omitted metadata.
+    """
     def decorate(func: Callable) -> Callable:
         func._agent_tool = True
         func._agent_tool_name = name or func.__name__
-        func._agent_tool_description = description or (inspect.getdoc(func) or "").splitlines()[0] or func.__name__
+        raw_doc = inspect.getdoc(func) or ""
+        first_doc_line = raw_doc.splitlines()[0] if raw_doc.splitlines() else ""
+        func._agent_tool_description = description or first_doc_line or func.__name__
         func._agent_tool_readonly = readonly
         func._agent_tool_timeout = timeout
         return func
     return decorate
 
 
-def _json_type(annotation: Any) -> tuple[str, dict | None]:
+def _unwrap_annotation(annotation: Any) -> Any:
+    origin = get_origin(annotation)
+    if origin is Annotated:
+        args = get_args(annotation)
+        return args[0] if args else str
+    return annotation
+
+
+def _json_type(annotation: Any) -> tuple[str, dict | None, list[Any] | None]:
+    annotation = _unwrap_annotation(annotation)
     origin = get_origin(annotation)
     args = get_args(annotation)
+    if origin is Literal:
+        values = list(args)
+        sample = next((value for value in values if value is not None), "")
+        if isinstance(sample, bool):
+            json_type = "boolean"
+        elif isinstance(sample, int):
+            json_type = "integer"
+        elif isinstance(sample, float):
+            json_type = "number"
+        else:
+            json_type = "string"
+        return json_type, None, values
     if origin in (Union, types.UnionType):
         non_none = [arg for arg in args if arg is not type(None)]
         return _json_type(non_none[0] if non_none else str)
-    if origin is list:
-        item_type, _ = _json_type(args[0] if args else str)
-        return "array", {"type": item_type}
-    if origin is dict:
-        return "object", None
-    if origin is tuple:
-        return "array", None
+    if origin is list or annotation is list:
+        item_type, _, item_enum = _json_type(args[0] if args else str)
+        item_schema: dict[str, Any] = {"type": item_type}
+        if item_enum is not None:
+            item_schema["enum"] = item_enum
+        return "array", item_schema, None
+    if origin is dict or annotation is dict:
+        return "object", None, None
+    if origin is tuple or annotation is tuple:
+        return "array", None, None
     if annotation in (int, float):
-        return ("integer" if annotation is int else "number"), None
+        return ("integer" if annotation is int else "number"), None, None
     if annotation is bool:
-        return "boolean", None
-    return "string", None
+        return "boolean", None, None
+    return "string", None, None
 
 
 def function_schema(func: Callable, description: str | None = None) -> dict:
     """Convert a Python callable signature to an Ollama-compatible tool schema."""
-    hints = get_type_hints(func)
+    hints = get_type_hints(func, include_extras=True)
     properties = {}
     required = []
     signature = inspect.signature(func)
+    public_name = getattr(func, "_agent_tool_name", func.__name__)
+    required_overrides = _REQUIRED_OVERRIDES.get(public_name, set())
     for param in signature.parameters.values():
         if param.kind not in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
             continue
         annotation = hints.get(param.name, str)
-        json_type, items = _json_type(annotation)
-        entry = {"type": json_type}
+        json_type, items, enum = _json_type(annotation)
+        entry: dict[str, Any] = {"type": json_type}
         if items:
             entry["items"] = items
-        properties[param.name] = entry
-        if param.default is inspect.Parameter.empty:
+        if enum is not None:
+            entry["enum"] = enum
+        if param.name in _PARAMETER_HINTS:
+            entry["description"] = _PARAMETER_HINTS[param.name]
+        if param.default is inspect.Parameter.empty or param.name in required_overrides:
             required.append(param.name)
-    doc = description or getattr(func, "_agent_tool_description", None) or (inspect.getdoc(func) or "").splitlines()[0] or func.__name__
+        elif param.default is not None and isinstance(param.default, (str, int, float, bool, list, dict)):
+            entry["default"] = param.default
+        entry.update(_SCHEMA_OVERRIDES.get((public_name, param.name), {}))
+        properties[param.name] = entry
+    raw_doc = inspect.getdoc(func) or ""
+    first_doc_line = raw_doc.splitlines()[0] if raw_doc.splitlines() else ""
+    doc = description or getattr(func, "_agent_tool_description", None) or first_doc_line or func.__name__
     return {
         "type": "function",
         "function": {
-            "name": getattr(func, "_agent_tool_name", func.__name__),
+            "name": public_name,
             "description": doc,
             "parameters": {
                 "type": "object",
@@ -71,8 +205,96 @@ def function_schema(func: Callable, description: str | None = None) -> dict:
     }
 
 
+def _coerce_value(value: Any, annotation: Any, name: str) -> Any:
+    annotation = _unwrap_annotation(annotation)
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+
+    if origin in (Union, types.UnionType):
+        if value is None and type(None) in args:
+            return None
+        errors = []
+        for candidate in (arg for arg in args if arg is not type(None)):
+            try:
+                return _coerce_value(value, candidate, name)
+            except (TypeError, ValueError) as exc:
+                errors.append(str(exc))
+        raise TypeError(errors[0] if errors else f"Argument '{name}' has an invalid type.")
+
+    if origin is Literal:
+        allowed = list(args)
+        if value in allowed:
+            return value
+        # Permit exact textual representation for string literals only.
+        if all(isinstance(item, str) for item in allowed) and isinstance(value, str):
+            for item in allowed:
+                if value == item:
+                    return item
+        raise TypeError(f"Argument '{name}' must be one of: {', '.join(map(str, allowed))}.")
+
+    if annotation is Any or annotation is inspect.Parameter.empty:
+        return value
+    if annotation is str:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (int, float, bool)):
+            return str(value)
+        raise TypeError(f"Argument '{name}' must be a string.")
+    if annotation is bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.strip().lower() in {"true", "false"}:
+            return value.strip().lower() == "true"
+        raise TypeError(f"Argument '{name}' must be a boolean.")
+    if annotation is int:
+        if isinstance(value, bool):
+            raise TypeError(f"Argument '{name}' must be an integer.")
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()):
+            return int(value.strip())
+        raise TypeError(f"Argument '{name}' must be an integer.")
+    if annotation is float:
+        if isinstance(value, bool):
+            raise TypeError(f"Argument '{name}' must be a number.")
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value.strip())
+            except ValueError:
+                pass
+        raise TypeError(f"Argument '{name}' must be a number.")
+    if origin is list or annotation is list:
+        if isinstance(value, str) and value.lstrip().startswith("["):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise TypeError(f"Argument '{name}' must be a JSON array.") from exc
+        if not isinstance(value, list):
+            raise TypeError(f"Argument '{name}' must be an array.")
+        item_annotation = args[0] if args else Any
+        return [_coerce_value(item, item_annotation, f"{name}[]") for item in value]
+    if origin is tuple or annotation is tuple:
+        if not isinstance(value, (list, tuple)):
+            raise TypeError(f"Argument '{name}' must be an array.")
+        return list(value)
+    if origin is dict or annotation is dict:
+        if isinstance(value, str) and value.lstrip().startswith("{"):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise TypeError(f"Argument '{name}' must be a JSON object.") from exc
+        if not isinstance(value, dict):
+            raise TypeError(f"Argument '{name}' must be an object.")
+        return value
+    return value
+
+
 def normalize_arguments(func: Callable, args: Any) -> dict:
-    """Validate required argument names and return a clean keyword dictionary."""
+    """Validate names/types and apply only unambiguous primitive coercions."""
     if args is None:
         args = {}
     if not isinstance(args, dict):
@@ -93,4 +315,13 @@ def normalize_arguments(func: Callable, args: Any) -> dict:
     ]
     if missing:
         raise TypeError(f"Missing required argument(s): {', '.join(missing)}")
-    return dict(args)
+
+    hints = get_type_hints(func, include_extras=True)
+    normalized = {}
+    for name, value in args.items():
+        param = signature.parameters[name]
+        if value is None and param.default is None:
+            normalized[name] = None
+            continue
+        normalized[name] = _coerce_value(value, hints.get(name, str), name)
+    return normalized

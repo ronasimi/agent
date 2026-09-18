@@ -290,10 +290,10 @@ def remember_semantic(topic: str = "general_knowledge", fact: str = "") -> str:
         vectors = response.get("embeddings") or []
         embedding = vectors[0] if vectors else response.get("embedding") or []
         if not embedding:
-            return "Embedding generation returned no vector."
+            return "Error: embedding generation returned no vector."
         embedding_json = json.dumps(embedding)
     except Exception as exc:
-        return f"Embedding generation failed: {exc}"
+        return f"Error: embedding generation failed: {exc}"
 
     with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
         conn.execute(

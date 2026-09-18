@@ -77,6 +77,6 @@ def notify_desktop(title: str, message: str = "") -> str:
         )
         if proc.returncode == 0:
             return f"Notification sent: {title}"
-        return f"Notification failed (exit {proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}"
+        return f"Error: notification failed (exit {proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}"
     except Exception as exc:
-        return f"Notification error: {exc}"
+        return f"Error: notification failed: {exc}"

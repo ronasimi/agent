@@ -72,3 +72,11 @@ def test_tool_loop_tail_is_bounded_without_dropping_prefix():
     result = fit_tool_loop_messages(prefix, tail, max_ctx_tokens=1000, reserve_tokens=100)
     assert result[:2] == prefix
     assert sum(estimate_tokens(message.get("content", "")) for message in result) <= 900
+
+
+def test_image_inputs_reserve_context_budget():
+    from tools.context import IMAGE_TOKEN_ESTIMATE, estimate_messages_tokens
+
+    without_image = estimate_messages_tokens([{"role": "user", "content": "describe this"}])
+    with_image = estimate_messages_tokens([{"role": "user", "content": "describe this", "images": ["abc"]}])
+    assert with_image - without_image == IMAGE_TOKEN_ESTIMATE

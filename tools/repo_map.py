@@ -150,7 +150,7 @@ def read_repo_symbol(path: str, symbol: str = "", start_line: int = 0, max_lines
     if symbol and source.suffix == ".py":
         match = next((entry for entry in _python_symbols(text) if entry["name"] == symbol), None)
         if not match:
-            return f"Symbol '{symbol}' was not found in {path}."
+            return f"Error: symbol '{symbol}' was not found in {path}."
         start = int(match["line"])
         end = min(int(match["end_line"]), start + max(1, min(int(max_lines), 400)) - 1)
     numbered = [f"{index}: {lines[index - 1]}" for index in range(start, end + 1)]

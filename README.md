@@ -62,21 +62,29 @@ consuming a retry.
 
 The worker no longer performs a duplicate main-model warmup at startup.
 
-### Last-iteration tool-loop validation
+### Cross-model context sharing and tool-loop validation
 
-Before the final allowed iteration of a tool loop, the fast model reviews a
-bounded recent transcript and returns one constrained decision: `finish`,
-`corrective_tool`, or `blocked`. An optional suggested tool must come from the
-turn's existing allowlist. The harness converts that decision into its own
-deterministic recovery prompt for the main model; validator prose and untrusted
-tool output are never copied into the prompt, and the prompt is not persisted
-to conversation history.
+The main and fast models share **bounded semantic context**, not a KV cache.
+Different model weights cannot safely reuse each other's attention cache. The
+harness instead gives the fast validator the same relevant rolling summary,
+recent conversational setup, recalled memory, current objective, and selected
+tool capabilities that informed the main model. Raw tool observations stay in
+the separate loop transcript and remain explicitly untrusted.
 
-If validation times out or fails, the safe fallback permits at most one
-distinct corrective tool call before finalization. Set
-`agent.tool_loop_validator.enabled` to `false` to disable the check. The default
-`keep_alive: 0` releases the fast model after validation on memory-constrained
-hosts.
+After three deterministic failed/no-progress attempts on one step, the fast
+model validates the loop before an unvalidated fourth attempt. It returns a
+constrained control decision (`retry`, `switch_tool`, `finish`, or `blocked`)
+plus a structured diagnosis such as `bad_arguments`, `wrong_tool`, or
+`task_complete`. Only those structured fields are shared back to the main
+model; free-form validator reasoning and untrusted tool text are never copied
+into the main-model control prompt. A separate final-iteration validator remains
+as a last safety net.
+
+If validation times out or fails, the safe fallback permits one bounded
+corrective attempt rather than terminating the task silently. Set
+`agent.tool_loop_validator.enabled` to `false` to disable validation, or
+`agent.model_context_sharing.enabled` to `false` to keep the validator limited
+to the current request and loop transcript.
 
 ## Default models
 
@@ -99,29 +107,39 @@ The optimized defaults are in config/config.yaml:
       max_iterations: 12
       max_tools_per_turn: 12
 
+      model_context_sharing:
+        enabled: true
+        max_chars: 6000
+        summary_chars: 2200
+        recent_chars: 1800
+        memory_chars: 1200
+        tool_chars: 1600
+
       tool_loop_validator:
         enabled: true
+        failed_step_attempts: 3
+        max_interventions_per_turn: 3
         timeout_seconds: 45
         max_transcript_chars: 12000
-        keep_alive: 0
+        keep_alive: -1
 
       context:
-        num_ctx: 8192
-        reserve_tokens: 1280
+        num_ctx: 16384
+        reserve_tokens: 2048
         recent_messages: 12
         summary_keep_messages: 8
-        compact_at_tokens: 4500
+        compact_at_tokens: 9000
         max_tool_output_chars: 4000
-        tool_loop_reserve_tokens: 2048
+        tool_loop_reserve_tokens: 3072
 
       main_options:
-        num_ctx: 8192
+        num_ctx: 16384
         temperature: 0.4
         top_p: 0.9
         top_k: 20
 
       fast_options:
-        num_ctx: 4096
+        num_ctx: 8192
         temperature: 0.0
         top_p: 0.9
         top_k: 20
@@ -166,6 +184,7 @@ returns every field.
 - agent.py — interactive CLI and foreground tool loop.
 - worker.py — durable research, compaction, and host monitoring.
 - tools/context.py — turn grouping, token budgeting, and trimming.
+- tools/model_context.py — bounded semantic state bridge shared by main/fast models.
 - tools/loop_validator.py — bounded fast-model tool-loop classification.
 - tools/memory.py — memories, history watermark, and observations.
 - tools/runtime.py — durable jobs, checkpoints, leases, and deferral.
@@ -182,11 +201,21 @@ SQLite WAL mode allows both containers to share memory/knowledge.db.
 
 Research runs as a durable state machine:
 
-    plan -> search/fetch/distill -> evaluate -> gap search -> synthesize -> persist
+    plan -> search/fetch/distill -> evaluate -> gap search -> report plan
+         -> collect media -> write sections -> write overview -> assemble -> persist
 
-Jobs checkpoint after each phase and source query. They can be cancelled,
-retried after transient failures, or recovered after a stale worker heartbeat.
-Reports are written to workspace/research as Markdown and, when available, PDF.
+The fast model plans the report and assigns source IDs to sections. The main
+model writes each section independently with only its relevant evidence, so a
+long evidence bundle no longer competes with the entire report for one context
+window. Source pages retain ranked `og:image`, `twitter:image`, and content-image
+candidates; selected images are downloaded into a sibling `*_assets` directory
+and embedded with relative paths. Decorative images are not required.
+
+Jobs checkpoint after each phase, source query, and drafted section. They can be
+cancelled, retried after transient failures, or recovered after a stale worker
+heartbeat. Each completed run records `markdown_path`, `pdf_path`, `asset_dir`,
+and `report_word_count` in job state. Markdown and PDF are written to
+`workspace/research`, and the PDF resolves the same local media used by Markdown.
 
 ## Self-optimization safety model
 
@@ -329,3 +358,21 @@ digest-pinned approval, patch policy, and tool selection.
 End-to-end latency must be benchmarked on the target Ollama/GPU runtime. Use
 the printed counters with identical prompts and model state when comparing
 settings.
+
+### Tool-produced media / vision
+
+The main Qwen3.5 model is multimodal. Tools can return a media-aware result containing
+normal text plus local image references. The frontend encodes those files and injects
+them into the next Ollama message through the native `images` field, so the model sees
+the actual pixels rather than only a filename.
+
+`take_web_screenshot()` now automatically returns its PNG as attached media and includes
+bounded visible page text, title, and final URL in the tool result. This means a request
+such as `take a screenshot of cnn.com and describe it` can be completed in one tool loop.
+If the screenshot is blank or blocked, the model receives that blank image and is
+explicitly instructed to report that fact instead of guessing the page layout.
+
+The generic `attach_media(path, context="")` tool can re-attach an existing workspace
+PNG/JPEG/WebP image or the first page of a PDF. Public image URLs are also supported and
+remain subject to the existing public-URL and response-size checks. Tool media is bounded
+by `agent.vision.max_images_per_turn` and `agent.vision.max_image_bytes`.

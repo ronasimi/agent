@@ -46,6 +46,8 @@ def execute_shell(command: str = "", timeout: int = 30) -> str:
             env=os.environ.copy(),
         )
         output = f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}".strip()
+        if result.returncode != 0:
+            return f"Error: command exited with status {result.returncode}.\n{output}"
         return output or "Command completed successfully with no output."
     except subprocess.TimeoutExpired:
         return f"Error: Command timed out after {timeout} seconds."
@@ -76,6 +78,8 @@ def execute_python(code: str = "", timeout: int = 30) -> str:
             env=os.environ.copy(),
         )
         output = f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}".strip()
+        if result.returncode != 0:
+            return f"Error: Python exited with status {result.returncode}.\n{output}"
         return output or "Python execution completed with no output."
     except subprocess.TimeoutExpired:
         return f"Error: Python execution timed out after {timeout} seconds."

@@ -94,7 +94,7 @@ def resume_interrupted_task(task_id: str) -> dict:
 def get_task_info(task_id: str) -> str:
     """Return detailed durable task information."""
     job = get_job(task_id)
-    return json.dumps(job, ensure_ascii=False, indent=2) if job else f"Task {task_id} not found"
+    return json.dumps(job, ensure_ascii=False, indent=2) if job else f"Error: task {task_id} not found"
 
 
 def delete_task(task_id: str) -> str:

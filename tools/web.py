@@ -29,7 +29,7 @@ def web_search(query: str = "") -> str:
         ]
         return json.dumps(compact, ensure_ascii=False, indent=2)
     except Exception as exc:
-        return f"Web search error: {exc}"
+        return f"Error: web search failed: {exc}"
 
 
 def wiki_search(query: str = "") -> str:
@@ -43,7 +43,7 @@ def wiki_search(query: str = "") -> str:
         import wikipedia
         return wikipedia.summary(query, sentences=4, auto_suggest=True)
     except Exception as exc:
-        return f"Wikipedia search error: {exc}"
+        return f"Error: Wikipedia search failed: {exc}"
 
 
 def browse_url(url: str = "") -> str:
@@ -62,4 +62,4 @@ def browse_url(url: str = "") -> str:
         text = text[:20000]
         return f"URL: {final_url}\nContent-Type: {content_type}\n\n{text or 'The page returned no readable text content.'}"
     except Exception as exc:
-        return f"Error browsing URL: {exc}"
+        return f"Error: browsing URL failed: {exc}"
