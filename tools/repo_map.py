@@ -16,7 +16,7 @@ DEFAULT_EXCLUDES = (
     ".git/*", "workspace/*", "memory/*", "__pycache__/*", "*.pyc",
     ".pytest_cache/*", ".ruff_cache/*", ".mypy_cache/*", "*.db", "*.sqlite*",
 )
-DEFAULT_SUFFIXES = {".py", ".yaml", ".yml", ".toml", ".md", ".txt", ".json"}
+DEFAULT_SUFFIXES = {".py", ".yaml", ".yml", ".toml", ".md", ".txt", ".json", ".sh"}
 
 
 def source_root() -> Path:

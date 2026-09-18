@@ -33,6 +33,7 @@ MUTATING_TOOLS = {
 # Mutating only because they write/replace a deterministic artifact. Repeating an
 # identical call is safe and can be necessary after a transient blank capture.
 REPEAT_SAFE_TOOLS = {"take_web_screenshot", "generate_pdf_report", "map_network"}
+SAFE_ARTIFACT_TOOLS = {"take_web_screenshot", "generate_pdf_report"}
 BUILTINS = [
     ("memory", "remember"), ("memory", "search_memory"),
     ("memory", "remember_semantic"), ("memory", "search_semantic_memory"),
@@ -92,6 +93,7 @@ def _register(func, *, builtin_name: str | None = None) -> None:
     TOOL_METADATA[public_name] = {
         "readonly": False if public_name in MUTATING_TOOLS else bool(getattr(func, "_agent_tool_readonly", True)),
         "repeat_safe": public_name in REPEAT_SAFE_TOOLS or bool(getattr(func, "_agent_tool_repeat_safe", False)),
+        "safe_artifact": public_name in SAFE_ARTIFACT_TOOLS or bool(getattr(func, "_agent_tool_safe_artifact", False)),
         "timeout": getattr(func, "_agent_tool_timeout", None),
         "function": func,
     }

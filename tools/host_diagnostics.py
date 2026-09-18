@@ -106,26 +106,60 @@ def pressure_snapshot() -> str:
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
+def _host_mount_rows() -> list[tuple[str, str, str, str]]:
+    """Return (device, mountpoint, fstype, options) from the host PID 1 mount namespace when available."""
+    candidates = [Path("/proc/1/mountinfo"), Path("/host/proc/1/mountinfo"), Path("/proc/self/mountinfo")]
+    mountinfo = next((path for path in candidates if path.is_file()), None)
+    if mountinfo is None:
+        return []
+    rows: list[tuple[str, str, str, str]] = []
+    try:
+        lines = mountinfo.read_text(errors="ignore").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        if " - " not in line:
+            continue
+        left, right = line.split(" - ", 1)
+        pre = left.split()
+        post = right.split()
+        if len(pre) < 6 or len(post) < 2:
+            continue
+        mountpoint = pre[4].replace("\040", " ")
+        options = pre[5]
+        fstype = post[0]
+        device = post[1]
+        rows.append((device, mountpoint, fstype, options))
+    return rows
+
+
 def filesystem_snapshot(limit: int = 20) -> str:
     """Return bounded host filesystem capacity, inode usage, and read-only state."""
     limit = max(1, min(int(limit), 50))
-    mounts_path = Path("/host/proc/mounts") if Path("/host/proc/mounts").is_file() else Path("/proc/mounts")
-    pseudo = {"proc", "sysfs", "devtmpfs", "devpts", "tmpfs", "cgroup", "cgroup2", "overlay", "squashfs", "tracefs", "debugfs", "securityfs", "pstore", "mqueue", "hugetlbfs", "fusectl"}
+    pseudo = {"proc", "sysfs", "devtmpfs", "devpts", "tmpfs", "cgroup", "cgroup2", "overlay", "squashfs", "tracefs", "debugfs", "securityfs", "pstore", "mqueue", "hugetlbfs", "fusectl", "autofs"}
+    mount_rows = _host_mount_rows()
+    if not mount_rows:
+        mounts_path = Path("/proc/mounts")
+        try:
+            mount_rows = []
+            for line in mounts_path.read_text(errors="ignore").splitlines():
+                fields = line.split()
+                if len(fields) >= 4:
+                    mount_rows.append((fields[0], fields[1].replace("\040", " "), fields[2], fields[3]))
+        except Exception as exc:
+            return f"Error: could not read mount table: {exc}"
+
     rows = []
-    seen = set()
-    try:
-        lines = mounts_path.read_text(errors="ignore").splitlines()
-    except Exception as exc:
-        return f"Error: could not read mount table: {exc}"
-    for line in lines:
-        fields = line.split()
-        if len(fields) < 4:
+    seen_targets: set[str] = set()
+    seen_devices: set[tuple[str, str]] = set()
+    for device, mountpoint, fstype, options in mount_rows:
+        if fstype in pseudo or mountpoint in seen_targets:
             continue
-        device, mountpoint, fstype, options = fields[:4]
-        mountpoint = mountpoint.replace("\\040", " ")
-        if fstype in pseudo or mountpoint in seen:
+        # Ignore container-specific single-file bind mounts and other non-host
+        # artifacts; the host PID 1 mount table normally avoids these already.
+        if mountpoint in {"/etc/hostname", "/etc/hosts", "/etc/resolv.conf"}:
             continue
-        seen.add(mountpoint)
+        seen_targets.add(mountpoint)
         probe_path = Path("/host") if mountpoint == "/" and Path("/host").exists() else Path("/host") / mountpoint.lstrip("/")
         if not probe_path.exists():
             continue
@@ -135,6 +169,13 @@ def filesystem_snapshot(limit: int = 20) -> str:
             free = stat.f_frsize * stat.f_bavail
             inode_total = stat.f_files
             inode_free = stat.f_favail
+            device_key = (device, fstype)
+            # Btrfs/subvolume layouts may expose several mountpoints backed by
+            # the same capacity. Keep / plus distinct devices, not dozens of
+            # duplicate subvolume rows.
+            if device_key in seen_devices and mountpoint != "/":
+                continue
+            seen_devices.add(device_key)
             rows.append({
                 "device": device,
                 "mountpoint": mountpoint,
@@ -147,15 +188,22 @@ def filesystem_snapshot(limit: int = 20) -> str:
             })
         except OSError:
             continue
-    rows.sort(key=lambda item: float(item.get("used_percent") or 0), reverse=True)
-    return json.dumps({"filesystems": rows[:limit]}, ensure_ascii=False, indent=2)
+    rows.sort(key=lambda item: (item.get("mountpoint") != "/", -float(item.get("used_percent") or 0)))
+    return json.dumps({"source": "host_pid1_mount_namespace" if Path("/proc/1/mountinfo").is_file() else "mount_table", "filesystems": rows[:limit]}, ensure_ascii=False, indent=2)
 
 
 def service_health(service: str = "", lines: int = 40) -> str:
     """Inspect systemd service health with live-manager access when possible and journal/static fallbacks otherwise."""
     service = str(service or "").strip()
     lines = max(5, min(int(lines), 120))
-    result: dict[str, Any] = {"service": service or None, "live_manager_access": False}
+    result: dict[str, Any] = {
+        "service": service or None,
+        "live_manager_access": False,
+        "interpretation": (
+            "live_manager_access=false means this container could not query the live systemd manager; "
+            "it does not establish that the host lacks systemd. Journal/static host evidence may still be available."
+        ),
+    }
 
     if shutil.which("systemctl"):
         argv = ["systemctl", "--no-pager", "--plain"]

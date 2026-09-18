@@ -13,6 +13,10 @@ agent:
   thinking_default: false
   show_perf_stats: true
   max_iterations: 12
+  # Broad explicit multi-check requests get an adaptive budget up to this cap.
+  max_iterations_hard: 32
+  # Required capabilities may expand the normal small schema set, but remain bounded.
+  requirement_tool_cap: 24
   # Keep each small-model iteration narrow. Read-only calls may be batched, but
   # only one mutating side effect is allowed before the model sees its result.
   max_tool_calls_per_iteration: 3
@@ -42,6 +46,10 @@ agent:
   working_state:
     enabled: true
     main_history_turns: 1
+    # Keep only the latest raw tool transactions; older evidence is persisted in
+    # the bounded untrusted evidence digest to reduce repeated prompt ingestion.
+    raw_tool_results: 2
+    evidence_render_chars: 3600
     max_render_chars: 7000
     objective_chars: 1600
     background_chars: 2200

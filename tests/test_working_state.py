@@ -156,3 +156,92 @@ def test_clear_chat_history_clears_working_state(monkeypatch):
         assert store.load()["turn_id"] == 9
         memory.clear_chat_history()
         assert store.load()["turn_id"] == 0
+
+
+def test_new_task_epoch_drops_stale_recent_context_and_followup_carries_evidence(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        store = _store(monkeypatch, td)
+        store.begin_turn(
+            turn_id=1,
+            objective="Old validator task",
+            rolling_summary="old summary",
+            recalled_context="",
+            recent_messages=[{"role": "assistant", "content": "validator_test.txt"}],
+            policy_note="",
+            tool_schemas=[_schema()],
+        )
+        store.record_tool_result(
+            tool_name="read_file", arguments={"filename": "validator_test.txt"}, status="ok", reason="ok",
+            result_text="VALIDATOR_RECOVERY_74291", fingerprint="old",
+        )
+        epoch1 = store.load()["task_epoch"]
+
+        store.begin_turn(
+            turn_id=2,
+            objective="Perform a new host health assessment",
+            rolling_summary="old summary mentioning validator_test.txt",
+            recalled_context="",
+            recent_messages=[{"role": "assistant", "content": "validator_test.txt"}],
+            policy_note="",
+            tool_schemas=[_schema()],
+            continuation=False,
+        )
+        fresh = store.load()
+        assert fresh["task_epoch"] == epoch1 + 1
+        assert fresh["verified_observations"] == []
+        assert fresh["background"]["recent_context"] == ""
+        assert fresh["background"]["rolling_summary"] == ""
+
+        store.record_tool_result(
+            tool_name="read_file", arguments={"filename": "host.txt"}, status="ok", reason="ok",
+            result_text="host evidence", fingerprint="host",
+        )
+        store.begin_turn(
+            turn_id=3,
+            objective="Without rerunning tools, summarize those results",
+            rolling_summary="host summary",
+            recalled_context="",
+            recent_messages=[{"role": "assistant", "content": "host health result"}],
+            policy_note="",
+            tool_schemas=[_schema()],
+            continuation=True,
+        )
+        follow = store.load()
+        assert follow["task_epoch"] == fresh["task_epoch"]
+        assert follow["verified_observations"][0]["tool"] == "read_file"
+        assert "host health result" in follow["background"]["recent_context"]
+
+
+def test_evidence_digest_is_valid_json_and_contains_untrusted_preview(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        store = _store(monkeypatch, td, evidence_render_chars=500)
+        store.begin_turn(
+            turn_id=1, objective="inspect", rolling_summary="", recalled_context="", recent_messages=[],
+            policy_note="", tool_schemas=[_schema()],
+        )
+        for i in range(8):
+            store.record_tool_result(
+                tool_name="read_file", arguments={"filename": str(i)}, status="ok", reason="ok",
+                result_text=(f"evidence-{i} " * 80), fingerprint=str(i),
+            )
+        digest = store.render_evidence(500)
+        parsed = json.loads(digest)
+        assert isinstance(parsed, list)
+        assert len(digest) <= 500
+
+
+def test_followup_preserves_prior_requirement_status_for_state_visibility(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        store = _store(monkeypatch, td)
+        reqs = [{"key": "dns", "tool": "dns_diagnose", "label": "DNS", "status": "satisfied", "attempts": 1}]
+        store.begin_turn(
+            turn_id=1, objective="check dns", rolling_summary="", recalled_context="", recent_messages=[],
+            policy_note="", tool_schemas=[_schema()], requirements=reqs, continuation=False,
+        )
+        store.begin_turn(
+            turn_id=2, objective="Without rerunning, summarize what remains", rolling_summary="summary", recalled_context="",
+            recent_messages=[], policy_note="", tool_schemas=[_schema()], requirements=[], continuation=True,
+        )
+        state = store.load()
+        assert state["requirements"][0]["tool"] == "dns_diagnose"
+        assert state["requirements"][0]["status"] == "satisfied"

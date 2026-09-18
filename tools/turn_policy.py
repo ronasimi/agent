@@ -22,6 +22,7 @@ class TurnToolPolicy:
     delayed: dict[str, int] = field(default_factory=dict)
     failed_iterations: int = 0
     readonly_only: bool = False
+    explicit_exemptions: set[str] = field(default_factory=set)
 
     def allowed(self, name: str, metadata: dict[str, Any]) -> bool:
         if name in self.blocked:
@@ -30,8 +31,23 @@ class TurnToolPolicy:
         if threshold is not None and self.failed_iterations < threshold:
             return False
         if self.readonly_only and not bool(metadata.get("readonly", True)):
-            return False
+            if name not in self.explicit_exemptions or not bool(metadata.get("safe_artifact", False)):
+                return False
         return True
+
+
+    def allow_explicit_requirements(self, tool_names: set[str], metadata_by_name: dict[str, dict]) -> None:
+        """Permit explicitly requested safe artifacts under broad read-only wording.
+
+        This resolves requests such as "take a screenshot" plus "do not modify any
+        files" where the latter is intended to protect source/system state, not to
+        forbid the requested diagnostic artifact itself.
+        """
+        for name in set(tool_names or set()):
+            metadata = metadata_by_name.get(name, {})
+            if bool(metadata.get("safe_artifact", False)):
+                self.explicit_exemptions.add(name)
+                self.blocked.discard(name)
 
     def record_iteration(self, made_progress: bool) -> bool:
         if made_progress:
@@ -74,30 +90,51 @@ def derive_turn_tool_policy(user_text: str, known_names: set[str], metadata_by_n
     lower = text.lower()
     policy = TurnToolPolicy()
 
+    # A file-modification prohibition is narrower than a globally read-only
+    # turn. Block direct file/package mutators, but do not erase separately
+    # stated conditional access to diagnostic shell/Python tools.
+    if re.search(r"\b(?:do not|don't|never) (?:create|write|modify|change|delete) (?:any )?(?:files?|source|repository)\b", lower):
+        policy.blocked.update(name for name in {
+            "write_file", "create_or_update_tool", "install_package"
+        } if name in known_names)
+
     # Broad explicit read-only constraints. Do not infer them from ordinary words
     # such as "inspect" or "check".
     explicit_readonly = (
         re.search(r"(?:^|\n)\s*read[- ]only(?:\s*[:,-]|\s*$)", lower)
         or re.search(r"\bkeep (?:this|the task|this task) read[- ]only\b", lower)
-        or re.search(r"\b(?:do not|don't|never) (?:create|write|modify|change|delete) (?:any )?(?:files?|state)\b", lower)
     )
     if explicit_readonly:
         policy.readonly_only = True
 
-    # Conditional restriction: the tool becomes available only after one failed
-    # allowed tool iteration. This covers the common "unless first approach fails"
-    # form without trying to interpret arbitrary natural-language conditions.
-    conditional_pattern = re.compile(
-        r"(?:do not|don't|never)\s+use\s+([a-z0-9_ -]+?)\s+unless\s+(?:your\s+)?(?:first|initial)\s+(?:approach|attempt)\s+fails",
-        re.I,
+    # Conditional restrictions. Support both "unless the first approach fails"
+    # and bounded counted forms such as "unless three structured-tool attempts
+    # fail". The threshold is deterministic and never inferred from tool prose.
+    number_words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
+    conditional_patterns = (
+        re.compile(
+            r"(?:do not|don't|never)\s+use\s+([a-z0-9_ -]+?)\s+unless\s+(?:your\s+)?(?:first|initial)\s+(?:approach|attempt)\s+fails",
+            re.I,
+        ),
+        re.compile(
+            r"(?:do not|don't|never)\s+use\s+([a-z0-9_ -]+?)\s+unless\s+(?:at\s+least\s+)?(\d+|one|two|three|four|five)\s+(?:structured[- ]tool\s+)?(?:approaches?|attempts?)\s+fail",
+            re.I,
+        ),
     )
     conditional_spans = []
-    for match in conditional_pattern.finditer(text):
-        conditional_spans.append(match.span())
-        phrase = match.group(1).strip().lower()
-        names = _mentioned_tool_tokens(phrase, known_names)
-        for name in names:
-            policy.delayed[name] = 1
+    for pattern in conditional_patterns:
+        for match in pattern.finditer(text):
+            conditional_spans.append(match.span())
+            phrase = match.group(1).strip().lower()
+            threshold = 1
+            if match.lastindex and match.lastindex >= 2:
+                raw_count = str(match.group(2) or "1").lower()
+                threshold = int(raw_count) if raw_count.isdigit() else number_words.get(raw_count, 1)
+            threshold = max(1, min(threshold, 10))
+            names = _mentioned_tool_tokens(phrase, known_names)
+            for name in names:
+                existing = policy.delayed.get(name)
+                policy.delayed[name] = max(existing or 0, threshold)
 
     # Permanent explicit tool bans. Remove conditional clauses before matching so
     # "do not use X unless..." is not accidentally converted into a permanent ban.

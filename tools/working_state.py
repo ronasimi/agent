@@ -1,7 +1,7 @@
 """Persisted harness-owned working state shared by the main and fast models.
 
-The state is deliberately operational rather than a second conversational
-memory.  It records the current objective, explicit constraints, provenance-
+The state is operational, task-scoped, and provenance-aware.  It records the
+current objective, explicit constraints, completion requirements, provenance-
 tagged tool evidence, failed approaches, the current plan, and structured
 validator decisions.  Only harness code commits updates.
 """
@@ -22,11 +22,13 @@ _DEFAULT_LIMITS = {
     "background_chars": 2600,
     "recent_context_chars": 1600,
     "memory_chars": 1400,
-    "evidence_items": 10,
+    "evidence_items": 12,
     "evidence_preview_chars": 520,
+    "evidence_render_chars": 3600,
     "failure_items": 8,
     "validator_items": 6,
     "plan_items": 6,
+    "requirement_items": 24,
     "max_render_chars": 7000,
 }
 
@@ -62,7 +64,7 @@ def _connect() -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS working_state (
             id INTEGER PRIMARY KEY CHECK(id = 1),
             turn_id INTEGER NOT NULL DEFAULT 0,
-            version INTEGER NOT NULL DEFAULT 1,
+            version INTEGER NOT NULL DEFAULT 2,
             state_json TEXT NOT NULL DEFAULT '{}',
             updated_at TEXT NOT NULL
         )
@@ -73,12 +75,14 @@ def _connect() -> sqlite3.Connection:
 
 def _empty_state() -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "turn_id": 0,
+        "task_epoch": 0,
         "status": "idle",
         "objective": "",
         "background": {"rolling_summary": "", "recent_context": "", "recalled_context": ""},
         "constraints": [],
+        "requirements": [],
         "tool_capabilities": [],
         "verified_observations": [],
         "failed_approaches": [],
@@ -98,18 +102,27 @@ def _load() -> dict[str, Any]:
         value = json.loads(row[0])
     except (TypeError, json.JSONDecodeError):
         return _empty_state()
-    return value if isinstance(value, dict) else _empty_state()
+    if not isinstance(value, dict):
+        return _empty_state()
+    # Forward-fill keys from older state versions without carrying old task-local
+    # values into a new task implicitly.
+    merged = _empty_state()
+    merged.update(value)
+    merged.setdefault("task_epoch", 0)
+    merged.setdefault("requirements", [])
+    return merged
 
 
 def _save(state: dict[str, Any]) -> None:
     state = dict(state or {})
+    state["schema_version"] = 2
     state["updated_at"] = utc_now()
     turn_id = int(state.get("turn_id") or 0)
     with _connect() as conn:
         conn.execute(
             """
             INSERT INTO working_state(id, turn_id, version, state_json, updated_at)
-            VALUES(1, ?, 1, ?, ?)
+            VALUES(1, ?, 2, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 turn_id=excluded.turn_id,
                 version=excluded.version,
@@ -139,7 +152,7 @@ def _extract_constraints(user_text: str, policy_note: str, limit: int = 8) -> li
     return items[:limit]
 
 
-def _tool_capabilities(tool_schemas: list[dict[str, Any]], max_items: int = 24) -> list[dict[str, Any]]:
+def _tool_capabilities(tool_schemas: list[dict[str, Any]], max_items: int = 28) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for schema in tool_schemas[: max(1, int(max_items))]:
         fn = schema.get("function", {}) if isinstance(schema, dict) else {}
@@ -177,6 +190,23 @@ def _args_digest(arguments: Any) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:12]
 
 
+def _clean_requirements(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    clean: list[dict[str, Any]] = []
+    for item in list(items or [])[:limit]:
+        if not isinstance(item, dict):
+            continue
+        clean.append({
+            "key": _clip(item.get("key"), 80),
+            "tool": _clip(item.get("tool"), 80),
+            "label": _clip(item.get("label"), 180),
+            "status": _clip(item.get("status") or "pending", 24),
+            "attempts": int(item.get("attempts") or 0),
+            "last_reason": _clip(item.get("last_reason"), 100),
+            "fingerprint": _clip(item.get("fingerprint"), 32),
+        })
+    return clean
+
+
 @dataclass
 class WorkingStateStore:
     """Small persisted source-of-truth object owned exclusively by the harness."""
@@ -192,7 +222,6 @@ class WorkingStateStore:
                 except (TypeError, ValueError):
                     pass
         self.limits = merged
-        # Ensure the table exists eagerly so restart behavior is deterministic.
         with _connect():
             pass
 
@@ -209,18 +238,65 @@ class WorkingStateStore:
         recent_messages: list[dict[str, Any]],
         policy_note: str,
         tool_schemas: list[dict[str, Any]],
+        requirements: list[dict[str, Any]] | None = None,
+        continuation: bool = False,
     ) -> dict[str, Any]:
+        previous = _load()
         state = _empty_state()
+        previous_epoch = int(previous.get("task_epoch") or 0)
+        state["task_epoch"] = previous_epoch if continuation and previous_epoch else previous_epoch + 1
+        if state["task_epoch"] <= 0:
+            state["task_epoch"] = 1
+
+        carried_constraints: list[str] = []
+        if continuation:
+            # Follow-ups may rely on verified evidence and failed approaches from
+            # the immediately preceding task. New top-level requests never do.
+            state["verified_observations"] = list(previous.get("verified_observations") or [])[-self.limits["evidence_items"]:]
+            state["failed_approaches"] = list(previous.get("failed_approaches") or [])[-self.limits["failure_items"]:]
+            state["validator_history"] = list(previous.get("validator_history") or [])[-self.limits["validator_items"]:]
+            carried_constraints = list(previous.get("constraints") or [])[-4:]
+
+        current_constraints = _extract_constraints(objective, policy_note)
+        constraints: list[str] = []
+        for item in [*carried_constraints, *current_constraints]:
+            if item and item not in constraints:
+                constraints.append(item)
+
+        current_requirements = _clean_requirements(requirements or [], self.limits["requirement_items"])
+        if continuation:
+            previous_requirements = _clean_requirements(list(previous.get("requirements") or []), self.limits["requirement_items"])
+            merged_requirements: list[dict[str, Any]] = []
+            seen_keys: set[tuple[str, str]] = set()
+            for item in [*previous_requirements, *current_requirements]:
+                marker = (str(item.get("key") or ""), str(item.get("tool") or ""))
+                if marker in seen_keys:
+                    # Current-turn requirement state wins when the same requirement
+                    # is explicitly requested again.
+                    for index, existing in enumerate(merged_requirements):
+                        if (str(existing.get("key") or ""), str(existing.get("tool") or "")) == marker:
+                            merged_requirements[index] = item
+                            break
+                else:
+                    merged_requirements.append(item)
+                    seen_keys.add(marker)
+            state_requirements = merged_requirements[-self.limits["requirement_items"]:]
+        else:
+            state_requirements = current_requirements
+
         state.update({
             "turn_id": max(0, int(turn_id)),
             "status": "active",
             "objective": _clip(objective, self.limits["objective_chars"]),
             "background": {
-                "rolling_summary": _clip(rolling_summary, self.limits["background_chars"]),
-                "recent_context": _recent_context(recent_messages, self.limits["recent_context_chars"]),
+                "rolling_summary": _clip(rolling_summary, self.limits["background_chars"]) if continuation else "",
+                # Avoid stale task leakage. Raw recent conversational setup is
+                # only carried when the current request explicitly refers back.
+                "recent_context": _recent_context(recent_messages, self.limits["recent_context_chars"]) if continuation else "",
                 "recalled_context": _clip(recalled_context, self.limits["memory_chars"]),
             },
-            "constraints": _extract_constraints(objective, policy_note),
+            "constraints": constraints[:8],
+            "requirements": state_requirements,
             "tool_capabilities": _tool_capabilities(tool_schemas),
         })
         _save(state)
@@ -229,6 +305,11 @@ class WorkingStateStore:
     def update_tools(self, tool_schemas: list[dict[str, Any]]) -> None:
         state = _load()
         state["tool_capabilities"] = _tool_capabilities(tool_schemas)
+        _save(state)
+
+    def update_requirements(self, requirements: list[dict[str, Any]]) -> None:
+        state = _load()
+        state["requirements"] = _clean_requirements(requirements, self.limits["requirement_items"])
         _save(state)
 
     def set_plan(self, plan: list[dict[str, Any]] | list[str]) -> None:
@@ -266,15 +347,19 @@ class WorkingStateStore:
             "arguments_digest": _args_digest(arguments),
             "fingerprint": _clip(fingerprint, 32),
             "evidence_ref": _clip(observation_id, 64),
-            # Tool output remains data, never policy. The raw/full value stays in
-            # the normal loop or tool_observations table. This bounded preview is
-            # persisted for diagnostics but deliberately omitted from render().
+            # Persisted for an explicitly untrusted evidence digest. It is never
+            # inserted into the system-role canonical metadata block.
             "evidence_preview": _clip(_normalize_space(result_text), self.limits["evidence_preview_chars"]),
             "at": utc_now(),
         }
         if status in {"ok", "partial"}:
             observations = list(state.get("verified_observations") or [])
-            observations.append(record)
+            # Deduplicate exact repeated observations to keep ingestion stable.
+            duplicate = next((item for item in observations if item.get("tool") == record["tool"] and item.get("fingerprint") == record["fingerprint"] and record["fingerprint"]), None)
+            if duplicate is None:
+                observations.append(record)
+            else:
+                duplicate.update(record)
             state["verified_observations"] = observations[-self.limits["evidence_items"]:]
         else:
             failures = list(state.get("failed_approaches") or [])
@@ -285,8 +370,6 @@ class WorkingStateStore:
                 "at": record["at"],
             })
             state["failed_approaches"] = failures[-self.limits["failure_items"]:]
-        # A completed tool call consumes the immediate plan item. The next model
-        # step can establish a new one.
         state["current_plan"] = []
         _save(state)
 
@@ -322,23 +405,56 @@ class WorkingStateStore:
         state["current_plan"] = []
         _save(state)
 
-    def render(self) -> str:
-        """Render valid bounded JSON, trimming low-priority detail structurally.
+    def render_evidence(self, max_chars: int | None = None) -> str:
+        """Render bounded untrusted evidence excerpts for a user-role prompt block."""
+        state = _load()
+        limit = max(400, int(max_chars or self.limits["evidence_render_chars"]))
+        rows: list[dict[str, Any]] = []
+        for item in list(state.get("verified_observations") or [])[-self.limits["evidence_items"]:]:
+            if not isinstance(item, dict):
+                continue
+            rows.append({
+                "tool": item.get("tool", ""),
+                "status": item.get("status", ""),
+                "reason": item.get("reason", ""),
+                "evidence_ref": item.get("evidence_ref", ""),
+                "excerpt": _clip(item.get("evidence_preview"), min(420, self.limits["evidence_preview_chars"])),
+            })
+        text = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
+        if len(text) <= limit:
+            return text
+        # Drop oldest entries first; never raw-slice JSON.
+        while len(rows) > 1 and len(text) > limit:
+            rows.pop(0)
+            text = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
+        if len(text) <= limit:
+            return text
+        if rows:
+            excerpt_limit = max(40, limit // 3)
+            while excerpt_limit >= 40:
+                rows[0]["excerpt"] = _clip(rows[0].get("excerpt"), excerpt_limit)
+                text = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
+                if len(text) <= limit:
+                    return text
+                excerpt_limit //= 2
+        return "[]"
 
-        The returned string stays parseable even when the state is large; this
-        matters because both models are told that the block is harness-owned JSON.
+    def render(self, *, include_tool_capabilities: bool = True) -> str:
+        """Render valid bounded canonical metadata JSON.
+
+        The main model already receives native tool schemas, so callers may omit
+        the duplicate capability descriptions. The fast validator can retain them.
         """
         state = _load()
         compact = {
             "turn_id": state.get("turn_id", 0),
+            "task_epoch": state.get("task_epoch", 0),
             "status": state.get("status", "idle"),
             "objective": state.get("objective", ""),
             "background": dict(state.get("background", {}) or {}),
             "constraints": list(state.get("constraints", []) or []),
-            "tool_capabilities": list(state.get("tool_capabilities", []) or []),
-            # Never promote raw tool/web text into the system-role state block.
-            # The live tool transcript carries content as explicitly untrusted
-            # data; this canonical index carries only provenance/status metadata.
+            "requirements": _clean_requirements(list(state.get("requirements", []) or []), self.limits["requirement_items"]),
+            "tool_capabilities": list(state.get("tool_capabilities", []) or []) if include_tool_capabilities else [],
             "verified_observations": [
                 {key: value for key, value in item.items() if key != "evidence_preview"}
                 for item in list(state.get("verified_observations", []) or [])
@@ -358,27 +474,23 @@ class WorkingStateStore:
         if len(text) <= limit:
             return text
 
-        # First shrink verbose strings while keeping every category present.
         bg = compact["background"]
-        bg["rolling_summary"] = _clip(bg.get("rolling_summary"), 900)
-        bg["recent_context"] = _clip(bg.get("recent_context"), 700)
-        bg["recalled_context"] = _clip(bg.get("recalled_context"), 500)
-        compact["objective"] = _clip(compact.get("objective"), 900)
+        bg["rolling_summary"] = _clip(bg.get("rolling_summary"), 700)
+        bg["recent_context"] = _clip(bg.get("recent_context"), 500)
+        bg["recalled_context"] = _clip(bg.get("recalled_context"), 400)
+        compact["objective"] = _clip(compact.get("objective"), 800)
         for item in compact["tool_capabilities"]:
             if isinstance(item, dict):
-                item["description"] = _clip(item.get("description"), 100)
-        for item in compact["verified_observations"]:
-            if isinstance(item, dict):
-                item["evidence_preview"] = _clip(item.get("evidence_preview"), 220)
+                item["description"] = _clip(item.get("description"), 90)
         text = dump()
 
-        # Then discard oldest/redundant detail in a deterministic priority order.
         reducers = [
             ("tool_capabilities", 8),
             ("verified_observations", 5),
             ("failed_approaches", 4),
             ("validator_history", 3),
             ("constraints", 4),
+            ("requirements", 8),
         ]
         for key, floor in reducers:
             values = compact.get(key, [])
@@ -391,24 +503,21 @@ class WorkingStateStore:
 
         if len(text) > limit:
             compact["background"] = {
-                "rolling_summary": _clip(bg.get("rolling_summary"), 420),
-                "recent_context": _clip(bg.get("recent_context"), 360),
-                "recalled_context": _clip(bg.get("recalled_context"), 260),
+                "rolling_summary": _clip(bg.get("rolling_summary"), 360),
+                "recent_context": _clip(bg.get("recent_context"), 240),
+                "recalled_context": _clip(bg.get("recalled_context"), 200),
             }
-            compact["objective"] = _clip(compact.get("objective"), 600)
-            for item in compact["verified_observations"]:
-                if isinstance(item, dict):
-                    item["evidence_preview"] = _clip(item.get("evidence_preview"), 120)
+            compact["objective"] = _clip(compact.get("objective"), 520)
             text = dump()
 
         if len(text) > limit:
-            # Last-resort minimal state remains valid JSON and preserves the
-            # highest-value control information.
             minimal = {
                 "turn_id": compact.get("turn_id", 0),
+                "task_epoch": compact.get("task_epoch", 0),
                 "status": compact.get("status", "idle"),
-                "objective": _clip(compact.get("objective"), 400),
+                "objective": _clip(compact.get("objective"), 360),
                 "constraints": compact.get("constraints", [])[-3:],
+                "requirements": compact.get("requirements", [])[-8:],
                 "verified_observations": compact.get("verified_observations", [])[-3:],
                 "failed_approaches": compact.get("failed_approaches", [])[-3:],
                 "current_plan": compact.get("current_plan", [])[-3:],
@@ -417,6 +526,7 @@ class WorkingStateStore:
             text = json.dumps(minimal, ensure_ascii=False, separators=(",", ":"))
         return text if len(text) <= limit else json.dumps({
             "turn_id": compact.get("turn_id", 0),
+            "task_epoch": compact.get("task_epoch", 0),
             "status": compact.get("status", "idle"),
             "objective": _clip(compact.get("objective"), max(80, limit // 3)),
         }, ensure_ascii=False, separators=(",", ":"))
