@@ -274,6 +274,20 @@ Or keep both services running:
 
     docker compose up -d agent worker
 
+On the first `docker compose up`, the one-shot `storage-init` service creates
+`memory`, `workspace`, the research/custom-tool directories, and the complete
+self-optimization validation tree. It assigns them to the runtime
+`1000:1000` user before any long-running service starts. The initializer is
+idempotent: subsequent runs repair ownership and permissions without deleting
+the database, reports, tools, or candidate state. A successful run remains
+visible as an exited container and is expected:
+
+    docker compose ps -a storage-init
+    docker compose logs storage-init
+
+SQLite creates `memory/knowledge.db` and initializes its schema when the file
+does not exist. Existing databases and WAL files are preserved.
+
 The project uses host networking and read-only host mounts for existing
 system/network inspection features. The validator is intentionally separate
 and uses `network_mode: none`; do not add the host mounts or Docker socket to

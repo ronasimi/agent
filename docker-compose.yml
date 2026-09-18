@@ -2,6 +2,31 @@
 # FILE: docker-compose.yml
 # ==========================================
 services:
+  storage-init:
+    build: .
+    image: agent
+    container_name: agent-storage-init
+    restart: "no"
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - STORAGE_ROOT=/state
+      - AGENT_UID=1000
+      - AGENT_GID=1000
+    entrypoint: ["/bin/sh", "/app/scripts/init_storage.sh"]
+    volumes:
+      - ./workspace:/state/workspace
+      - ./memory:/state/memory
+
   agent:
     build: .
     image: agent
@@ -17,6 +42,9 @@ services:
     pid: host
     network_mode: host
     user: "1000:1000"
+    depends_on:
+      storage-init:
+        condition: service_completed_successfully
     environment:
       - XDG_RUNTIME_DIR=/run/user/1000
       - DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
@@ -58,7 +86,10 @@ services:
       - TZ=${TZ:-America/Toronto}
     command: ["python", "/app/worker.py"]
     depends_on:
-      - optimizer-validator
+      storage-init:
+        condition: service_completed_successfully
+      optimizer-validator:
+        condition: service_started
     volumes:
       - ./config:/app/config:ro
       - ./workspace:/app/workspace
@@ -94,6 +125,9 @@ services:
       - SETUID
     security_opt:
       - no-new-privileges:true
+    depends_on:
+      storage-init:
+        condition: service_completed_successfully
     tmpfs:
       - /tmp:size=1700m,mode=1777
     command: ["python", "/app/scripts/optimization_validator.py"]
