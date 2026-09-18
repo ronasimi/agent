@@ -27,7 +27,7 @@ from tools.memory import (
     get_conversation_summary,
     get_messages_for_compaction,
 )
-from tools.notify import notify_desktop
+from tools.notify import format_monitor_notification, notify_desktop
 from tools.pdf_generator import generate_pdf_report
 from tools.runtime import (
     DB_PATH,
@@ -356,7 +356,7 @@ def _transition_event(key: str, condition: bool, event_type: str, summary: str, 
     previous = bool(get_monitor_state(key, False))
     if condition and not previous:
         record_monitor_event(event_type, summary, details)
-        _notify(summary, json.dumps(details, ensure_ascii=False)[:1200])
+        _notify(summary, format_monitor_notification(event_type, details)[:1200])
     record_monitor_state(key, condition)
 
 
@@ -409,7 +409,7 @@ def monitor_once() -> None:
         temp_limit = float(MONITOR_CFG.get("high_temperature_celsius", 90))
         temperatures = raw_host.get("temperatures", {})
         hot = [
-            {"sensor": sensor, "current": entry.get("current")}
+            {"sensor": sensor, "label": entry.get("label"), "current": entry.get("current")}
             for sensor, entries in temperatures.items()
             for entry in entries
             if isinstance(entry, dict) and isinstance(entry.get("current"), (int, float)) and entry["current"] >= temp_limit
