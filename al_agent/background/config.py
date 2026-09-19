@@ -9,9 +9,12 @@ RESEARCH_CFG = CONFIG.get("research", {})
 WORKER_CFG = CONFIG.get("worker", {})
 MONITOR_CFG = CONFIG.get("host_monitor", {})
 MODEL = AGENT_CFG.get("model", "qwen3.5:4b")
+FAST_MODEL = AGENT_CFG.get("fast_model", "qwen3.5:2b")
+FAST_MODEL_KEEP_ALIVE = AGENT_CFG.get("fast_model_keep_alive", 0)
 MAIN_OPTIONS = AGENT_CFG.get("main_options", {"num_ctx": 16384, "temperature": 0.4})
 COMPACTION_MODEL = str(AGENT_CFG.get("compaction_model") or MODEL)
 COMPACTION_OPTIONS = AGENT_CFG.get("compaction_options") or dict(MAIN_OPTIONS)
+COMPACTION_KEEP_ALIVE = FAST_MODEL_KEEP_ALIVE if COMPACTION_MODEL == FAST_MODEL else -1
 OLLAMA_HOST = AGENT_CFG.get("host", os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434"))
 os.environ["OLLAMA_HOST"] = OLLAMA_HOST
 POLL_SECONDS = float(WORKER_CFG.get("poll_interval_seconds", 3))

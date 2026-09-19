@@ -25,7 +25,7 @@ config = load_config()
 
 FAST_MODEL = config.get("agent", {}).get("fast_model", "qwen3.5:2b")
 FAST_OPTIONS = config.get("agent", {}).get("fast_options", {"num_ctx": 8192, "temperature": 0.0})
-FAST_KEEP_ALIVE = config.get("worker", {}).get("fast_model_keep_alive", -1)
+FAST_KEEP_ALIVE = config.get("agent", {}).get("fast_model_keep_alive", config.get("worker", {}).get("fast_model_keep_alive", 0))
 RESEARCH_CFG = config.get("research", {})
 REPORT_CFG = RESEARCH_CFG.get("report", {})
 MAX_PAGE_CHARS = int(RESEARCH_CFG.get("max_page_chars", 25000))

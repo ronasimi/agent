@@ -6,6 +6,9 @@ agent:
   host: "http://127.0.0.1:11434"
   model: "huihui_ai/qwen3.5-abliterated:4B"
   fast_model: "huihui_ai/qwen3.5-abliterated:2B"
+  # Fast-model calls are intentionally ephemeral to reduce host memory pressure.
+  # Ollama keep_alive=0 unloads the model immediately after each request.
+  fast_model_keep_alive: 0
   embed_model: "nomic-embed-text"
   timezone: "America/Toronto"
   semantic_memory_enabled: false
@@ -77,9 +80,9 @@ agent:
     max_candidate_tools: 24
     timeout_seconds: 45
     max_transcript_chars: 12000
-    # Keep the fast validator resident; it is invoked specifically to recover
-    # a stalled 4B loop and should not pay a cold-load penalty at that point.
-    keep_alive: -1
+    # Do not keep the fast validator resident; memory pressure is preferred over
+    # avoiding its occasional cold-load penalty.
+    keep_alive: 0
     options:
       num_ctx: 4096
       temperature: 0.0
@@ -97,6 +100,11 @@ agent:
     preflight_limit: 3
     max_pipeline_stages: 16
     seed_builtin_compatibility: true
+    # Absolute last fall-through: after normal corrective tool recovery fails,
+    # let the fast validator propose one bounded ephemeral read-only recipe.
+    validator_fallback_enabled: true
+    validator_fallback_max_stages: 4
+    validator_fallback_max_tools: 12
 
   # Native tool schemas are selected deterministically per turn to reduce prefill.
   max_tools_per_turn: 12
@@ -176,9 +184,9 @@ worker:
   # This is a scheduling guard, not an Ollama server limit. Keep the actual
   # Ollama MAX_LOADED_MODELS setting on the Ollama server/container.
   max_agent_vram_mb: 7200
-  # Keep the Qwen3.5 fast/research model resident between worker calls. Set to
-  # 0 if the Ollama server can hold only one model without memory pressure.
-  fast_model_keep_alive: -1
+  # Deprecated compatibility mirror. Fast-model workers now prefer
+  # agent.fast_model_keep_alive; keep this at 0 for older code/configs.
+  fast_model_keep_alive: 0
   # Run cleanup only while foreground inference is idle.
   maintenance_interval_seconds: 21600
   ephemeral_retention_days: 30

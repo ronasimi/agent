@@ -379,6 +379,7 @@ class WorkingStateStore:
             "decision": _clip(report.get("decision"), 40),
             "diagnosis": _clip(report.get("diagnosis") or "unknown", 64),
             "suggested_tool": _clip(report.get("suggested_tool"), 80),
+            "suggested_recipe": _clip(report.get("name") if report.get("decision") == "recipe" else "", 80),
             "at": utc_now(),
         }
         if signal:

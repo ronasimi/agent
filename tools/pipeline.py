@@ -94,6 +94,7 @@ def _serialize_size(parsed: Any) -> tuple[str, int]:
 
 def execute_pipeline(stages: list[dict[str, Any]], parameters: dict[str, Any] | None = None) -> dict[str, Any]:
     from . import AVAILABLE_TOOLS_MAP, TOOL_METADATA
+    from .loop_validator import classify_tool_outcome
     from .tool_registry import normalize_arguments
 
     parameters = parameters or {}
@@ -150,11 +151,26 @@ def execute_pipeline(stages: list[dict[str, Any]], parameters: dict[str, Any] | 
                         return {"ok": False, "error": f"stage {idx} ({tool}) failed: {exc}", "stages": summaries}
                 else:
                     parsed = _parse_result(result)
-                    if isinstance(result, str) and result.lstrip().lower().startswith(("error:", "tool execution error:")):
+                    raw_for_status = (
+                        result if isinstance(result, str)
+                        else json.dumps(result, ensure_ascii=False, default=str)
+                    )
+                    outcome = classify_tool_outcome(raw_for_status, tool_name=tool)
+                    if not bool(outcome.get("success")):
                         if stage.get("optional"):
-                            parsed = {"ok": False, "error": result[:2000], "optional_failure": True}
+                            parsed = {
+                                "ok": False,
+                                "error": raw_for_status[:2000],
+                                "reason": str(outcome.get("reason") or "tool_error"),
+                                "optional_failure": True,
+                            }
                         else:
-                            return {"ok": False, "error": f"stage {idx} ({tool}) reported error", "result": result[:2000], "stages": summaries}
+                            return {
+                                "ok": False,
+                                "error": f"stage {idx} ({tool}) reported {outcome.get('reason') or 'error'}",
+                                "result": raw_for_status[:2000],
+                                "stages": summaries,
+                            }
                 serialized, size = _serialize_size(parsed)
                 if size > MAX_INTERMEDIATE_CHARS:
                     return {"ok": False, "error": f"stage {idx} output exceeded bounded intermediate size", "stages": summaries}

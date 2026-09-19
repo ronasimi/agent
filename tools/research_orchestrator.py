@@ -14,7 +14,7 @@ from .reminders import schedule_reminder
 CONFIG = load_config()
 FAST_MODEL = CONFIG.get("agent", {}).get("fast_model", "qwen3.5:2b")
 FAST_OPTIONS = CONFIG.get("agent", {}).get("fast_options", {"num_ctx": 8192, "temperature": 0.0})
-FAST_KEEP_ALIVE = CONFIG.get("worker", {}).get("fast_model_keep_alive", -1)
+FAST_KEEP_ALIVE = CONFIG.get("agent", {}).get("fast_model_keep_alive", CONFIG.get("worker", {}).get("fast_model_keep_alive", 0))
 
 
 def decompose_research_goal(research_goal: str) -> list[str]:

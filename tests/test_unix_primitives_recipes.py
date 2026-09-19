@@ -318,3 +318,23 @@ def test_builtin_recipe_names_are_reserved(tmp_path, monkeypatch):
     import pytest
     with pytest.raises(ValueError):
         save_recipe("compat.host_snapshot", "overwrite builtin", [{"tool": "calculate", "args": {"expression": "1"}}])
+
+
+def test_pipeline_treats_soft_tool_failure_as_recipe_failure(monkeypatch):
+    from tools import AVAILABLE_TOOLS_MAP, TOOL_METADATA
+    from tools.pipeline import execute_pipeline
+
+    monkeypatch.setitem(AVAILABLE_TOOLS_MAP, "fake_empty_search", lambda: "No search results found for query: x")
+    monkeypatch.setitem(TOOL_METADATA, "fake_empty_search", {"readonly": True})
+    result = execute_pipeline([{"tool": "fake_empty_search", "args": {}}])
+    assert result["ok"] is False
+    assert "no_progress_result" in result["error"]
+
+
+def test_fast_model_keep_alive_defaults_to_zero_in_config():
+    import yaml
+    root = Path(__file__).resolve().parents[1]
+    config = yaml.safe_load((root / "config" / "config.yaml").read_text(encoding="utf-8"))
+    assert config["agent"]["fast_model_keep_alive"] == 0
+    assert config["agent"]["tool_loop_validator"]["keep_alive"] == 0
+    assert config["worker"]["fast_model_keep_alive"] == 0

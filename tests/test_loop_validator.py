@@ -201,3 +201,59 @@ def test_stalled_validator_failure_fails_closed_for_repeated_tool_failure():
     )
     assert report["decision"] == "blocked"
     assert report["diagnosis"] == "tool_unavailable"
+
+
+def test_final_recipe_validator_returns_bounded_distinct_recipe():
+    from tools.loop_validator import suggest_recovery_recipe, tool_call_signature
+
+    client = FakeClient(
+        '{"decision":"recipe","diagnosis":"wrong_tool","reason":"try primitives",'
+        '"name":"alternate web path","stages":['
+        '{"id":"s1","tool":"web_search","args":{"query":"London Ontario weather"},"optional":false},'
+        '{"id":"s2","tool":"browse_url","args":{"url":{"$ref":"s1","path":"$.0.url"}},"optional":false}'
+        ']}'
+    )
+    schemas = [
+        {"type":"function","function":{"name":"web_search","description":"Search web","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}},
+        {"type":"function","function":{"name":"browse_url","description":"Browse URL","parameters":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}}},
+    ]
+    seen = {tool_call_signature({"function":{"name":"web_search","arguments":{"query":"old query"}}})}
+    report = suggest_recovery_recipe(
+        client, "fast", "weather", [], schemas, {"temperature":0},
+        max_stages=4, keep_alive=0, seen_signatures=seen,
+    )
+    assert report["decision"] == "recipe"
+    assert report["name"] == "alternate web path"
+    assert [stage["tool"] for stage in report["stages"]] == ["web_search", "browse_url"]
+    assert client.kwargs["keep_alive"] == 0
+    assert client.kwargs["think"] is False
+
+
+def test_final_recipe_validator_rejects_identical_failed_call():
+    from tools.loop_validator import suggest_recovery_recipe, tool_call_signature
+
+    call = {"function":{"name":"web_search","arguments":{"query":"same"}}}
+    client = FakeClient(
+        '{"decision":"recipe","diagnosis":"transient_failure","reason":"retry",'
+        '"name":"bad retry","stages":[{"tool":"web_search","args":{"query":"same"}}]}'
+    )
+    schemas = [{"type":"function","function":{"name":"web_search","description":"Search","parameters":{"type":"object"}}}]
+    report = suggest_recovery_recipe(
+        client, "fast", "request", [], schemas, {},
+        seen_signatures={tool_call_signature(call)},
+    )
+    assert report["decision"] == "give_up"
+    assert report["stages"] == []
+
+
+def test_final_recipe_validator_failure_fails_closed():
+    from tools.loop_validator import suggest_recovery_recipe
+
+    class BrokenClient:
+        def generate(self, **_kwargs):
+            raise TimeoutError("offline")
+
+    schemas = [{"type":"function","function":{"name":"read_file","description":"Read","parameters":{"type":"object"}}}]
+    report = suggest_recovery_recipe(BrokenClient(), "fast", "request", [], schemas, {})
+    assert report["decision"] == "give_up"
+    assert report["stages"] == []

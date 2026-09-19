@@ -336,6 +336,7 @@ def _finalize_after_limit(
     messages: list[dict],
     turn_tail: list[dict[str, Any]] | None = None,
     reason: str = "The tool-call safety limit was reached.",
+    recovery_context: str = "",
 ) -> None:
     """Produce a bounded no-tools final answer while preserving latest media."""
     history = messages[1:]
@@ -363,6 +364,11 @@ def _finalize_after_limit(
     )
     if latest_media:
         prompt.append(latest_media)
+    if recovery_context:
+        prompt.append({
+            "role": "user",
+            "content": str(recovery_context)[:6000],
+        })
     prompt.append({
         "role": "user",
         "content": (

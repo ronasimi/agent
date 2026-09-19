@@ -227,7 +227,9 @@ blocked
 
 The main model receives the structured diagnosis, not unrestricted hidden validator reasoning. Deterministic fallback behavior is used if the validator itself times out or emits malformed output.
 
-This is intended to prevent loops such as repeatedly calling the same failing web endpoint or repeatedly retrying a tool with unchanged bad arguments.
+If normal correction still fails, the harness now has one final fall-through before it gives up: the fast validator may propose a small **ephemeral read-only recovery recipe** made from allowlisted typed primitives. The harness re-validates the recipe, rejects repeated calls and side-effecting tools, executes it at most once, and then finalizes from whatever evidence it obtained. The recipe is never silently persisted; if it succeeds and does not match an existing recipe, the normal opt-in save prompt is shown afterward.
+
+This is intended to prevent loops such as repeatedly calling the same failing web endpoint or repeatedly retrying a tool with unchanged bad arguments, while still allowing a materially different primitive composition as the final recovery attempt.
 
 ## Local network diagnostics
 
@@ -257,6 +259,7 @@ Important defaults:
 agent:
   model: "qwen3.5:4b"
   fast_model: "qwen3.5:2b"
+  fast_model_keep_alive: 0
   thinking_default: false
   max_iterations: 12
   max_tools_per_turn: 12
@@ -278,7 +281,14 @@ agent:
     temperature: 0.0
     top_p: 0.9
     top_k: 20
+
+  recipes:
+    validator_fallback_enabled: true
+    validator_fallback_max_stages: 4
+    validator_fallback_max_tools: 12
 ```
+
+`fast_model_keep_alive: 0` is deliberate: every fast-model validator/research request asks Ollama to unload that model immediately after the request. This lowers host memory pressure at the cost of a possible cold-load delay the next time the fast model is needed. The interactive main model keeps its existing residency behavior.
 
 ### Ollama server settings
 
