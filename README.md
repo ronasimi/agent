@@ -229,6 +229,14 @@ The main model receives the structured diagnosis, not unrestricted hidden valida
 
 If normal correction still fails, the harness now has one final fall-through before it gives up: the fast validator may propose a small **ephemeral read-only recovery recipe** made from allowlisted typed primitives. The harness re-validates the recipe, rejects repeated calls and side-effecting tools, executes it at most once, and then finalizes from whatever evidence it obtained. The recipe is never silently persisted; if it succeeds and does not match an existing recipe, the normal opt-in save prompt is shown afterward.
 
+### Hard fact grounding
+
+Fact-retrieval turns have a deterministic finalization gate in addition to the model-based loop validator. The gate classifies the fact type requested by the user and checks harness-owned observation provenance/content before a factual answer can finalize. A successful unrelated observation does not satisfy the gate.
+
+Weather is deliberately strict: a current-turn answer requires weather-bearing `web_search` **and** `browse_url` observations, a verified weather recipe/API observation, or a sufficiently fresh carried weather observation. `current_time` alone therefore produces a `missing_evidence` validator event. The harness then executes the built-in `weather.current_forecast` recipe (search → verified page → composed evidence), falling back to the same typed primitive chain if the recipe store is unavailable. Candidate factual prose is buffered until this gate passes, so a premature weather answer is discarded rather than streamed as a final response.
+
+The default stored-weather freshness window is 10,800 seconds (3 hours) and can be changed with `agent.grounding.weather_max_age_seconds`. The grounding registry also covers current time, host state, network state, repository state, and explicit web-fact retrieval, and is intended to be extended with additional fact types as typed tools are added.
+
 This is intended to prevent loops such as repeatedly calling the same failing web endpoint or repeatedly retrying a tool with unchanged bad arguments, while still allowing a materially different primitive composition as the final recovery attempt.
 
 ## Local network diagnostics

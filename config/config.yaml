@@ -90,6 +90,14 @@ agent:
       top_k: 20
       num_predict: 96
 
+  # Hard fact-type provenance/content validation before factual finalization.
+  grounding:
+    # Hard provenance/content gate for fact-retrieval answers. Models may choose
+    # recovery actions, but cannot override a missing-evidence decision.
+    enabled: true
+    # Weather observations carried from a prior turn must be newer than this.
+    weather_max_age_seconds: 10800
+
   # Reusable Unix-style workflows are persisted separately from conversation
   # memory. FTS5 provides local semantic-ish lookup without another model call.
   recipes:

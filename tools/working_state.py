@@ -340,6 +340,8 @@ class WorkingStateStore:
     ) -> None:
         state = _load()
         status = str(status or "error")
+        from .grounding import grounding_metadata
+        grounding = grounding_metadata(tool_name, result_text)
         record = {
             "tool": _clip(tool_name, 80),
             "status": status,
@@ -350,6 +352,10 @@ class WorkingStateStore:
             # Persisted for an explicitly untrusted evidence digest. It is never
             # inserted into the system-role canonical metadata block.
             "evidence_preview": _clip(_normalize_space(result_text), self.limits["evidence_preview_chars"]),
+            "fact_types": grounding["fact_types"],
+            "source_tools": grounding["source_tools"],
+            "weather_verified": bool(grounding["weather_verified"]),
+            "turn_id": int(state.get("turn_id") or 0),
             "at": utc_now(),
         }
         if status in {"ok", "partial"}:

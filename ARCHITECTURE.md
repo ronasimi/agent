@@ -72,6 +72,10 @@ Add a `CliCommand` to `al_agent/cli_commands.py`.  Command behavior stays outsid
 
 Keep HTTP route composition in `webui/server.py`, but put domain behavior in a sibling module (`workspace_ops`, `chat`, `theme`, etc.).  The browser must not bypass the main agent tool/policy loop.
 
+## Fact grounding gate
+
+Before a fact-retrieval answer can finalize, `tools/grounding.py` compares the requested fact type with harness-owned successful observations. This is a deterministic control boundary: main-model or fast-validator text cannot override `missing_evidence`. Weather requires verified weather-bearing provenance (current `web_search` + `browse_url`, a verified weather recipe/API result, or a fresh carried observation). The turn engine performs one built-in weather recipe/fallback recovery and re-runs the gate before finalization. Working-state observations persist compact `fact_types`, `source_tools`, `weather_verified`, `turn_id`, and timestamp metadata so the check does not depend on clipped model-visible excerpts.
+
 ## Pipelines and recipes
 
 `run_pipeline` is the preferred composition mechanism for deterministic read-only chains. Intermediate stage values remain in the harness and can be referenced using `$ref`; bounded `foreach`, `$item`, conditional `when`, and optional stages cover common Unix-style map/filter/branch patterns without another model turn. Successful reusable workflows may be saved to the semantic recipe database without changing Python code.

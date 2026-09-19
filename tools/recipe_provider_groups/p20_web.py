@@ -5,6 +5,16 @@ P = lambda default, description: {"default": default, "description": description
 
 RECIPE_SPECS = [
     {
+        "key":"grounding.weather.current_forecast","version":1,"name":"weather.current_forecast","target_tool":"weather_grounding",
+        "description":"Ground current weather/forecast retrieval with source discovery followed by page verification.","tags":["weather","forecast","grounding","web","verification"],
+        "parameters":{"query":P("current weather forecast","Weather query including the requested or recalled location")},
+        "pipeline":[
+            {"id":"search","tool":"web_search","args":{"query":{"$param":"query","default":"current weather forecast"}}},
+            {"id":"verify","tool":"browse_url","args":{"url":{"$ref":"search","path":"0.url"}}},
+            {"id":"result","tool":"compose_object","args":{"data":{"query":{"$param":"query","default":"current weather forecast"},"discovery":{"$ref":"search"},"verification":{"$ref":"verify"}}}},
+        ],
+    },
+    {
         "key":"compat.browse_url","version":1,"name":"compat.browse_url","target_tool":"browse_url",
         "description":"Fetch a public page and extract readable text without sending raw HTML through the model.","tags":["compat","browse_url","web","readable","page"],
         "parameters":{"url":P("https://example.com","Public HTTP(S) URL"),"max_chars":P(20000,"Maximum readable text characters")},
