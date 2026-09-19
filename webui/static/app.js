@@ -21,22 +21,7 @@ function navigateCommandHistory(direction){
 
 function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function safeLink(url){try{const u=new URL(url,location.origin);return ['http:','https:'].includes(u.protocol)?u.href:'#';}catch{return '#';}}
-function inlineMd(v){let s=esc(v);s=s.replace(/`([^`\n]+)`/g,'<code>$1</code>');s=s.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');s=s.replace(/\*([^*\n]+)\*/g,'<em>$1</em>');s=s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,(_,label,url)=>`<a href="${esc(safeLink(url))}" target="_blank" rel="noopener noreferrer">${label}</a>`);return s;}
-function renderMarkdown(text){
-  const src=String(text??'').replace(/\r\n/g,'\n');
-  const blocks=[];
-  const tokenized=src.replace(/```([^\n]*)\n?([\s\S]*?)```/g,(_,lang,code)=>{const id=blocks.length;blocks.push(`<pre><code data-lang="${esc(lang.trim())}">${esc(code.replace(/\n$/,''))}</code></pre>`);return `\n@@CODE${id}@@\n`;});
-  const lines=tokenized.split('\n');let out=[],list=null;
-  const closeList=()=>{if(list){out.push(`</${list}>`);list=null;}};
-  for(const raw of lines){const line=raw.trimEnd();if(/^@@CODE\d+@@$/.test(line.trim())){closeList();out.push(line.trim());continue;}if(!line.trim()){closeList();continue;}
-    let m=line.match(/^(#{1,3})\s+(.+)$/);if(m){closeList();out.push(`<h${m[1].length}>${inlineMd(m[2])}</h${m[1].length}>`);continue;}
-    m=line.match(/^[-*]\s+(.+)$/);if(m){if(list!=='ul'){closeList();list='ul';out.push('<ul>');}out.push(`<li>${inlineMd(m[1])}</li>`);continue;}
-    m=line.match(/^\d+[.)]\s+(.+)$/);if(m){if(list!=='ol'){closeList();list='ol';out.push('<ol>');}out.push(`<li>${inlineMd(m[1])}</li>`);continue;}
-    m=line.match(/^>\s?(.*)$/);if(m){closeList();out.push(`<blockquote>${inlineMd(m[1])}</blockquote>`);continue;}
-    closeList();out.push(`<p>${inlineMd(line)}</p>`);
-  }closeList();
-  return out.join('').replace(/@@CODE(\d+)@@/g,(_,i)=>blocks[Number(i)]||'');
-}
+function renderMarkdown(text){return RichOutput.renderMarkdown(text);}
 function clearTurnStatus(){
   if(activeUserMessageEl)activeUserMessageEl.querySelector('.turn-status')?.remove();
 }

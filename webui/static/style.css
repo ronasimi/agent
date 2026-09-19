@@ -96,3 +96,18 @@ button,textarea,input{font:inherit}button{color:inherit}.hidden{display:none!imp
 .messages::-webkit-scrollbar{width:10px}
 .messages::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--xr-color0) 72%,transparent);border:3px solid transparent;border-radius:999px;background-clip:padding-box}
 .messages::-webkit-scrollbar-track{background:transparent}
+
+/* Rich assistant output: responsive Markdown tables and semantic weather accents. */
+.table-wrap{width:100%;max-width:100%;overflow-x:auto;margin:14px 0 18px;border:1px solid var(--border);border-radius:12px;background:color-mix(in srgb,var(--surface) 88%,transparent);box-shadow:0 1px 0 rgba(255,255,255,.02) inset;scrollbar-width:thin}
+.md-table{width:100%;min-width:440px;border-collapse:separate;border-spacing:0;font-size:13px;line-height:1.45;font-variant-numeric:tabular-nums}
+.md-table th,.md-table td{padding:10px 12px;border-bottom:1px solid color-mix(in srgb,var(--border) 72%,transparent);vertical-align:top;white-space:normal}
+.md-table th{background:color-mix(in srgb,var(--surface-2) 88%,var(--accent) 12%);color:var(--text-strong);font-size:11px;font-weight:700;letter-spacing:.025em;text-transform:none;white-space:nowrap}
+.md-table th:first-child{border-top-left-radius:11px}.md-table th:last-child{border-top-right-radius:11px}
+.md-table tbody tr:nth-child(even) td{background:color-mix(in srgb,var(--surface-2) 34%,transparent)}
+.md-table tbody tr:hover td{background:color-mix(in srgb,var(--accent) 7%,var(--surface))}
+.md-table tbody tr:last-child td{border-bottom:0}.md-table td.numeric{font-variant-numeric:tabular-nums;white-space:nowrap}
+.table-header-icon{display:inline-block;margin-right:6px;font-size:13px;line-height:1;vertical-align:-1px}.weather-emoji{display:inline-block;width:1.55em;margin-right:5px;text-align:center;line-height:1;vertical-align:-1px}.weather-emoji.compact{width:1.35em;margin-right:4px}.weather-emoji.heading{width:auto;margin-right:7px;font-size:.95em}
+.bubble .weather-line{padding:8px 10px;margin:5px 0;border:1px solid color-mix(in srgb,var(--cyan) 18%,var(--border));border-radius:9px;background:color-mix(in srgb,var(--cyan) 5%,transparent)}
+.bubble .weather-line+.weather-line{margin-top:5px}.bubble .weather-heading{display:flex;align-items:center;gap:1px}.bubble .weather-list-item{padding-left:1px}
+.artifact-markdown .table-wrap{margin:10px 0 14px}.artifact-markdown .md-table{font-size:12px;min-width:400px}.artifact-markdown .md-table th,.artifact-markdown .md-table td{padding:8px 10px}
+@media(max-width:620px){.md-table{min-width:380px}.md-table th,.md-table td{padding:9px 10px}.bubble .weather-line{padding:7px 9px}}
