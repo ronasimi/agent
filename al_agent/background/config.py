@@ -13,7 +13,15 @@ FAST_MODEL = AGENT_CFG.get("fast_model", "qwen3.5:2b")
 FAST_MODEL_KEEP_ALIVE = AGENT_CFG.get("fast_model_keep_alive", 0)
 MAIN_OPTIONS = AGENT_CFG.get("main_options", {"num_ctx": 16384, "temperature": 0.4})
 COMPACTION_MODEL = str(AGENT_CFG.get("compaction_model") or MODEL)
-COMPACTION_OPTIONS = AGENT_CFG.get("compaction_options") or dict(MAIN_OPTIONS)
+_COMPACTION_OVERRIDES = AGENT_CFG.get("compaction_options") or dict(MAIN_OPTIONS)
+# Ollama keys a loaded runner by its context size, so requesting the *same*
+# model with a smaller num_ctx unloads and reloads it. When compaction reuses
+# the interactive model, keep the interactive context size so a background
+# compaction never evicts the warm foreground model and forces the next user
+# turn to pay a full load plus a full prefill.
+COMPACTION_OPTIONS = dict(_COMPACTION_OVERRIDES)
+if COMPACTION_MODEL == MODEL and MAIN_OPTIONS.get("num_ctx"):
+    COMPACTION_OPTIONS["num_ctx"] = MAIN_OPTIONS["num_ctx"]
 COMPACTION_KEEP_ALIVE = FAST_MODEL_KEEP_ALIVE if COMPACTION_MODEL == FAST_MODEL else -1
 OLLAMA_HOST = AGENT_CFG.get("host", os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434"))
 os.environ["OLLAMA_HOST"] = OLLAMA_HOST

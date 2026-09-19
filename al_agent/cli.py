@@ -17,7 +17,8 @@ from tools.runtime import list_jobs
 from .cli_commands import CliContext, dispatch_command
 from .console import get_bottom_toolbar
 from .prompts import build_system_prompt
-from .state import FAST_MODEL, MAIN_OPTIONS, MAX_CTX, MODEL, OLLAMA, THINKING_DEFAULT
+from .model_protocol import warm_model_async
+from .state import FAST_MODEL, MAIN_OPTIONS, MAX_CTX, MODEL, OLLAMA, THINKING_DEFAULT, WARMUP_PRIME_PREFIX
 from .turn_engine import handle_user_turn
 
 
@@ -39,11 +40,15 @@ def main() -> None:
     messages=[{'role':'system','content':build_system_prompt()}]+_load_chat_history_from_db(limit=100)
     context=CliContext(messages=messages,thinking_enabled=THINKING_DEFAULT)
     print(f'Agent initialized with Main: {MODEL} | Fast: {FAST_MODEL} | Context: {MAX_CTX}')
-    print(f'[System]: Preloading main model ({MODEL}) into VRAM...')
-    try:
-        OLLAMA.chat(model=MODEL,messages=[{'role':'user','content':'warmup'}],options=MAIN_OPTIONS,keep_alive=-1,think=False)
-        print('[System]: Main model successfully loaded and pinned in VRAM.')
-    except Exception as exc: print(f'[System]: Warning - failed to preload main model: {exc}')
+    print(f'[System]: Preloading main model ({MODEL}) into VRAM in the background...')
+    # Non-blocking: the prompt is usable immediately, and the warm-up primes the
+    # byte-stable system prefix so the first turn prefills only its own content.
+    warm_model_async(
+        OLLAMA, MODEL, options=MAIN_OPTIONS, keep_alive=-1,
+        system_prompt=build_system_prompt() if WARMUP_PRIME_PREFIX else "",
+        on_success=lambda: print('\n[System]: Main model loaded and pinned in VRAM.'),
+        on_error=lambda exc: print(f'\n[System]: Warning - failed to preload main model: {exc}'),
+    )
     print('Commands: '+', '.join(command.name for command in __import__('al_agent.cli_commands',fromlist=['COMMANDS']).COMMANDS))
     print('Background research runs in the durable worker process and survives CLI restarts.')
     while True:

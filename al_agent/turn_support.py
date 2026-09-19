@@ -14,14 +14,15 @@ from tools.loop_validator import tool_call_signature
 from tools.runtime import create_singleton_job
 from tools.task_requirements import TaskRequirementLedger
 from .events import emit_event
+from .model_protocol import ollama_wire_messages
 from .prompts import append_and_save, build_system_prompt
 from .state import (
     COMPACT_AT, MAIN_OPTIONS, MAX_CTX, MAX_ITERATIONS, MAX_ITERATIONS_HARD,
     MAX_MUTATING_CALLS_PER_ITERATION, MAX_TOOL_CALLS_PER_ITERATION, MAX_TOOL_OUTPUT,
     MAX_TOOLS_PER_TURN, MODEL, OLLAMA, PRUNE_SATISFIED_REQUIREMENT_TOOLS,
     RECENT_MESSAGES, REQUIREMENT_TOOL_CAP, RESERVE_TOKENS, SUMMARY_KEEP_MESSAGES,
-    SUPPRESS_COMPLETED_REQUIREMENT_REPEATS, WORKING_STATE, WORKING_STATE_EVIDENCE_CHARS,
-    WORKING_STATE_ENABLED, WORKING_STATE_HISTORY_TURNS,
+    SUPPRESS_COMPLETED_REQUIREMENT_REPEATS, VOLATILE_CONTEXT_LAST, WORKING_STATE,
+    WORKING_STATE_EVIDENCE_CHARS, WORKING_STATE_ENABLED, WORKING_STATE_HISTORY_TURNS,
 )
 
 def _parse_tool_calls(raw_calls: Any, allowed_names: set[str] | None = None) -> tuple[list[dict], list[str]]:
@@ -243,21 +244,45 @@ def _suppress_completed_requirement_calls(
         accepted.append(call)
     return accepted, notes
 
+def _schema_additions_pending(tool_schemas: list[dict[str, Any]], pending_names: list[str]) -> bool:
+    """Return whether any pending requirement tool is missing from the set."""
+    current = {str(schema.get("function", {}).get("name") or "") for schema in tool_schemas}
+    return any(name not in current for name in pending_names)
+
 def _refresh_requirement_tool_schemas(
     tool_schemas: list[dict[str, Any]],
     requirement_ledger: TaskRequirementLedger,
     turn_tool_policy,
+    *,
+    prune: bool = True,
+    minimize_churn: bool = False,
 ) -> bool:
     """Prune completed requirement schemas and prioritize remaining checks.
 
     Native tool schemas are a substantial part of Ollama prefill.  Once a
     required check is complete, keeping that schema in every later request is
     unnecessary and also invites a 4B model to repeat the familiar call.
+
+    None of that is free, though: chat templates render the tool schemas at the
+    very top of the prompt, so any change to the set *or to its order*
+    invalidates the whole server-side prefix cache and the next request pays a
+    full re-prefill.  ``prune=False`` lets a caller keep the set untouched.
+
+    ``minimize_churn`` is the setting used by the interactive loop: satisfied
+    schemas are dropped, and the pending-first ordering is applied, only in an
+    iteration that has to change the set anyway to expose a still-pending
+    requirement.  Otherwise the serialized set stays byte-identical between
+    iterations.  The behaviors this trades away are already covered elsewhere:
+    repeats of a completed check are suppressed by
+    ``_suppress_completed_requirement_calls``, and the pending requirement list
+    is carried explicitly by the harness working state.
     """
     changed = False
-    if PRUNE_SATISFIED_REQUIREMENT_TOOLS:
+    pending_names = requirement_ledger.required_tools(pending_only=True)
+    additions_pending = _schema_additions_pending(tool_schemas, pending_names)
+    if prune and PRUNE_SATISFIED_REQUIREMENT_TOOLS:
         closed = requirement_ledger.closed_tools()
-        if closed:
+        if closed and (not minimize_churn or additions_pending):
             before = len(tool_schemas)
             tool_schemas[:] = [
                 schema for schema in tool_schemas
@@ -265,7 +290,6 @@ def _refresh_requirement_tool_schemas(
             ]
             changed = len(tool_schemas) != before
 
-    pending_names = requirement_ledger.required_tools(pending_only=True)
     before_ensure = len(tool_schemas)
     blocked = _ensure_tool_schemas(tool_schemas, pending_names, turn_tool_policy)
     if len(tool_schemas) != before_ensure:
@@ -274,16 +298,19 @@ def _refresh_requirement_tool_schemas(
         requirement_ledger.mark_blocked(name, "blocked or unavailable under harness policy")
 
     # Pending requirements first helps small models pick the next unfinished
-    # check and keeps ordering deterministic for prompt-cache friendliness.
-    pending_order = {name: idx for idx, name in enumerate(requirement_ledger.required_tools(pending_only=True))}
-    original_order = {id(schema): idx for idx, schema in enumerate(tool_schemas)}
-    tool_schemas.sort(
-        key=lambda schema: (
-            0 if str(schema.get("function", {}).get("name") or "") in pending_order else 1,
-            pending_order.get(str(schema.get("function", {}).get("name") or ""), 10_000),
-            original_order.get(id(schema), 10_000),
+    # check and keeps ordering deterministic. Reordering an otherwise unchanged
+    # set costs exactly as much prefill as changing it, so under minimize_churn
+    # it only happens when the set changed in this call.
+    if changed or not minimize_churn:
+        pending_order = {name: idx for idx, name in enumerate(requirement_ledger.required_tools(pending_only=True))}
+        original_order = {id(schema): idx for idx, schema in enumerate(tool_schemas)}
+        tool_schemas.sort(
+            key=lambda schema: (
+                0 if str(schema.get("function", {}).get("name") or "") in pending_order else 1,
+                pending_order.get(str(schema.get("function", {}).get("name") or ""), 10_000),
+                original_order.get(id(schema), 10_000),
+            )
         )
-    )
     return changed or bool(blocked)
 
 def _prune_compacted_history(messages: list[dict]) -> None:
@@ -356,6 +383,7 @@ def _finalize_after_limit(
             working_state=WORKING_STATE.render(include_tool_capabilities=False) if WORKING_STATE_ENABLED else "",
             evidence_context=WORKING_STATE.render_evidence(WORKING_STATE_EVIDENCE_CHARS) if WORKING_STATE_ENABLED else "",
             max_history_turns=WORKING_STATE_HISTORY_TURNS if WORKING_STATE_ENABLED else None,
+            volatile_last=VOLATILE_CONTEXT_LAST,
         )[1:],
     ]
     latest_media = next(
@@ -377,11 +405,27 @@ def _finalize_after_limit(
         ),
     })
     try:
-        response = OLLAMA.chat(model=MODEL, messages=prompt, options=MAIN_OPTIONS, tools=[], think=False, keep_alive=-1)
-        msg = response.get("message", {}) if isinstance(response, dict) else getattr(response, "message", {})
-        content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
+        # Streamed so the user sees the first token of the fallback summary
+        # immediately instead of waiting for the whole answer to be generated.
+        response = OLLAMA.chat(
+            model=MODEL, messages=ollama_wire_messages(prompt), options=MAIN_OPTIONS,
+            tools=[], think=False, keep_alive=-1, stream=True,
+        )
+        # A client that ignores ``stream`` returns one complete response object.
+        chunks = [response] if isinstance(response, dict) or hasattr(response, "message") else response
+        content = ""
+        for chunk in chunks:
+            chunk_msg = chunk.get("message", {}) if isinstance(chunk, dict) else getattr(chunk, "message", {})
+            piece = chunk_msg.get("content", "") if isinstance(chunk_msg, dict) else getattr(chunk_msg, "content", "")
+            if not piece:
+                continue
+            if not content:
+                print("\nAgent: ", end="", flush=True)
+            content += piece
+            print(piece, end="", flush=True)
+            emit_event("assistant_delta", content=piece)
         if content:
-            print(f"\nAgent: {content}\n")
+            print()
             append_and_save(messages, {"role": "assistant", "content": content})
             emit_event("assistant_final", content=content, finalization=True)
     except Exception as exc:

@@ -7,6 +7,7 @@ unit-tested without importing the Ollama client or initializing agent state.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any
@@ -144,3 +145,68 @@ def stream_with_preflight_retry(
                 on_retry(attempt, exc, delay)
             if delay:
                 sleep_fn(delay)
+
+
+def warm_model(
+    client: Any,
+    model: str,
+    *,
+    options: dict[str, Any] | None = None,
+    keep_alive: Any = -1,
+    system_prompt: str = "",
+    on_error: Callable[[Exception], None] | None = None,
+) -> bool:
+    """Load the model and optionally pre-fill the stable system prefix.
+
+    Two distinct costs show up in the first token of a turn: loading model
+    weights, and prefilling the prompt.  An empty ``messages`` request makes
+    Ollama load and pin the weights.  Sending the byte-stable system prefix with
+    ``num_predict: 1`` additionally leaves that prefix in the server's KV cache,
+    so the first real turn only prefills what the turn itself adds.
+
+    ``options`` must match the options used by interactive turns: Ollama keys a
+    loaded runner by context size, so warming with a different ``num_ctx`` would
+    reload the model on the first real request and waste the warm-up entirely.
+    """
+    base_options = dict(options or {})
+    try:
+        client.chat(model=model, messages=[], options=base_options, keep_alive=keep_alive)
+        if system_prompt:
+            prime_options = {**base_options, "num_predict": 1}
+            client.chat(
+                model=model,
+                messages=[{"role": "system", "content": str(system_prompt)}],
+                options=prime_options,
+                keep_alive=keep_alive,
+                think=False,
+                stream=False,
+            )
+        return True
+    except Exception as exc:
+        if on_error is not None:
+            on_error(exc)
+        return False
+
+
+def warm_model_async(
+    client: Any,
+    model: str,
+    *,
+    options: dict[str, Any] | None = None,
+    keep_alive: Any = -1,
+    system_prompt: str = "",
+    on_error: Callable[[Exception], None] | None = None,
+    on_success: Callable[[], None] | None = None,
+) -> threading.Thread:
+    """Warm the model on a daemon thread so a frontend can start immediately."""
+
+    def _run() -> None:
+        if warm_model(
+            client, model, options=options, keep_alive=keep_alive,
+            system_prompt=system_prompt, on_error=on_error,
+        ) and on_success is not None:
+            on_success()
+
+    thread = threading.Thread(target=_run, name="model-warmup", daemon=True)
+    thread.start()
+    return thread

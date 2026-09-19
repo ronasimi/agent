@@ -28,6 +28,13 @@ COMPACT_AT = int(AGENT_CFG.get("context", {}).get("compact_at_tokens", max(8000,
 SUMMARY_KEEP_MESSAGES = int(AGENT_CFG.get("context", {}).get("summary_keep_messages", 8))
 MAX_TOOL_OUTPUT = int(AGENT_CFG.get("context", {}).get("max_tool_output_chars", 5000))
 TOOL_LOOP_RESERVE = int(AGENT_CFG.get("context", {}).get("tool_loop_reserve_tokens", 4096))
+# Volatile harness blocks (working state, evidence digest) are placed after the
+# stable history so a changed block does not invalidate the server-side prompt
+# prefix cache for the system prompt and conversation history.
+VOLATILE_CONTEXT_LAST = bool(AGENT_CFG.get("context", {}).get("volatile_blocks_last", True))
+WARMUP_CFG = AGENT_CFG.get("warmup", {})
+WARMUP_ENABLED = bool(WARMUP_CFG.get("enabled", True))
+WARMUP_PRIME_PREFIX = WARMUP_ENABLED and bool(WARMUP_CFG.get("prime_system_prefix", True))
 MAX_ITERATIONS = int(AGENT_CFG.get("max_iterations", 12))
 MAX_ITERATIONS_HARD = max(MAX_ITERATIONS, int(AGENT_CFG.get("max_iterations_hard", 32)))
 SEMANTIC_MEMORY = bool(AGENT_CFG.get("semantic_memory_enabled", False))
@@ -60,11 +67,19 @@ WORKING_STATE_HISTORY_TURNS = max(1, int(WORKING_STATE_CFG.get("main_history_tur
 WORKING_STATE_RAW_TOOL_RESULTS = max(1, int(WORKING_STATE_CFG.get("raw_tool_results", 2)))
 WORKING_STATE_EVIDENCE_CHARS = max(600, int(WORKING_STATE_CFG.get("evidence_render_chars", 3600)))
 PRUNE_SATISFIED_REQUIREMENT_TOOLS = bool(WORKING_STATE_CFG.get("prune_satisfied_tool_schemas", True))
+# Tool schemas are rendered at the top of the prompt by chat templates, so any
+# change to the set - or to its order - invalidates the whole server-side prefix
+# cache. Prune and reorder only in an iteration that already has to expose a new
+# required tool.
+MINIMIZE_SCHEMA_CHURN = bool(WORKING_STATE_CFG.get("minimize_schema_churn", True))
 SUPPRESS_COMPLETED_REQUIREMENT_REPEATS = bool(WORKING_STATE_CFG.get("suppress_completed_requirement_repeats", True))
 REQUIREMENT_TOOL_CAP = max(MAX_TOOLS_PER_TURN, int(AGENT_CFG.get("requirement_tool_cap", 24)))
 GROUNDING_CFG = AGENT_CFG.get("grounding", {})
 GROUNDING_ENABLED = bool(GROUNDING_CFG.get("enabled", True))
 WEATHER_GROUNDING_MAX_AGE_SECONDS = max(300, int(GROUNDING_CFG.get("weather_max_age_seconds", 10800)))
+# Discarding a candidate answer produces no new evidence, so the gate needs its
+# own bound or it can consume every remaining iteration of the turn.
+GROUNDING_MAX_DISCARDS = max(1, int(GROUNDING_CFG.get("max_candidate_discards", 3)))
 RECIPE_CFG = AGENT_CFG.get("recipes", {})
 RECIPES_ENABLED = bool(RECIPE_CFG.get("enabled", True))
 RECIPE_SUGGEST = bool(RECIPE_CFG.get("suggest_after_success", True))

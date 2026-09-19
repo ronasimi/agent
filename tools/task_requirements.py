@@ -40,7 +40,7 @@ _RULES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     ("processes", "process_snapshot", "top resource-consuming processes", (r"\btop .*process", r"\bresource[- ]consuming process", r"\bprocess snapshot\b")),
     ("filesystem", "filesystem_snapshot", "filesystem capacity/inode state", (r"\bfilesystem", r"\binode", r"\bdisk capacity\b")),
     ("services", "service_health", "failed/unhealthy service state", (r"\b(?:failed|unhealthy) services?\b", r"\bservice health\b", r"\bservice warnings?\b")),
-    ("network_state", "network_snapshot", "network interfaces/routes/listeners", (r"\bnetwork (?:interfaces|routes|health|state)\b", r"\blistening sockets?\b")),
+    ("network_state", "network_snapshot", "network interfaces/routes/listeners", (r"\bnetwork (?:interfaces|routes|health|state|status)\b", r"\blistening sockets?\b")),
     ("neighbors", "neighbor_snapshot", "network neighbor table", (r"\bneighbors?\b", r"\barp\b", r"\bndp\b")),
     ("connections", "connection_snapshot", "established network connections", (r"\bestablished connections?\b", r"\bconnection snapshot\b", r"\bactive connections?\b")),
     ("local_subnets", "local_subnets", "active local private subnets", (

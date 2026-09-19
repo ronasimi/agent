@@ -91,8 +91,26 @@ def _selection_tokens(text: str) -> set[str]:
     }
 
 
+# A tool qualifies lexically when the request or its context matches the tool's
+# *name*, or when several description terms match.  A single incidental
+# description word ("two", "through", "agent") is noise: it used to fill the
+# per-turn schema budget with unrelated tools, which both costs Ollama prefill
+# on every request and degrades tool choice on 2B/4B models.
+LEXICAL_MIN_SCORE = 6
+
+# Generic execution and registry reloading are deliberate fallback/side-effect
+# capabilities, not discovery operations.  They are only selected lexically when
+# the request names them by their distinctive trigger term; intent bundles can
+# still expose them when the request genuinely asks for that capability.
+_LEXICAL_TRIGGER_TOKENS = {
+    "reload_tools": {"reload"},
+    "execute_shell": {"shell"},
+    "execute_python": {"python"},
+}
+
+
 def select_tool_schemas(user_text: str, max_tools: int = 12, context_text: str = "") -> list[dict]:
-    """Select a tiny universal core, intent bundles, then lexical matches."""
+    """Select a tiny universal core, intent bundles, then relevant lexical matches."""
     max_tools = max(1, int(max_tools))
     if len(TOOL_SCHEMAS) <= max_tools:
         return list(TOOL_SCHEMAS)
@@ -105,15 +123,15 @@ def select_tool_schemas(user_text: str, max_tools: int = 12, context_text: str =
         name = str(fn.get("name", ""))
         description = str(fn.get("description", ""))
         name_tokens = _selection_tokens(name)
-        # Reloading the registry is a side effect, not a discovery operation.
-        # Only expose it lexically when the user actually asked to reload.
-        if name == "reload_tools" and "reload" not in current_tokens:
+        triggers = _LEXICAL_TRIGGER_TOKENS.get(name)
+        if triggers is not None and not (triggers & current_tokens):
             continue
         haystack = name_tokens | _selection_tokens(description)
         current_score = sum(4 if token in name_tokens else 2 for token in current_tokens & haystack)
         context_score = sum(2 if token in name_tokens else 1 for token in context_tokens & haystack)
         score = current_score + context_score
-        if score:
+        name_hits = len((current_tokens | context_tokens) & name_tokens)
+        if score and (name_hits or score >= LEXICAL_MIN_SCORE):
             scored.append((score, name, schema))
     scored.sort(key=lambda item: (-item[0], item[1]))
 

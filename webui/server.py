@@ -9,6 +9,7 @@ import hashlib
 import json
 import mimetypes
 import subprocess
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +42,30 @@ from .theme import DEFAULT_THEME, read_xresources_theme
 # ``webui.server.WORKSPACE``.  Wrappers synchronize it into workspace_ops.
 WORKSPACE = _DEFAULT_WORKSPACE
 
-app = FastAPI(title="Al Agent Web UI", docs_url=None, redoc_url=None)
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """Load and prefix-prime the main model so the first browser turn is fast.
+
+    Best effort and non-blocking: the UI serves normally when the Ollama server
+    is unreachable, and the first real turn simply pays the load itself.
+    """
+    if agent_runtime.WARMUP_ENABLED:
+        from al_agent.model_protocol import warm_model_async
+
+        warm_model_async(
+            agent_runtime.OLLAMA,
+            agent_runtime.MODEL,
+            options=agent_runtime.MAIN_OPTIONS,
+            keep_alive=-1,
+            system_prompt=(
+                agent_runtime.build_system_prompt() if agent_runtime.WARMUP_PRIME_PREFIX else ""
+            ),
+            on_error=lambda exc: print(f"[webui]: main-model warm-up skipped: {exc}"),
+        )
+    yield
+
+
+app = FastAPI(title="Al Agent Web UI", docs_url=None, redoc_url=None, lifespan=_lifespan)
 STATE = WorkingStateStore(limits=agent_runtime.WORKING_STATE_CFG)
 
 

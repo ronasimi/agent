@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from ollama import Client
 from tools.deep_research import build_report_plan, collect_research_media, deep_search_and_scrape, evaluate_research, plan_research_queries, read_research_buffer, read_research_sources, research_references_markdown
-from tools.pdf_generator import generate_pdf_report
 from tools.runtime import complete_job, get_job, heartbeat_job, save_checkpoint
 from .config import MAIN_OPTIONS, MODEL, OLLAMA_HOST, POLL_SECONDS, RESEARCH_CFG
 from .resources import InferenceDeferred, _ensure_interactive_idle, _interactive_busy, _notify, resources_available
@@ -354,7 +353,14 @@ def run_research_job(job_id: str, worker_id: str) -> str:
                 job_id,
             )
             md_path.write_text(report, encoding="utf-8")
-            pdf_result = generate_pdf_report(report, output_filename=str(pdf_path))
+            # Imported lazily: PDF rendering pulls in optional native libraries,
+            # and a missing one must degrade this single step rather than break
+            # import-time discovery of every background job provider.
+            try:
+                from tools.pdf_generator import generate_pdf_report
+                pdf_result = generate_pdf_report(report, output_filename=str(pdf_path))
+            except Exception as exc:
+                pdf_result = f"Error: PDF rendering is unavailable: {exc}"
             if str(pdf_result).startswith("Error:"):
                 state["pdf_error"] = str(pdf_result)
                 state["pdf_path"] = None

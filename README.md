@@ -283,6 +283,17 @@ agent:
     reserve_tokens: 2048
     compact_at_tokens: 9000
     max_tool_output_chars: 4000
+    volatile_blocks_last: true
+
+  warmup:
+    enabled: true
+    prime_system_prefix: true
+
+  working_state:
+    minimize_schema_churn: true
+
+  grounding:
+    max_candidate_discards: 3
 
   main_options:
     num_ctx: 16384
@@ -334,6 +345,20 @@ The harness is optimized around local-model constraints:
 - removal of completed requirement schemas during long checklist tasks
 
 When performance telemetry is enabled, responses can show TTFT, prompt tokens, cached tokens, prefill throughput, generation throughput, and load time when Ollama reports them.
+
+### Time to first token
+
+On a local server the dominant term in TTFT is prompt prefill, and Ollama/llama.cpp can only skip prefill for a prompt prefix that is **byte-identical** to the previous request. Chat templates render tool schemas and the system prompt at the very top of that prompt, so anything that changes early in the prompt costs a full re-prefill. The harness is built around that fact:
+
+- **Volatile blocks go last.** The harness working state and evidence digest are rewritten on every tool-loop iteration. They are emitted after the stable system prompt and conversation history (`context.volatile_blocks_last`), so a changed working state no longer invalidates the cached prefix. Set it to `false` for a chat template that requires every system message to precede the conversation.
+- **The tool set stays byte-stable.** Pruning satisfied requirement schemas, and reordering them pending-first, both invalidate the whole prefix. Under `working_state.minimize_schema_churn` they happen only during an iteration that must change the set anyway to expose a still-pending requirement. Repeats of a completed check are still suppressed deterministically, and the pending list is still carried by the working state.
+- **Warm-up loads weights and primes the prefix.** Both frontends start a background warm-up (`warmup.enabled`) that loads the model and, with `warmup.prime_system_prefix`, sends the system prompt once at `num_predict: 1` so the first real turn prefills only what that turn adds. The warm-up deliberately uses `main_options`, because Ollama keys a loaded runner by context size.
+- **Background compaction does not evict the foreground model.** When `compaction_model` is empty the worker reuses the interactive model, and it now reuses the interactive `num_ctx` as well. Requesting the same model with a smaller context would unload and reload it, making the next user turn pay a full model load plus a full prefill.
+- **Harness control notes are de-duplicated.** Idempotent guidance ("the previous call was rejected", "the candidate answer was discarded") is appended once per turn instead of once per iteration, so the prompt stops growing when the loop is not making progress.
+- **Selection has a relevance floor.** A single incidental description-word match no longer fills the per-turn schema budget, so conversational turns send no tool schemas at all instead of a dozen irrelevant ones.
+- **The fallback finalizer streams.** The "safety limit reached" summary is streamed and emits deltas rather than blocking until the whole answer is generated.
+
+`scripts/simulate_turns.py` measures the prefix-reuse effect of these without a model server.
 
 ## Self-optimization
 
@@ -407,6 +432,20 @@ Run the fixed harness benchmark with:
 ```bash
 python scripts/benchmark_harness.py
 ```
+
+Simulate turns without an Ollama server. A scripted client replaces the model
+transport and can only call tools that were actually supplied in the request,
+so the traces exercise the turn state machine rather than its malformed-call
+path. The prefix report approximates how much of each request Ollama can serve
+from its KV cache:
+
+```bash
+python scripts/simulate_turns.py            # traces plus prefix reuse
+python scripts/simulate_turns.py --prefix   # prefix reuse only
+python scripts/simulate_turns.py --prompts  # include rendered prompts
+```
+
+It writes to a temporary database and never touches durable storage.
 
 The local test environment must have packages from `requirements.txt` installed. In particular, registry/Web UI imports require the Ollama Python package even when no live Ollama server is contacted.
 

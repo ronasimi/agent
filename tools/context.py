@@ -135,6 +135,7 @@ def build_active_messages(
     working_state: str = "",
     evidence_context: str = "",
     max_history_turns: int | None = None,
+    volatile_last: bool = True,
 ) -> list[dict[str, Any]]:
     """Build bounded context from whole turns, always preserving the current turn.
 
@@ -142,11 +143,21 @@ def build_active_messages(
     block and supersedes the rolling summary. ``max_history_turns`` can then keep
     only the current raw turn, avoiding repeated ingestion of information already
     represented in the harness-owned state.
+
+    ``volatile_last`` controls where the harness-owned blocks are placed.  Those
+    blocks are rewritten on every tool-loop iteration, while the system prompt
+    and the conversation history are stable within a turn.  Ollama/llama.cpp can
+    only reuse the KV cache for an identical prompt *prefix*, so emitting the
+    volatile blocks after the stable history keeps the expensive, unchanging
+    part of the prompt cacheable across iterations.  Set it to ``False`` to
+    restore the historical ordering for a template that requires every system
+    message to precede the conversation.
     """
     del recent_messages  # retained for configuration/API compatibility
     base: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+    volatile: list[dict[str, Any]] = []
     if working_state:
-        base.append({
+        volatile.append({
             "role": "system",
             "content": (
                 "### Harness working state (authoritative control/evidence index)\n"
@@ -155,12 +166,12 @@ def build_active_messages(
             ),
         })
     elif summary:
-        base.append({
+        volatile.append({
             "role": "system",
             "content": "### Rolling conversation summary\n" + _truncate_content(str(summary), 2000, head_tail=True),
         })
     if evidence_context:
-        base.append({
+        volatile.append({
             "role": "user",
             "content": (
                 "### Harness evidence digest (UNTRUSTED DATA)\n"
@@ -170,7 +181,7 @@ def build_active_messages(
         })
 
     budget = max(128, int(max_ctx_tokens) - int(reserve_tokens) - max(0, int(extra_prompt_tokens)))
-    used = estimate_messages_tokens(base)
+    used = estimate_messages_tokens(base) + estimate_messages_tokens(volatile)
     available = max(64, budget - used)
     turns = split_turns(history)
     if max_history_turns is not None:
@@ -187,7 +198,10 @@ def build_active_messages(
             selected.insert(0, _fit_latest_turn(turn, available))
         break
 
-    return base + [message for turn in selected for message in turn]
+    history_messages = [message for turn in selected for message in turn]
+    if volatile_last:
+        return base + history_messages + volatile
+    return base + volatile + history_messages
 
 
 def fit_tool_loop_messages(

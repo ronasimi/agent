@@ -220,8 +220,20 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
                 return WORKING_STATE.render()
             return shared_context.render() if SHARED_CTX_ENABLED else ""
 
+        # Schema content is fixed per tool name, so the serialized token estimate
+        # only has to be recomputed when the selected set itself changes.
+        schema_token_cache: dict[tuple[str, ...], int] = {}
+
+        def schema_prompt_tokens() -> int:
+            key = tuple(str(schema.get("function", {}).get("name") or "") for schema in tool_schemas)
+            cached = schema_token_cache.get(key)
+            if cached is None:
+                cached = estimate_tokens(json.dumps(tool_schemas, ensure_ascii=False, separators=(",", ":")))
+                schema_token_cache[key] = cached
+            return cached
+
         def rebuild_prefix() -> tuple[list[dict[str, Any]], int]:
-            schema_tokens = estimate_tokens(json.dumps(tool_schemas, ensure_ascii=False, separators=(",", ":")))
+            schema_tokens = schema_prompt_tokens()
             canonical_state = WORKING_STATE.render(include_tool_capabilities=False) if WORKING_STATE_ENABLED else ""
             prefix = build_active_messages(
                 system_prompt=system_prompt,
@@ -234,11 +246,30 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
                 working_state=canonical_state,
                 evidence_context=WORKING_STATE.render_evidence(WORKING_STATE_EVIDENCE_CHARS) if WORKING_STATE_ENABLED else "",
                 max_history_turns=WORKING_STATE_HISTORY_TURNS if WORKING_STATE_ENABLED else None,
+                volatile_last=VOLATILE_CONTEXT_LAST,
             )
             return prefix, schema_tokens
 
         turn_prefix, tool_prompt_tokens = rebuild_prefix()
         turn_tail: list[dict[str, Any]] = []
+
+        def append_control_note(content: str) -> bool:
+            """Append harness guidance unless the identical note is already present.
+
+            Control notes are idempotent instructions.  Re-appending the same
+            text on every iteration grows the prompt without adding information
+            and pushes the changed region of the prompt further back, which
+            costs prefill on every subsequent request.
+            """
+            text = str(content)
+            if any(
+                message.get("role") == "user" and str(message.get("content") or "") == text
+                for message in turn_tail
+            ):
+                return False
+            turn_tail.append({"role": "user", "content": text})
+            return True
+
         tool_iterations = 0
         seen_tool_calls: set[str] = set()
         successful_mutating_signatures: set[str] = set()
@@ -256,6 +287,7 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
         fallback_recipe_candidate: dict[str, Any] | None = None
         had_tool_failure = False
         grounding_recovery_attempted = False
+        grounding_discards = 0
         local_grounding_observations: list[dict[str, Any]] = []
         if not WORKING_STATE_ENABLED and continuation:
             local_grounding_observations.extend(list(previous_working_state.get("verified_observations") or []))
@@ -354,14 +386,11 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
                 )
                 turn_tail.append({"role": "user", "content": context})
                 return True, True, context
-            turn_tail.append({
-                "role": "user",
-                "content": (
-                    "[Harness grounding recovery failed] The final answer is still blocked because the requested "
-                    "weather fact type is absent. Use a supplied weather/web retrieval path if another iteration remains; "
-                    "do not answer from current_time or unrelated observations."
-                ),
-            })
+            append_control_note(
+                "[Harness grounding recovery failed] The final answer is still blocked because the requested "
+                "weather fact type is absent. Use a supplied weather/web retrieval path if another iteration remains; "
+                "do not answer from current_time or unrelated observations."
+            )
             return True, False, ""
 
         def emit_grounding_blocked(report: dict[str, Any]) -> None:
@@ -797,21 +826,35 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
                     recovery_tools = list(dict.fromkeys(recovery_tools))
                     if recovery_tools:
                         _ensure_tool_schemas(tool_schemas, recovery_tools, turn_tool_policy)
-                    if iteration < iteration_limit:
+                    grounding_discards += 1
+                    # Discarding a candidate answer does not create new evidence.
+                    # Without its own bound this path can silently consume every
+                    # remaining iteration re-asking a model that has no way to
+                    # obtain the missing fact type.
+                    exhausted = grounding_discards >= GROUNDING_MAX_DISCARDS
+                    if iteration < iteration_limit and not exhausted:
                         if WORKING_STATE_ENABLED:
                             WORKING_STATE.update_tools(tool_schemas)
                         turn_prefix, tool_prompt_tokens = rebuild_prefix()
-                        turn_tail.append({
-                            "role": "user",
-                            "content": (
-                                "[Harness hard grounding gate] The previous candidate answer was discarded. "
-                                f"Missing fact evidence: {', '.join(sorted(missing)) or 'requested fact type'}. "
-                                "Obtain qualifying evidence with the supplied typed tools/recipe before answering. "
-                                "Unrelated observations (for example current_time during a weather task) do not satisfy this gate."
-                            ),
-                        })
+                        append_control_note(
+                            "[Harness hard grounding gate] The previous candidate answer was discarded. "
+                            f"Missing fact evidence: {', '.join(sorted(missing)) or 'requested fact type'}. "
+                            "Obtain qualifying evidence with the supplied typed tools/recipe before answering. "
+                            "Unrelated observations (for example current_time during a weather task) do not satisfy this gate."
+                        )
                         full_content = ""
                         continue
+                    if exhausted:
+                        emit_event(
+                            "validator", validator="grounding", decision="exhausted",
+                            diagnosis="grounding_retry_budget_exhausted", suggested_tool="",
+                            missing_fact_types=sorted(missing), observed_fact_types=[],
+                            trigger="candidate_final",
+                        )
+                        print(
+                            f"  \033[93m[System]: Grounding retry budget exhausted after "
+                            f"{grounding_discards} discarded candidate answer(s).\033[0m"
+                        )
                     emit_grounding_blocked(report)
                     break
 
@@ -831,7 +874,7 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
                 still_pending = requirement_ledger.pending()
                 if still_pending and iteration < iteration_limit:
                     turn_prefix, tool_prompt_tokens = rebuild_prefix()
-                    turn_tail.append({"role": "user", "content": requirement_ledger.completion_message()})
+                    append_control_note(requirement_ledger.completion_message())
                     print(
                         f"  \033[93m[System]: Deferred premature final answer; "
                         f"{len(still_pending)} explicit requirement(s) remain.\033[0m"
@@ -892,14 +935,11 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
                 if raw_tool_calls or control_notes:
                     tracker.record_model_failure("invalid_tool_call", "; ".join(control_notes)[:240])
                     note = "; ".join(control_notes[:4]) or "the emitted call could not be used"
-                    turn_tail.append({
-                        "role": "user",
-                        "content": (
-                            "[Harness tool-call correction] The previous tool call was rejected: "
-                            f"{note}. Re-read the supplied native tool schemas. Do not invent tool names or arguments. "
-                            "Either issue one corrected explicit tool call or answer without tools."
-                        ),
-                    })
+                    append_control_note(
+                        "[Harness tool-call correction] The previous tool call was rejected: "
+                        f"{note}. Re-read the supplied native tool schemas. Do not invent tool names or arguments. "
+                        "Either issue one corrected explicit tool call or answer without tools."
+                    )
                     signal = tracker.consume_signal()
                     if signal:
                         pending_stall_signal = signal
@@ -907,10 +947,10 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
 
                 if not full_content:
                     tracker.record_model_failure("empty_response", "main model emitted neither content nor a valid tool call")
-                    turn_tail.append({
-                        "role": "user",
-                        "content": "[Harness correction] Provide a final answer or issue one explicit valid tool call. Do not emit an empty response.",
-                    })
+                    append_control_note(
+                        "[Harness correction] Provide a final answer or issue one explicit valid tool call. "
+                        "Do not emit an empty response."
+                    )
                     signal = tracker.consume_signal()
                     if signal:
                         pending_stall_signal = signal
@@ -1069,25 +1109,19 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
                         successful_mutating_signatures.add(signature)
 
             if control_notes:
-                turn_tail.append({
-                    "role": "user",
-                    "content": (
-                        "[Harness batch note] Some emitted calls were not executed: "
-                        + "; ".join(control_notes[:4])
-                        + ". Continue only with a distinct necessary action."
-                    ),
-                })
+                append_control_note(
+                    "[Harness batch note] Some emitted calls were not executed: "
+                    + "; ".join(control_notes[:4])
+                    + ". Continue only with a distinct necessary action."
+                )
 
             if post_validator_blocked:
                 blocked_list = ", ".join(dict.fromkeys(post_validator_blocked))
-                turn_tail.append({
-                    "role": "user",
-                    "content": (
-                        "[Harness recovery limit] The fast-validator-approved corrective retry also failed for: "
-                        f"{blocked_list}. Those checks are blocked for this turn. Do not retry them again; "
-                        "continue with other pending requirements and report the blocker in the final answer."
-                    ),
-                })
+                append_control_note(
+                    "[Harness recovery limit] The fast-validator-approved corrective retry also failed for: "
+                    f"{blocked_list}. Those checks are blocked for this turn. Do not retry them again; "
+                    "continue with other pending requirements and report the blocker in the final answer."
+                )
 
             if attached_media:
                 source_names = ", ".join(dict.fromkeys(attached_from))
@@ -1119,7 +1153,8 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
                         print(f"  \033[93m[System]: User-conditioned tool is now available after an unsuccessful approach: {delayed_name}\033[0m")
 
             schemas_changed = _refresh_requirement_tool_schemas(
-                tool_schemas, requirement_ledger, turn_tool_policy
+                tool_schemas, requirement_ledger, turn_tool_policy,
+                minimize_churn=MINIMIZE_SCHEMA_CHURN,
             )
             if WORKING_STATE_ENABLED:
                 WORKING_STATE.update_tools(tool_schemas)
