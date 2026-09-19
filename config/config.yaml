@@ -4,8 +4,8 @@
 agent:
   # The Ollama server is intentionally external to this container.
   host: "http://127.0.0.1:11434"
-  model: "qwen3.5:4b"
-  fast_model: "qwen3.5:2b"
+  model: "huihui_ai/qwen3.5-abliterated:4B"
+  fast_model: "huihui_ai/qwen3.5-abliterated:2B"
   embed_model: "nomic-embed-text"
   timezone: "America/Toronto"
   semantic_memory_enabled: false
