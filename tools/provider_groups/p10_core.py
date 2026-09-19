@@ -7,6 +7,8 @@ TOOL_SPECS = [
     ('memory', 'read_observation'),
     ('user_profile', 'set_profile_image'),
     ('user_profile', 'profile_image_info'),
+    ('user_profile', 'set_user_identity'),
+    ('user_profile', 'set_research_preference'),
     ('repo_map', 'get_repo_map'),
     ('repo_map', 'search_repo_symbols'),
     ('repo_map', 'read_repo_symbol'),

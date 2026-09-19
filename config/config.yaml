@@ -6,9 +6,9 @@ agent:
   host: "http://127.0.0.1:11434"
   model: "huihui_ai/qwen3.5-abliterated:4B"
   fast_model: "huihui_ai/qwen3.5-abliterated:2B"
-  # Fast-model calls are intentionally ephemeral to reduce host memory pressure.
-  # Ollama keep_alive=0 unloads the model immediately after each request.
-  fast_model_keep_alive: 0
+  # Keep the small validator/research model warm briefly. Ollama will still
+  # evict it under memory pressure, while repeated recovery steps avoid a cold load.
+  fast_model_keep_alive: "2m"
   embed_model: "nomic-embed-text"
   timezone: "America/Toronto"
   semantic_memory_enabled: false
@@ -22,7 +22,10 @@ agent:
   # main_options so Ollama does not reload the runner on the first real turn.
   warmup:
     enabled: true
-    prime_system_prefix: true
+    # Tool-capable chat templates may place dynamic schemas before messages, so
+    # a system-only prime often is not a reusable prefix. Keep it off by default;
+    # use scripts/benchmark_warmup.py and model_stats.cache_hit_pct to verify before enabling.
+    prime_system_prefix: false
 
   # Transport failures before the first streamed chunk are safe to retry and
   # should not consume a semantic/tool-loop iteration. Once streaming begins,
@@ -104,9 +107,9 @@ agent:
     max_candidate_tools: 24
     timeout_seconds: 45
     max_transcript_chars: 12000
-    # Do not keep the fast validator resident; memory pressure is preferred over
-    # avoiding its occasional cold-load penalty.
-    keep_alive: 0
+    # Short TTL amortizes validator cold-loads while still allowing Ollama to
+    # reclaim memory automatically.
+    keep_alive: "2m"
     options:
       num_ctx: 4096
       temperature: 0.0
@@ -228,8 +231,8 @@ worker:
   # Ollama MAX_LOADED_MODELS setting on the Ollama server/container.
   max_agent_vram_mb: 7200
   # Deprecated compatibility mirror. Fast-model workers now prefer
-  # agent.fast_model_keep_alive; keep this at 0 for older code/configs.
-  fast_model_keep_alive: 0
+  # Background fast-model calls use the same short residency policy.
+  fast_model_keep_alive: "2m"
   # Run cleanup only while foreground inference is idle.
   maintenance_interval_seconds: 21600
   ephemeral_retention_days: 30

@@ -1,10 +1,10 @@
 """WebSocket chat orchestration for the Web UI."""
 from __future__ import annotations
-import asyncio, threading, uuid
+import asyncio, inspect, threading, uuid
 from typing import Any
 from fastapi import WebSocket, WebSocketDisconnect
 import agent as agent_runtime
-from tools import _load_chat_history_from_db
+from tools import _load_chat_history_from_db, conversation_context, ensure_conversation, normalize_conversation_id
 from .config import ARTIFACT_MAX_PER_TURN
 from .workspace_ops import _build_user_content, _new_artifacts, _workspace_file_snapshot
 
@@ -13,6 +13,8 @@ RUNS_LOCK = threading.Lock()
 
 async def _run_turn(websocket: WebSocket, payload: dict[str, Any]) -> None:
     turn_id = str(payload.get("turn_id") or uuid.uuid4().hex)
+    conversation_id = normalize_conversation_id(payload.get("conversation_id"))
+    ensure_conversation(conversation_id)
     text = _build_user_content(payload.get("content", ""), list(payload.get("attachments") or []))
     if not text:
         await websocket.send_json({"type": "error", "turn_id": turn_id, "message": "Message is empty"})
@@ -51,12 +53,20 @@ async def _run_turn(websocket: WebSocket, payload: dict[str, Any]) -> None:
             queue_new_artifacts()
 
     def work() -> None:
-        messages = [{"role": "system", "content": agent_runtime.build_system_prompt()}] + _load_chat_history_from_db(limit=100)
-        with agent_runtime.frontend_event_context(sink, cancel_event):
-            agent_runtime.handle_user_turn(messages, text, thinking)
+        # The history snapshot is refreshed *after* the cross-process inference
+        # lock is acquired by the turn engine. That prevents a queued browser tab
+        # from running with history captured before the preceding turn finished.
+        messages = [{"role": "system", "content": agent_runtime.build_system_prompt()}]
+        with conversation_context(conversation_id):
+            with agent_runtime.frontend_event_context(sink, cancel_event):
+                handler = agent_runtime.handle_user_turn
+                if "refresh_history" in inspect.signature(handler).parameters:
+                    handler(messages, text, thinking, refresh_history=True)
+                else:  # compatibility for embedders/tests with the legacy callback shape
+                    handler(messages, text, thinking)
 
     task = asyncio.create_task(asyncio.to_thread(work))
-    await websocket.send_json({"type": "accepted", "turn_id": turn_id, "content": text})
+    await websocket.send_json({"type": "accepted", "turn_id": turn_id, "conversation_id": conversation_id, "content": text})
     try:
         while True:
             if task.done() and queue.empty():

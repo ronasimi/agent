@@ -32,6 +32,10 @@ def init_user_profile_db() -> None:
     """Initialize user-profile tables."""
     with _connect() as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS user_profile (key TEXT PRIMARY KEY, value TEXT)")
+        # The OOBE owns a small set of durable memory topics (for example the
+        # user's declared location), so profile initialization must also work on
+        # a completely fresh database before tools.memory has been imported.
+        conn.execute("CREATE TABLE IF NOT EXISTS memory (topic TEXT PRIMARY KEY, fact TEXT, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)")
         conn.execute(
             """CREATE TABLE IF NOT EXISTS user_preferences (
                    category TEXT, key TEXT, value TEXT,
@@ -204,6 +208,18 @@ def get_user_identity() -> dict[str, Any]:
     return identity
 
 
+
+
+def get_user_location() -> str:
+    """Return the explicitly configured durable user location, if any."""
+    init_user_profile_db()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT fact FROM memory WHERE topic IN ('user_location','location','city') "
+            "ORDER BY CASE topic WHEN 'user_location' THEN 0 WHEN 'location' THEN 1 ELSE 2 END LIMIT 1"
+        ).fetchone()
+    return str(row[0]).strip() if row and str(row[0] or '').strip() else ""
+
 def set_research_preference(category: str, key: str, value: str) -> str:
     """Set a durable research preference."""
     init_user_profile_db()
@@ -237,6 +253,9 @@ def get_user_prompt_context() -> str:
             f"**Role**: {identity.get('role', 'N/A')}",
             f"**Timezone**: {identity.get('timezone', 'UTC')}",
         ]
+        location = get_user_location()
+        if location:
+            lines.append(f"**Location**: {location}")
         interests = identity.get("interests", [])
         if interests:
             lines.append(f"**Interests**: {', '.join(map(str, interests))}")
@@ -249,6 +268,104 @@ def get_user_prompt_context() -> str:
                 lines.append(f"- {category}.{key} = {value}")
     return "\n".join(lines) + "\n"
 
+
+
+def get_onboarding_state() -> dict[str, Any]:
+    """Return whether the first-run user-profile questionnaire has completed."""
+    init_user_profile_db()
+    with _connect() as conn:
+        row = conn.execute("SELECT value FROM user_profile WHERE key='onboarding.completed'").fetchone()
+    return {
+        "completed": bool(row and str(row[0]).lower() in {"1", "true", "yes"}),
+        "identity": get_user_identity(),
+        "preferences": get_user_preferences(),
+        "profile_image": str(get_profile_image_path(migrate_legacy=True) or ""),
+    }
+
+
+def complete_onboarding_profile(
+    *,
+    name: str = "",
+    role: str = "",
+    timezone: str = "UTC",
+    location: str = "",
+    email: str = "",
+    interests: list[str] | None = None,
+    response_style: str = "concise",
+    research_depth: str = "balanced",
+    profile_image_path: str = "",
+    reset: bool = False,
+) -> dict[str, Any]:
+    """Populate/replace durable user context from the first-run questionnaire."""
+    init_user_profile_db()
+    if reset:
+        with _connect() as conn:
+            conn.execute("DELETE FROM user_profile")
+            conn.execute("DELETE FROM user_preferences")
+            conn.execute("DELETE FROM memory WHERE topic IN ('user_location','location','city','user_picture','user_photo')")
+        try:
+            PROFILE_IMAGE_PATH.unlink(missing_ok=True)
+        except OSError:
+            pass
+    set_user_identity(name=name, role=role, timezone=timezone, email=email, interests=interests or [])
+    if response_style:
+        set_research_preference("response", "style", response_style)
+    if research_depth:
+        set_research_preference("search_depth", "depth", research_depth)
+    if location:
+        with _connect() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS memory (topic TEXT PRIMARY KEY, fact TEXT, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+            )
+            conn.execute(
+                "INSERT INTO memory(topic, fact, updated_at) VALUES ('user_location', ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(topic) DO UPDATE SET fact=excluded.fact, updated_at=CURRENT_TIMESTAMP",
+                (str(location).strip(),),
+            )
+    if profile_image_path:
+        set_profile_image(profile_image_path)
+    with _connect() as conn:
+        conn.execute("INSERT OR REPLACE INTO user_profile(key,value) VALUES('onboarding.completed','true')")
+    return get_onboarding_state()
+
+
+def reset_onboarding_profile() -> dict[str, Any]:
+    """Clear questionnaire-owned profile/preferences so the OOBE can run again."""
+    init_user_profile_db()
+    with _connect() as conn:
+        conn.execute("DELETE FROM user_profile")
+        conn.execute("DELETE FROM user_preferences")
+        conn.execute("DELETE FROM memory WHERE topic IN ('user_location','location','city','user_picture','user_photo')")
+    try:
+        PROFILE_IMAGE_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return get_onboarding_state()
+
+
+def run_terminal_onboarding(*, reset: bool = False, input_fn=input, output_fn=print) -> dict[str, Any]:
+    """Run the local first-run questionnaire in a terminal; safe to invoke again with reset=True."""
+    state = get_onboarding_state()
+    if state.get("completed") and not reset:
+        return state
+    current = state.get("identity") or {}
+    output_fn("\n[Profile setup] Configure stable context for this local agent. Press Enter to keep a field blank.")
+    name = input_fn(f"Name [{current.get('name','')}]: ").strip() or str(current.get("name") or "")
+    role = input_fn(f"Role / occupation [{current.get('role','')}]: ").strip() or str(current.get("role") or "")
+    timezone = input_fn(f"Timezone [{current.get('timezone','UTC')}]: ").strip() or str(current.get("timezone") or "UTC")
+    location = input_fn("Location (city/region/country): ").strip()
+    email = input_fn(f"Email (optional) [{current.get('email','')}]: ").strip() or str(current.get("email") or "")
+    interests_raw = input_fn("Interests (comma-separated): ").strip()
+    interests = [item.strip() for item in interests_raw.split(",") if item.strip()] or list(current.get("interests") or [])
+    style = input_fn("Response style [concise/balanced/detailed] (concise): ").strip().lower() or "concise"
+    depth = input_fn("Research depth [quick/balanced/deep] (balanced): ").strip().lower() or "balanced"
+    photo = input_fn("Profile picture workspace path (optional): ").strip()
+    result = complete_onboarding_profile(
+        name=name, role=role, timezone=timezone, location=location, email=email, interests=interests,
+        response_style=style, research_depth=depth, profile_image_path=photo, reset=reset,
+    )
+    output_fn("[Profile setup] Saved.")
+    return result
 
 def get_user_research_style() -> dict[str, Any]:
     """Get research style preferences with defaults."""

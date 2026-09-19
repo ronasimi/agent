@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any, Iterable
 
@@ -10,12 +11,22 @@ IMAGE_TOKEN_ESTIMATE = 1200
 
 
 def estimate_tokens(text: str) -> int:
-    """Cheap tokenizer-independent estimate suitable for budgeting local models."""
+    """Conservative tokenizer-independent estimate for local-model budgeting.
+
+    A lexical estimate alone catastrophically undercounts dense strings such as
+    minified JSON, hashes, URLs, code, and base64-like payloads.  The UTF-8 byte
+    floor keeps those inputs bounded even when they contain no whitespace.  It
+    intentionally errs on the conservative side: a small amount of unused
+    context is far cheaper than an accidental full-window prefill/truncation.
+    """
     if not text:
         return 0
-    words = len(str(text).split())
-    punctuation = len(re.findall(r"[^\w\s]", str(text), flags=re.UNICODE))
-    return max(1, int(words * 1.25 + punctuation * 0.55))
+    value = str(text)
+    words = len(value.split())
+    punctuation = len(re.findall(r"[^\w\s]", value, flags=re.UNICODE))
+    lexical = max(1, int(math.ceil(words * 1.25 + punctuation * 0.55)))
+    byte_floor = max(1, int(math.ceil(len(value.encode("utf-8", errors="replace")) / 4.0)))
+    return max(lexical, byte_floor)
 
 
 def estimate_messages_tokens(messages: Iterable[dict[str, Any]]) -> int:
@@ -89,39 +100,141 @@ def _truncate_content(content: str, max_tokens: int, *, head_tail: bool = False)
     return best
 
 
-def _fit_latest_turn(turn: list[dict[str, Any]], budget: int) -> list[dict[str, Any]]:
-    """Fit the current turn, trimming observations before assistant/user prose."""
-    fitted = [dict(message) for message in turn]
+def _tool_call_ids(message: dict[str, Any]) -> set[str]:
+    ids: set[str] = set()
+    for call in message.get("tool_calls") or []:
+        if isinstance(call, dict):
+            call_id = str(call.get("id") or "")
+        else:
+            call_id = str(getattr(call, "id", "") or "")
+        if call_id:
+            ids.add(call_id)
+    return ids
+
+
+def _transaction_groups(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Group assistant tool calls with their result messages atomically."""
+    groups: list[list[dict[str, Any]]] = []
+    i = 0
+    while i < len(messages):
+        message = messages[i]
+        if message.get("role") == "assistant" and message.get("tool_calls"):
+            ids = _tool_call_ids(message)
+            group = [message]
+            i += 1
+            while i < len(messages) and messages[i].get("role") == "tool":
+                tool_id = str(messages[i].get("tool_call_id") or "")
+                # Keep legacy no-id tool results adjacent to the call.  For native
+                # calls, only consume results belonging to this assistant message.
+                if ids and tool_id and tool_id not in ids:
+                    break
+                group.append(messages[i])
+                i += 1
+            groups.append(group)
+            continue
+        # Orphan tool results are unsafe model history and are dropped later.
+        groups.append([message])
+        i += 1
+    return groups
+
+
+def _drop_orphan_tool_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    active_call = False
+    valid_ids: set[str] = set()
+    result: list[dict[str, Any]] = []
+    for message in messages:
+        role = message.get("role")
+        if role == "assistant" and message.get("tool_calls"):
+            active_call = True
+            valid_ids = _tool_call_ids(message)
+            result.append(message)
+            continue
+        if role == "tool":
+            # Tool results are valid only directly after an assistant tool call.
+            # This also drops legacy no-id tool rows that became orphaned during
+            # old compaction/truncation paths.
+            if not active_call:
+                continue
+            tool_id = str(message.get("tool_call_id") or "")
+            if valid_ids and tool_id and tool_id not in valid_ids:
+                continue
+            result.append(message)
+            continue
+        active_call = False
+        valid_ids = set()
+        result.append(message)
+    return result
+
+
+def _hard_fit_messages(messages: list[dict[str, Any]], budget: int) -> list[dict[str, Any]]:
+    """Deterministically fit messages under budget without splitting tool transactions."""
+    budget = max(1, int(budget))
+    fitted = [model_message(dict(message)) for message in messages]
+    fitted = _drop_orphan_tool_messages(fitted)
     if estimate_messages_tokens(fitted) <= budget:
         return fitted
 
-    tool_indexes = [i for i, message in enumerate(fitted) if message.get("role") == "tool"]
-    for index in tool_indexes:
-        if estimate_messages_tokens(fitted) <= budget:
-            break
-        content = str(fitted[index].get("content", ""))
-        fitted[index]["content"] = _truncate_content(content, min(512, max(96, budget // 4)), head_tail=True)
-
+    # First shrink bulky result/prose bodies while leaving native call metadata intact.
     for index, message in enumerate(fitted):
         if estimate_messages_tokens(fitted) <= budget:
-            break
+            return fitted
+        if message.get("role") == "tool" and message.get("content"):
+            fitted[index]["content"] = _truncate_content(str(message["content"]), min(192, max(24, budget // 8)), head_tail=True)
+    for index, message in enumerate(fitted):
+        if estimate_messages_tokens(fitted) <= budget:
+            return fitted
         if message.get("role") == "assistant" and message.get("content"):
-            fitted[index]["content"] = _truncate_content(str(message["content"]), min(256, max(64, budget // 6)))
+            fitted[index]["content"] = _truncate_content(str(message["content"]), min(128, max(16, budget // 10)))
 
-    while len(fitted) > 1 and estimate_messages_tokens(fitted) > budget:
-        removable = next(
-            (i for i, message in enumerate(fitted[:-1]) if message.get("role") in {"assistant", "tool"}),
-            None,
-        )
+    # Drop oldest whole groups, protecting the first system message and latest user
+    # request whenever possible.  Tool call + result messages move together.
+    while estimate_messages_tokens(fitted) > budget and len(fitted) > 1:
+        groups = _transaction_groups(fitted)
+        latest_user_group = max((i for i, g in enumerate(groups) if any(m.get("role") == "user" for m in g)), default=-1)
+        removable = next((i for i, g in enumerate(groups) if i not in {0, latest_user_group} and not (i == 0 and g[0].get("role") == "system")), None)
         if removable is None:
             break
-        fitted.pop(removable)
+        groups.pop(removable)
+        fitted = [m for group in groups for m in group]
+        fitted = _drop_orphan_tool_messages(fitted)
 
-    if estimate_messages_tokens(fitted) > budget:
-        user_index = next((i for i in range(len(fitted) - 1, -1, -1) if fitted[i].get("role") == "user"), len(fitted) - 1)
-        fitted[user_index]["content"] = _truncate_content(str(fitted[user_index].get("content", "")), max(64, budget // 2), head_tail=True)
+    # Truncate remaining non-tool-call textual blocks, newest user last.
+    order = [i for i, m in enumerate(fitted) if m.get("role") == "system" and i != 0]
+    order += [i for i, m in enumerate(fitted) if m.get("role") == "user"]
+    order += [0] if fitted and fitted[0].get("role") == "system" else []
+    for index in order:
+        if estimate_messages_tokens(fitted) <= budget:
+            break
+        content = str(fitted[index].get("content") or "")
+        if not content:
+            continue
+        current = estimate_tokens(content)
+        overflow = estimate_messages_tokens(fitted) - budget
+        target = max(1, current - overflow - 2)
+        fitted[index]["content"] = _truncate_content(content, target, head_tail=fitted[index].get("role") == "user")
+
+    # If native tool-call JSON itself is the only remaining overflow, remove the
+    # oldest complete transaction rather than returning malformed/orphan history.
+    while estimate_messages_tokens(fitted) > budget:
+        groups = _transaction_groups(fitted)
+        tx_index = next((i for i, g in enumerate(groups) if g and g[0].get("role") == "assistant" and g[0].get("tool_calls")), None)
+        if tx_index is None:
+            break
+        groups.pop(tx_index)
+        fitted = [m for group in groups for m in group]
+        fitted = _drop_orphan_tool_messages(fitted)
+
+    # Absolute last resort: preserve a syntactically valid single truncated block.
+    if estimate_messages_tokens(fitted) > budget and fitted:
+        preferred = next((m for m in reversed(fitted) if m.get("role") == "user"), fitted[0])
+        role = preferred.get("role") or "user"
+        fitted = [{"role": role, "content": _truncate_content(str(preferred.get("content") or ""), budget, head_tail=True)}]
     return fitted
 
+
+def _fit_latest_turn(turn: list[dict[str, Any]], budget: int) -> list[dict[str, Any]]:
+    """Fit the current turn without splitting assistant/tool transactions."""
+    return _hard_fit_messages([dict(message) for message in turn], max(1, int(budget)))
 
 def build_active_messages(
     *,
@@ -199,9 +312,15 @@ def build_active_messages(
         break
 
     history_messages = [message for turn in selected for message in turn]
-    if volatile_last:
-        return base + history_messages + volatile
-    return base + volatile + history_messages
+    result = base + history_messages + volatile if volatile_last else base + volatile + history_messages
+    result = _drop_orphan_tool_messages(result)
+    # Strong invariant: context assembly itself must never exceed the budget even
+    # for adversarial dense strings or unexpectedly large harness-owned blocks.
+    if estimate_messages_tokens(result) > budget:
+        result = _hard_fit_messages(result, budget)
+    if estimate_messages_tokens(result) > budget:  # defensive assertion for future edits
+        raise AssertionError("context budget invariant violated")
+    return result
 
 
 def fit_tool_loop_messages(
@@ -212,32 +331,30 @@ def fit_tool_loop_messages(
     reserve_tokens: int,
     extra_prompt_tokens: int = 0,
 ) -> list[dict[str, Any]]:
-    """Preserve a frozen prefix and bound a tool-loop suffix only when necessary."""
+    """Fit a frozen-prefix tool loop while preserving tool transaction integrity."""
     budget = max(128, int(max_ctx_tokens) - int(reserve_tokens) - max(0, int(extra_prompt_tokens)))
-    fitted = [model_message(message) for message in tail]
-    if estimate_messages_tokens(prefix) + estimate_messages_tokens(fitted) <= budget:
-        return [*prefix, *fitted]
+    normalized_prefix = [model_message(message) for message in prefix]
+    normalized_tail = [model_message(message) for message in tail]
+    combined = _drop_orphan_tool_messages([*normalized_prefix, *normalized_tail])
+    if estimate_messages_tokens(combined) <= budget:
+        return combined
 
-    for index, message in enumerate(fitted):
-        if estimate_messages_tokens(prefix) + estimate_messages_tokens(fitted) <= budget:
-            break
-        if message.get("role") == "tool":
-            fitted[index]["content"] = _truncate_content(str(message.get("content", "")), 256, head_tail=True)
+    # Prefer shrinking/dropping volatile tail groups before touching the stable
+    # prefix, preserving KV reuse in the common case.
+    prefix_tokens = estimate_messages_tokens(normalized_prefix)
+    tail_budget = max(0, budget - prefix_tokens)
+    if tail_budget:
+        fitted_tail = _hard_fit_messages(normalized_tail, tail_budget)
+        combined = [*normalized_prefix, *fitted_tail]
+        if estimate_messages_tokens(combined) <= budget:
+            return combined
 
-    for index, message in enumerate(fitted):
-        if estimate_messages_tokens(prefix) + estimate_messages_tokens(fitted) <= budget:
-            break
-        if message.get("role") == "assistant" and message.get("content"):
-            fitted[index]["content"] = _truncate_content(str(message["content"]), 128)
-
-    while estimate_messages_tokens(prefix) + estimate_messages_tokens(fitted) > budget:
-        assistant_indexes = [i for i, message in enumerate(fitted) if message.get("role") == "assistant"]
-        if len(assistant_indexes) <= 1:
-            break
-        fitted = fitted[assistant_indexes[1]:]
-
-    return [*prefix, *fitted]
-
+    # Prefix alone can exceed the budget after pathological input/config changes.
+    # In that case safety wins over cache stability.
+    combined = _hard_fit_messages(combined, budget)
+    if estimate_messages_tokens(combined) > budget:
+        raise AssertionError("tool-loop context budget invariant violated")
+    return combined
 
 def compaction_cutoff_id(history: list[dict[str, Any]], keep_messages: int = 8) -> int:
     """Return the last DB id that can be summarized while keeping recent whole turns."""

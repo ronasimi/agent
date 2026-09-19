@@ -18,10 +18,16 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 import agent as agent_runtime
-from tools import _load_chat_history_from_db, clear_chat_history
+from tools import (
+    _load_chat_history_from_db, clear_chat_history, conversation_context,
+    create_conversation, delete_conversation, ensure_conversation, list_conversations,
+    normalize_conversation_id, rename_conversation,
+)
 from tools.reminders import list_reminders
 from tools.runtime import list_jobs
-from tools.user_profile import get_profile_image_path
+from tools.user_profile import (
+    complete_onboarding_profile, get_onboarding_state, get_profile_image_path, reset_onboarding_profile,
+)
 from tools.working_state import WorkingStateStore
 
 from . import workspace_ops as _workspace_ops
@@ -152,15 +158,68 @@ def health() -> dict[str, Any]:
 
 
 @app.get("/api/history")
-def history(limit: int = 200) -> list[dict[str, Any]]:
-    return _history(limit)
+def history(limit: int = 200, conversation_id: str = "default") -> list[dict[str, Any]]:
+    cid = ensure_conversation(conversation_id)
+    return _history(limit, cid)
 
 
 @app.get("/api/history/export", response_class=PlainTextResponse)
-def history_export(limit: int = 0) -> str:
-    return _history_export(limit)
+def history_export(limit: int = 0, conversation_id: str = "default") -> str:
+    cid = ensure_conversation(conversation_id)
+    return _history_export(limit, cid)
 
 
+@app.get("/api/conversations")
+def conversations(limit: int = 50) -> list[dict[str, Any]]:
+    return list_conversations(limit=max(1, min(int(limit), 200)))
+
+
+@app.post("/api/conversations")
+def conversation_create(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload or {}
+    return create_conversation(str(payload.get("title") or ""))
+
+
+@app.patch("/api/conversations/{conversation_id}")
+def conversation_rename(conversation_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    rename_conversation(conversation_id, str(payload.get("title") or ""))
+    return {"ok": True}
+
+
+@app.delete("/api/conversations/{conversation_id}")
+def conversation_delete(conversation_id: str) -> dict[str, Any]:
+    return {"ok": delete_conversation(conversation_id)}
+
+
+
+
+@app.get("/api/onboarding")
+def onboarding_state() -> dict[str, Any]:
+    return get_onboarding_state()
+
+
+@app.post("/api/onboarding")
+def onboarding_complete(payload: dict[str, Any]) -> dict[str, Any]:
+    interests = payload.get("interests") or []
+    if isinstance(interests, str):
+        interests = [item.strip() for item in interests.split(",") if item.strip()]
+    return complete_onboarding_profile(
+        name=str(payload.get("name") or ""),
+        role=str(payload.get("role") or ""),
+        timezone=str(payload.get("timezone") or agent_runtime.AGENT_CFG.get("timezone", "UTC")),
+        location=str(payload.get("location") or ""),
+        email=str(payload.get("email") or ""),
+        interests=list(interests)[:20],
+        response_style=str(payload.get("response_style") or "concise"),
+        research_depth=str(payload.get("research_depth") or "balanced"),
+        profile_image_path=str(payload.get("profile_image_path") or ""),
+        reset=bool(payload.get("reset", False)),
+    )
+
+
+@app.delete("/api/onboarding")
+def onboarding_reset() -> dict[str, Any]:
+    return reset_onboarding_profile()
 
 
 @app.get("/api/profile-image")
@@ -182,13 +241,16 @@ def workspace(path: str = Query(default="", max_length=512)) -> dict[str, Any]:
 
 
 @app.delete("/api/history")
-def forget() -> dict[str, Any]:
-    return {"ok": True, "message": clear_chat_history()}
+def forget(conversation_id: str = "default") -> dict[str, Any]:
+    cid = ensure_conversation(conversation_id)
+    with conversation_context(cid):
+        return {"ok": True, "message": clear_chat_history(cid)}
 
 
 @app.get("/api/state")
-def state() -> dict[str, Any]:
-    return STATE.load()
+def state(conversation_id: str = "default") -> dict[str, Any]:
+    cid = ensure_conversation(conversation_id)
+    return WorkingStateStore(limits=agent_runtime.WORKING_STATE_CFG, conversation_id=cid).load()
 
 
 @app.get("/api/jobs")

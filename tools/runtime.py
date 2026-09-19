@@ -198,17 +198,27 @@ def create_singleton_job(
     payload: Optional[dict[str, Any]] = None,
     priority: int = 0,
     max_attempts: int = 3,
+    singleton_key: str = "",
 ) -> Optional[str]:
-    """Create one job only when the same type is not already pending or running."""
+    """Create one pending/running job per type, optionally scoped by a stable key."""
     init_runtime_db()
     job_id = str(uuid.uuid4())
     now = utc_now()
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        existing = conn.execute(
-            "SELECT id FROM agent_jobs WHERE job_type = ? AND status IN ('pending', 'running') LIMIT 1",
-            (str(job_type),),
-        ).fetchone()
+        if singleton_key:
+            scoped_title = f"{str(title)} [{str(singleton_key)}]"
+            existing = conn.execute(
+                "SELECT id FROM agent_jobs WHERE job_type = ? AND title = ? AND status IN ('pending', 'running') LIMIT 1",
+                (str(job_type), scoped_title),
+            ).fetchone()
+            stored_title = scoped_title
+        else:
+            existing = conn.execute(
+                "SELECT id FROM agent_jobs WHERE job_type = ? AND status IN ('pending', 'running') LIMIT 1",
+                (str(job_type),),
+            ).fetchone()
+            stored_title = str(title)
         if existing:
             conn.commit()
             return None
@@ -223,7 +233,7 @@ def create_singleton_job(
             (
                 job_id,
                 str(job_type),
-                str(title),
+                stored_title,
                 _json(payload or {}),
                 JobStatus.PENDING.value,
                 int(priority),

@@ -14,13 +14,15 @@ def run_context_compaction_job(job_id: str) -> str:
     job = get_job(job_id)
     if not job:
         raise RuntimeError(f"Job {job_id} was not found.")
-    through_id = int((job.get("payload") or {}).get("through_id") or 0)
-    messages = get_messages_for_compaction(through_id)
+    payload = job.get("payload") or {}
+    through_id = int(payload.get("through_id") or 0)
+    conversation_id = str(payload.get("conversation_id") or "default")
+    messages = get_messages_for_compaction(through_id, conversation_id=conversation_id)
     if not messages:
         complete_job(job_id, "No uncompacted messages remained.")
         return "No uncompacted messages remained."
 
-    existing = get_conversation_summary()
+    existing = get_conversation_summary(conversation_id)
     prompt = (
         "Maintain a durable rolling summary of an assistant conversation. Keep only information needed to continue the task: "
         "user goals, decisions, important facts, unfinished work, tool results, errors, and relevant constraints. "
@@ -40,7 +42,7 @@ def run_context_compaction_job(job_id: str) -> str:
     summary = re.sub(r"<think>.*?</think>", "", response.get("response", ""), flags=re.DOTALL).strip()
     if not summary:
         raise RuntimeError("Compaction model returned an empty summary.")
-    applied = apply_conversation_compaction(summary, through_id)
+    applied = apply_conversation_compaction(summary, through_id, conversation_id=conversation_id)
     result = f"Compacted history through message {through_id}." if applied else "Compaction was already applied or became stale."
     complete_job(job_id, result)
     return result

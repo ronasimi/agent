@@ -23,8 +23,11 @@ _REQUIRED_OVERRIDES = {
     "schedule_reminder": {"title"},
     "cancel_reminder": {"reminder_id"},
     "web_search": {"query"},
+    "news_search": {"query"},
     "wiki_search": {"query"},
     "browse_url": {"url"},
+    "geocode_location": {"query"},
+    "weather_forecast": {"latitude", "longitude"},
     "read_file": {"filename"},
     # Requiring content prevents a malformed small-model call from silently
     # truncating an existing file to zero bytes. An explicit empty string still
@@ -36,6 +39,7 @@ _REQUIRED_OVERRIDES = {
 
 _SCHEMA_OVERRIDES: dict[tuple[str, str], dict[str, Any]] = {
     ("list_background_jobs", "status"): {"enum": ["", "pending", "running", "completed", "failed", "cancelled"]},
+    ("news_search", "timelimit"): {"enum": ["", "d", "w", "m"]},
     ("schedule_reminder", "repeat"): {"enum": ["once", "daily", "weekly"]},
     ("list_self_optimization_candidates", "status"): {"enum": ["", "building", "benchmarking", "generating", "awaiting_approval", "approved", "rejected", "failed"]},
     ("list_work_queue", "status"): {"enum": ["pending", "running", "completed", "cancelled"]},
@@ -81,6 +85,10 @@ _PARAMETER_HINTS = {
     "max_files": "Maximum number of repository files to include.",
     "markdown_content": "Markdown source text to render.",
     "url": "HTTP(S) URL.",
+    "latitude": "Latitude in decimal degrees.",
+    "longitude": "Longitude in decimal degrees.",
+    "forecast_days": "Number of forecast days to return (1-16).",
+    "timezone_name": "IANA timezone name or auto for the forecast coordinates.",
     "path": "Path or URL expected by this tool.",
     "filename": "File path/name expected by this tool.",
     "output_filename": "Output filename; use a simple workspace-relative name unless the tool says otherwise.",
@@ -188,6 +196,11 @@ def _json_type(annotation: Any) -> tuple[str, dict | None, list[Any] | None]:
 
 def function_schema(func: Callable, description: str | None = None) -> dict:
     """Convert a Python callable signature to an Ollama-compatible tool schema."""
+    stored_schema = getattr(func, "_agent_tool_schema", None)
+    if isinstance(stored_schema, dict):
+        # Lazy builtin proxies carry the exact generated native schema so startup
+        # need not import heavyweight implementation modules just for metadata.
+        return json.loads(json.dumps(stored_schema))
     hints = get_type_hints(func, include_extras=True)
     properties = {}
     required = []
@@ -318,12 +331,77 @@ def _coerce_value(value: Any, annotation: Any, name: str) -> Any:
     return value
 
 
+
+def _coerce_schema_value(value: Any, spec: dict[str, Any], name: str) -> Any:
+    allowed = spec.get("enum")
+    if isinstance(allowed, list) and value not in allowed:
+        raise TypeError(f"Argument '{name}' must be one of: {', '.join(map(str, allowed))}.")
+    kind = str(spec.get("type") or "")
+    if kind == "string":
+        if isinstance(value, str): return value
+        if isinstance(value, (int, float, bool)): return str(value)
+        # Several structured primitives intentionally accept ``Any`` and their
+        # public schema represents that transport as JSON text.  Pipelines pass
+        # parsed intermediate objects, so serialize those deterministically.
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        raise TypeError(f"Argument '{name}' must be a string.")
+    if kind == "boolean":
+        if isinstance(value, bool): return value
+        if isinstance(value, str) and value.strip().lower() in {"true", "false"}: return value.strip().lower() == "true"
+        raise TypeError(f"Argument '{name}' must be a boolean.")
+    if kind == "integer":
+        if isinstance(value, bool): raise TypeError(f"Argument '{name}' must be an integer.")
+        if isinstance(value, int): return value
+        if isinstance(value, float) and value.is_integer(): return int(value)
+        if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()): return int(value.strip())
+        raise TypeError(f"Argument '{name}' must be an integer.")
+    if kind == "number":
+        if isinstance(value, bool): raise TypeError(f"Argument '{name}' must be a number.")
+        if isinstance(value, (int, float)): return float(value)
+        if isinstance(value, str):
+            try: return float(value.strip())
+            except ValueError: pass
+        raise TypeError(f"Argument '{name}' must be a number.")
+    if kind == "array":
+        if isinstance(value, str) and value.lstrip().startswith("["):
+            try: value = json.loads(value)
+            except json.JSONDecodeError as exc: raise TypeError(f"Argument '{name}' must be a JSON array.") from exc
+        if not isinstance(value, list): raise TypeError(f"Argument '{name}' must be an array.")
+        item_spec = spec.get("items") if isinstance(spec.get("items"), dict) else {}
+        return [_coerce_schema_value(item, item_spec, f"{name}[]") for item in value] if item_spec else value
+    if kind == "object":
+        if isinstance(value, str) and value.lstrip().startswith("{"):
+            try: value = json.loads(value)
+            except json.JSONDecodeError as exc: raise TypeError(f"Argument '{name}' must be a JSON object.") from exc
+        if not isinstance(value, dict): raise TypeError(f"Argument '{name}' must be an object.")
+        return value
+    return value
+
+
+def _normalize_schema_arguments(schema: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+    fn = schema.get("function", {}) if isinstance(schema, dict) else {}
+    params = fn.get("parameters", {}) if isinstance(fn.get("parameters"), dict) else {}
+    properties = params.get("properties", {}) if isinstance(params.get("properties"), dict) else {}
+    accepted = set(properties)
+    unknown = set(args) - accepted
+    if unknown:
+        raise TypeError(f"Unknown argument(s): {', '.join(sorted(unknown))}")
+    required = [str(name) for name in params.get("required", []) if name]
+    missing = [name for name in required if name not in args]
+    if missing:
+        raise TypeError(f"Missing required argument(s): {', '.join(missing)}")
+    return {name: _coerce_schema_value(value, properties.get(name, {}), name) for name, value in args.items()}
+
 def normalize_arguments(func: Callable, args: Any) -> dict:
     """Validate names/types and apply only unambiguous primitive coercions."""
     if args is None:
         args = {}
     if not isinstance(args, dict):
         raise TypeError("Tool arguments must be a JSON object.")
+    stored_schema = getattr(func, "_agent_tool_schema", None)
+    if isinstance(stored_schema, dict):
+        return _normalize_schema_arguments(stored_schema, args)
     signature = inspect.signature(func)
     accepted = {
         name for name, param in signature.parameters.items()

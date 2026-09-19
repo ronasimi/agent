@@ -4,8 +4,11 @@ import json
 from typing import Any
 from tools import _load_chat_history_from_db
 
-def _history(limit: int = 200) -> list[dict[str, Any]]:
-    rows = _load_chat_history_from_db(limit=max(1, min(int(limit), 200)))
+def _history(limit: int = 200, conversation_id: str | None = None) -> list[dict[str, Any]]:
+    kwargs = {"limit": max(1, min(int(limit), 200))}
+    if conversation_id is not None:
+        kwargs["conversation_id"] = conversation_id
+    rows = _load_chat_history_from_db(**kwargs)
     clean = []
     for item in rows:
         entry = {
@@ -21,9 +24,12 @@ def _history(limit: int = 200) -> list[dict[str, Any]]:
     return clean
 
 
-def _history_export(limit: int = 0) -> str:
+def _history_export(limit: int = 0, conversation_id: str | None = None) -> str:
     """Serialize the complete stored conversation as readable plain text."""
-    rows = _load_chat_history_from_db(limit=int(limit), include_compacted=True)
+    kwargs = {"limit": int(limit), "include_compacted": True}
+    if conversation_id is not None:
+        kwargs["conversation_id"] = conversation_id
+    rows = _load_chat_history_from_db(**kwargs)
     parts: list[str] = []
     labels = {"user": "User", "assistant": "Assistant", "tool": "Tool", "system": "System"}
     for item in rows:

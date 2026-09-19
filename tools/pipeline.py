@@ -96,6 +96,7 @@ def execute_pipeline(stages: list[dict[str, Any]], parameters: dict[str, Any] | 
     from . import AVAILABLE_TOOLS_MAP, TOOL_METADATA
     from .loop_validator import classify_tool_outcome
     from .tool_registry import normalize_arguments
+    from .executor import execute_registered_tool
 
     parameters = parameters or {}
     if not isinstance(stages, list) or not stages:
@@ -135,6 +136,7 @@ def execute_pipeline(stages: list[dict[str, Any]], parameters: dict[str, Any] | 
                 items = [None]
 
             stage_results = []
+            stage_args: list[dict[str, Any]] = []
             stage_size = 0
             for item in items:
                 invocations += 1
@@ -142,8 +144,9 @@ def execute_pipeline(stages: list[dict[str, Any]], parameters: dict[str, Any] | 
                     return {"ok": False, "error": f"pipeline exceeds {MAX_INVOCATIONS} tool invocations", "stages": summaries}
                 args = _resolve(stage.get("args") or {}, outputs, parameters, item)
                 args = normalize_arguments(AVAILABLE_TOOLS_MAP[tool], args)
+                stage_args.append(dict(args))
                 try:
-                    result = AVAILABLE_TOOLS_MAP[tool](**args)
+                    result = execute_registered_tool(tool, args)
                 except Exception as exc:
                     if stage.get("optional"):
                         parsed = {"ok": False, "error": str(exc), "optional_failure": True}
@@ -178,7 +181,10 @@ def execute_pipeline(stages: list[dict[str, Any]], parameters: dict[str, Any] | 
                 stage_results.append(parsed)
 
             outputs[sid] = stage_results if foreach_spec is not None else stage_results[0]
-            summaries.append({"id": sid, "tool": tool, "ok": True, "calls": len(stage_results), "size": stage_size})
+            summaries.append({
+                "id": sid, "tool": tool, "ok": True, "calls": len(stage_results), "size": stage_size,
+                "args": stage_args[0] if len(stage_args) == 1 else stage_args,
+            })
         except Exception as exc:
             return {"ok": False, "error": f"stage {idx} ({tool}) resolution failed: {exc}", "stages": summaries}
 

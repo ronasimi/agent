@@ -100,9 +100,11 @@ def test_pending_hint_is_ephemeral_style_and_lists_only_unfinished_checks():
     assert "Do not draft the final report yet" in hint
 
 
-def test_weather_requests_require_search_and_verification():
+def test_weather_completion_is_owned_by_fact_grounding_not_generic_tool_ledger():
     ledger = TaskRequirementLedger.from_request("What is the weather forecast for the next five days?")
-    assert set(ledger.required_tools()) == {"web_search", "browse_url"}
+    # Weather may be satisfied by the structured provider or by verified web
+    # fallback, so the generic completion ledger must not hard-code one path.
+    assert ledger.required_tools() == []
 
 
 def test_display_forecast_is_evidence_reuse_followup_not_new_weather_requirement():

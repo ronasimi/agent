@@ -160,3 +160,36 @@ def test_persisted_recipe_metadata_survives_clipped_evidence_preview():
     report = validate_fact_grounding("weather in London now", [obs], current_turn_id=32, now=now)
     assert report["grounded"] is True
     assert report["evidence"]["weather"] == ["recipe:weather.current_forecast"]
+
+
+def test_structured_weather_recipe_observation_satisfies_grounding():
+    now = datetime(2026, 9, 19, 17, 48, tzinfo=timezone.utc)
+    recipe_result = '''{
+      "ok": true,
+      "stages": [
+        {"id":"place","tool":"geocode_location","ok":true},
+        {"id":"forecast","tool":"weather_forecast","ok":true},
+        {"id":"result","tool":"compose_object","ok":true}
+      ],
+      "result": {
+        "location":"London, Ontario, Canada",
+        "forecast": {
+          "provider":"Open-Meteo",
+          "daily":{"temperature_2m_max":[21,19],"temperature_2m_min":[10,9],"precipitation_probability_max":[20,40]}
+        }
+      },
+      "grounding_recovery": {"fact_type":"weather","query":"weather London Ontario next week","location":"London, Ontario, Canada"}
+    }'''
+    obs = make_observation(
+        "recipe:weather.current_forecast",
+        recipe_result,
+        at=_at(now),
+        turn_id=40,
+        arguments={"request": "weather London Ontario next week"},
+    )
+    assert obs["weather_verified"] is True
+    assert "weather_forecast" in obs["source_tools"]
+    report = validate_fact_grounding(
+        "weather in London Ontario next week", [obs], current_turn_id=40, now=now
+    )
+    assert report["grounded"] is True

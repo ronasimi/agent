@@ -183,11 +183,11 @@ def test_cancel_reminder_rejects_empty_id_before_slug_fallback():
     assert cancel_reminder("").startswith("Error:")
 
 
-def test_weather_intent_exposes_search_and_browse():
+def test_weather_intent_exposes_structured_weather_and_web_fallback():
     import tools
     tools.load_tools()
     names = {schema["function"]["name"] for schema in tools.select_tool_schemas("weather forecast for the next 5 days", max_tools=12)}
-    assert {"web_search", "browse_url"} <= names
+    assert {"geocode_location", "weather_forecast", "web_search", "browse_url"} <= names
     assert "environment_summary" not in names
 
 

@@ -13,6 +13,7 @@ from typing import Any
 
 from .config import load_config
 from .runtime import DB_PATH, DB_TIMEOUT, init_runtime_db
+from .conversation_context import DEFAULT_CONVERSATION_ID, get_active_conversation_id, normalize_conversation_id
 
 config = load_config()
 EMBED_MODEL = config.get("agent", {}).get("embed_model", "nomic-embed-text")
@@ -27,8 +28,12 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def _conversation_id(value: str | None = None) -> str:
+    return normalize_conversation_id(value or get_active_conversation_id())
+
+
 def init_db() -> None:
-    """Initialize persistent memory and runtime storage."""
+    """Initialize persistent memory, conversation, and runtime storage."""
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
         conn.execute("PRAGMA busy_timeout=15000")
@@ -37,21 +42,60 @@ def init_db() -> None:
         conn.execute("CREATE TABLE IF NOT EXISTS memory (topic TEXT PRIMARY KEY, fact TEXT, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)")
         conn.execute("CREATE TABLE IF NOT EXISTS semantic_memory (id INTEGER PRIMARY KEY AUTOINCREMENT, topic TEXT, fact TEXT, embedding TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
         conn.execute("CREATE TABLE IF NOT EXISTS chat_history (id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT, content TEXT, name TEXT, extra TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
+        chat_columns = {row[1] for row in conn.execute("PRAGMA table_info(chat_history)").fetchall()}
+        if "conversation_id" not in chat_columns:
+            conn.execute("ALTER TABLE chat_history ADD COLUMN conversation_id TEXT NOT NULL DEFAULT 'default'")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_history_conversation_id ON chat_history(conversation_id, id)")
+
+        # Keep the legacy singleton table for migration/backward compatibility,
+        # but use conversation_context as the canonical per-thread state.
         conn.execute("CREATE TABLE IF NOT EXISTS conversation_state (id INTEGER PRIMARY KEY CHECK(id = 1), summary TEXT NOT NULL DEFAULT '', compacted_through_id INTEGER NOT NULL DEFAULT 0, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)")
         state_columns = {row[1] for row in conn.execute("PRAGMA table_info(conversation_state)").fetchall()}
         if "compacted_through_id" not in state_columns:
             conn.execute("ALTER TABLE conversation_state ADD COLUMN compacted_through_id INTEGER NOT NULL DEFAULT 0")
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS tool_observations (
+        conn.execute("INSERT OR IGNORE INTO conversation_state(id, summary) VALUES (1, '')")
+
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS conversations (
+                   id TEXT PRIMARY KEY,
+                   title TEXT NOT NULL DEFAULT '',
+                   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                   updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+               )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS conversation_context (
+                   conversation_id TEXT PRIMARY KEY,
+                   summary TEXT NOT NULL DEFAULT '',
+                   compacted_through_id INTEGER NOT NULL DEFAULT 0,
+                   updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                   FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+               )"""
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO conversations(id, title) VALUES (?, ?)",
+            (DEFAULT_CONVERSATION_ID, "Current conversation"),
+        )
+        legacy = conn.execute("SELECT summary, compacted_through_id FROM conversation_state WHERE id = 1").fetchone()
+        conn.execute(
+            "INSERT OR IGNORE INTO conversation_context(conversation_id, summary, compacted_through_id) VALUES (?, ?, ?)",
+            (DEFAULT_CONVERSATION_ID, str(legacy[0] or "") if legacy else "", int(legacy[1] or 0) if legacy else 0),
+        )
+
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS tool_observations (
                 id TEXT PRIMARY KEY,
                 tool_name TEXT NOT NULL,
                 content TEXT NOT NULL,
                 char_count INTEGER NOT NULL,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+            )"""
+        )
+        obs_columns = {row[1] for row in conn.execute("PRAGMA table_info(tool_observations)").fetchall()}
+        if "conversation_id" not in obs_columns:
+            conn.execute("ALTER TABLE tool_observations ADD COLUMN conversation_id TEXT NOT NULL DEFAULT 'default'")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tool_observations_conversation_id ON tool_observations(conversation_id, created_at)")
         conn.execute("CREATE TABLE IF NOT EXISTS background_tasks (task_name TEXT PRIMARY KEY, status TEXT, output TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)")
-        conn.execute("INSERT OR IGNORE INTO conversation_state(id, summary) VALUES (1, '')")
     init_runtime_db()
 
 
@@ -63,11 +107,89 @@ def _init_checkpoint_db() -> None:
     init_runtime_db()
 
 
-def _save_message_to_db(msg: dict) -> int:
+def ensure_conversation(conversation_id: str | None = None, title: str = "") -> str:
     init_db()
+    cid = _conversation_id(conversation_id)
+    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO conversations(id, title) VALUES (?, ?)",
+            (cid, str(title or "").strip()[:120]),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO conversation_context(conversation_id) VALUES (?)",
+            (cid,),
+        )
+    return cid
+
+
+def create_conversation(title: str = "") -> dict[str, Any]:
+    cid = uuid.uuid4().hex
+    fallback = str(title or "").strip()[:120] or "New conversation"
+    ensure_conversation(cid, fallback)
+    return {"id": cid, "title": fallback}
+
+
+def rename_conversation(conversation_id: str, title: str) -> None:
+    cid = ensure_conversation(conversation_id)
+    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+        conn.execute(
+            "UPDATE conversations SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (str(title or "").strip()[:120] or "Conversation", cid),
+        )
+
+
+def list_conversations(limit: int = 50) -> list[dict[str, Any]]:
+    init_db()
+    limit = max(1, min(int(limit), 200))
+    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT c.id, c.title, c.created_at, c.updated_at,
+                   (SELECT content FROM chat_history h WHERE h.conversation_id=c.id AND h.role='user' ORDER BY h.id LIMIT 1) AS first_user,
+                   (SELECT MAX(id) FROM chat_history h WHERE h.conversation_id=c.id) AS last_message_id
+            FROM conversations c
+            ORDER BY c.updated_at DESC, COALESCE(last_message_id, 0) DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    result = []
+    for row in rows:
+        first = " ".join(str(row["first_user"] or "").split())[:64]
+        title = str(row["title"] or "").strip()
+        if not title or title in {"New conversation", "Current conversation"}:
+            title = first or title or "Conversation"
+        result.append({
+            "id": row["id"], "title": title, "created_at": row["created_at"],
+            "updated_at": row["updated_at"], "last_message_id": int(row["last_message_id"] or 0),
+        })
+    return result
+
+
+def delete_conversation(conversation_id: str) -> bool:
+    init_db()
+    cid = _conversation_id(conversation_id)
+    if cid == DEFAULT_CONVERSATION_ID:
+        clear_chat_history(cid)
+        return True
+    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+        conn.execute("DELETE FROM chat_history WHERE conversation_id = ?", (cid,))
+        conn.execute("DELETE FROM tool_observations WHERE conversation_id = ?", (cid,))
+        conn.execute("DELETE FROM conversation_context WHERE conversation_id = ?", (cid,))
+        try:
+            conn.execute("DELETE FROM working_states WHERE conversation_id = ?", (cid,))
+        except sqlite3.Error:
+            pass
+        cursor = conn.execute("DELETE FROM conversations WHERE id = ?", (cid,))
+    return bool(cursor.rowcount)
+
+
+def _save_message_to_db(msg: dict, conversation_id: str | None = None) -> int:
+    cid = ensure_conversation(conversation_id)
     role = msg.get("role", "")
     content = msg.get("content", "")
-    name = msg.get("name")
+    name = msg.get("name") or msg.get("tool_name")
     extra_data = {}
     for key in ("tool_calls", "tool_call_id"):
         if key in msg:
@@ -75,49 +197,56 @@ def _save_message_to_db(msg: dict) -> int:
     extra = json.dumps(extra_data, ensure_ascii=False) if extra_data else None
     with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
         cursor = conn.execute(
-            "INSERT INTO chat_history(role, content, name, extra) VALUES (?, ?, ?, ?)",
-            (role, content, name, extra),
+            "INSERT INTO chat_history(role, content, name, extra, conversation_id) VALUES (?, ?, ?, ?, ?)",
+            (role, content, name, extra, cid),
         )
+        if role == "user":
+            first = " ".join(str(content or "").split())[:80]
+            if first:
+                conn.execute(
+                    "UPDATE conversations SET title = CASE WHEN title IN ('', 'New conversation', 'Current conversation') THEN ? ELSE title END, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (first, cid),
+                )
+        else:
+            conn.execute("UPDATE conversations SET updated_at=CURRENT_TIMESTAMP WHERE id=?", (cid,))
         return int(cursor.lastrowid)
 
 
-def _load_chat_history_from_db(limit: int = 20, *, include_compacted: bool = False) -> list[dict]:
-    """Load recent model history or, for export only, the complete stored chat.
-
-    Normal model/UI history remains bounded to uncompacted rows. ``include_compacted``
-    is deliberately opt-in so copying/exporting the conversation can include the
-    original rows that have already been summarized out of the model context.
-    """
-    init_db()
+def _load_chat_history_from_db(
+    limit: int = 20, *, include_compacted: bool = False, conversation_id: str | None = None
+) -> list[dict]:
+    """Load bounded history for one conversation, or complete rows for export."""
+    cid = ensure_conversation(conversation_id)
     requested_limit = int(limit)
-    if include_compacted:
-        # Export callers may pass 0 to request every stored row. Ordinary model/UI
-        # history remains bounded below and never takes this unbounded path.
-        export_limit = 0 if requested_limit <= 0 else min(requested_limit, 100000)
-    else:
-        export_limit = max(1, min(requested_limit, 200))
+    export_limit = (0 if requested_limit <= 0 else min(requested_limit, 100000)) if include_compacted else max(1, min(requested_limit, 200))
     with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
         if include_compacted:
             if export_limit == 0:
                 rows = conn.execute(
-                    "SELECT id, role, content, name, extra FROM chat_history ORDER BY id DESC"
+                    "SELECT id, role, content, name, extra FROM chat_history WHERE conversation_id=? ORDER BY id DESC",
+                    (cid,),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT id, role, content, name, extra FROM chat_history ORDER BY id DESC LIMIT ?",
-                    (export_limit,),
+                    "SELECT id, role, content, name, extra FROM chat_history WHERE conversation_id=? ORDER BY id DESC LIMIT ?",
+                    (cid, export_limit),
                 ).fetchall()
         else:
-            row = conn.execute("SELECT compacted_through_id FROM conversation_state WHERE id = 1").fetchone()
+            row = conn.execute("SELECT compacted_through_id FROM conversation_context WHERE conversation_id = ?", (cid,)).fetchone()
             watermark = int(row[0] or 0) if row else 0
+            if cid == DEFAULT_CONVERSATION_ID:
+                # Honor legacy callers that still update the singleton state
+                # directly during migration; canonical writes keep both in sync.
+                legacy = conn.execute("SELECT compacted_through_id FROM conversation_state WHERE id = 1").fetchone()
+                watermark = max(watermark, int(legacy[0] or 0) if legacy else 0)
             rows = conn.execute(
-                "SELECT id, role, content, name, extra FROM chat_history WHERE id > ? ORDER BY id DESC LIMIT ?",
-                (watermark, export_limit),
+                "SELECT id, role, content, name, extra FROM chat_history WHERE conversation_id=? AND id > ? ORDER BY id DESC LIMIT ?",
+                (cid, watermark, export_limit),
             ).fetchall()
     rows.reverse()
     result = []
     for message_id, role, content, name, extra in rows:
-        msg = {"role": role, "content": content or "", "_db_id": int(message_id)}
+        msg = {"role": role, "content": content or "", "_db_id": int(message_id), "_conversation_id": cid}
         if name:
             msg["name"] = name
         if extra:
@@ -129,53 +258,56 @@ def _load_chat_history_from_db(limit: int = 20, *, include_compacted: bool = Fal
     return result
 
 
-def clear_chat_history() -> str:
+def clear_chat_history(conversation_id: str | None = None) -> str:
+    cid = ensure_conversation(conversation_id)
     with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
-        conn.execute("DELETE FROM chat_history")
-        conn.execute("DELETE FROM tool_observations")
-        conn.execute("UPDATE conversation_state SET summary = '', compacted_through_id = 0, updated_at = CURRENT_TIMESTAMP WHERE id = 1")
+        conn.execute("DELETE FROM chat_history WHERE conversation_id=?", (cid,))
+        conn.execute("DELETE FROM tool_observations WHERE conversation_id=?", (cid,))
+        conn.execute("UPDATE conversation_context SET summary = '', compacted_through_id = 0, updated_at = CURRENT_TIMESTAMP WHERE conversation_id = ?", (cid,))
+        if cid == DEFAULT_CONVERSATION_ID:
+            conn.execute("UPDATE conversation_state SET summary = '', compacted_through_id = 0, updated_at = CURRENT_TIMESTAMP WHERE id = 1")
     try:
         from .working_state import WorkingStateStore
-        WorkingStateStore().clear()
+        WorkingStateStore(conversation_id=cid).clear()
     except Exception:
         pass
-    return "Chat history, rolling context summary, and harness working state cleared."
+    return "Conversation history, rolling context summary, and harness working state cleared."
 
 
-def get_conversation_summary() -> str:
-    init_db()
+def get_conversation_summary(conversation_id: str | None = None) -> str:
+    cid = ensure_conversation(conversation_id)
     with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
-        row = conn.execute("SELECT summary FROM conversation_state WHERE id = 1").fetchone()
+        row = conn.execute("SELECT summary FROM conversation_context WHERE conversation_id = ?", (cid,)).fetchone()
     return row[0] if row else ""
 
 
-def set_conversation_summary(summary: str) -> None:
-    init_db()
+def set_conversation_summary(summary: str, conversation_id: str | None = None) -> None:
+    cid = ensure_conversation(conversation_id)
     with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
         conn.execute(
-            "INSERT INTO conversation_state(id, summary, updated_at) VALUES(1, ?, CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET summary=excluded.summary, updated_at=excluded.updated_at",
-            (str(summary or "").strip(),),
+            "INSERT INTO conversation_context(conversation_id, summary, updated_at) VALUES(?, ?, CURRENT_TIMESTAMP) ON CONFLICT(conversation_id) DO UPDATE SET summary=excluded.summary, updated_at=excluded.updated_at",
+            (cid, str(summary or "").strip()),
         )
+        if cid == DEFAULT_CONVERSATION_ID:
+            conn.execute("UPDATE conversation_state SET summary=?, updated_at=CURRENT_TIMESTAMP WHERE id=1", (str(summary or "").strip(),))
 
 
-def get_compacted_through_id() -> int:
-    """Return the durable chat-history watermark included in the rolling summary."""
-    init_db()
+def get_compacted_through_id(conversation_id: str | None = None) -> int:
+    cid = ensure_conversation(conversation_id)
     with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
-        row = conn.execute("SELECT compacted_through_id FROM conversation_state WHERE id = 1").fetchone()
+        row = conn.execute("SELECT compacted_through_id FROM conversation_context WHERE conversation_id = ?", (cid,)).fetchone()
     return int(row[0] or 0) if row else 0
 
 
-def get_messages_for_compaction(through_id: int) -> list[dict[str, Any]]:
-    """Load uncompacted messages up to a fixed id for a background compaction job."""
-    init_db()
+def get_messages_for_compaction(through_id: int, conversation_id: str | None = None) -> list[dict[str, Any]]:
+    cid = ensure_conversation(conversation_id)
     through_id = max(0, int(through_id))
     with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
-        state = conn.execute("SELECT compacted_through_id FROM conversation_state WHERE id = 1").fetchone()
+        state = conn.execute("SELECT compacted_through_id FROM conversation_context WHERE conversation_id = ?", (cid,)).fetchone()
         watermark = int(state[0] or 0) if state else 0
         rows = conn.execute(
-            "SELECT id, role, content, name, extra FROM chat_history WHERE id > ? AND id <= ? ORDER BY id",
-            (watermark, through_id),
+            "SELECT id, role, content, name, extra FROM chat_history WHERE conversation_id=? AND id > ? AND id <= ? ORDER BY id",
+            (cid, watermark, through_id),
         ).fetchall()
     messages = []
     for message_id, role, content, name, extra in rows:
@@ -191,54 +323,53 @@ def get_messages_for_compaction(through_id: int) -> list[dict[str, Any]]:
     return messages
 
 
-def apply_conversation_compaction(summary: str, through_id: int) -> bool:
-    """Atomically advance the rolling summary and its chat-history watermark."""
+def apply_conversation_compaction(summary: str, through_id: int, conversation_id: str | None = None) -> bool:
     summary = str(summary or "").strip()
     through_id = max(0, int(through_id))
     if not summary or not through_id:
         return False
-    init_db()
+    cid = ensure_conversation(conversation_id)
     with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
         cursor = conn.execute(
             """
-            UPDATE conversation_state
+            UPDATE conversation_context
             SET summary = ?, compacted_through_id = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = 1 AND compacted_through_id < ?
-              AND EXISTS (SELECT 1 FROM chat_history WHERE id = ?)
+            WHERE conversation_id = ? AND compacted_through_id < ?
+              AND EXISTS (SELECT 1 FROM chat_history WHERE conversation_id=? AND id = ?)
             """,
-            (summary[:8000], through_id, through_id, through_id),
+            (summary[:8000], through_id, cid, through_id, cid, through_id),
         )
+        if cid == DEFAULT_CONVERSATION_ID and cursor.rowcount == 1:
+            conn.execute("UPDATE conversation_state SET summary=?, compacted_through_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=1", (summary[:8000], through_id))
     return cursor.rowcount == 1
 
 
-def store_tool_observation(tool_name: str, content: str) -> str:
-    """Persist a large tool result and return an opaque retrieval handle."""
-    init_db()
+def store_tool_observation(tool_name: str, content: str, conversation_id: str | None = None) -> str:
+    cid = ensure_conversation(conversation_id)
     observation_id = uuid.uuid4().hex
     text = str(content)
     with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
         conn.execute(
-            "INSERT INTO tool_observations(id, tool_name, content, char_count) VALUES (?, ?, ?, ?)",
-            (observation_id, str(tool_name or "tool"), text, len(text)),
+            "INSERT INTO tool_observations(id, tool_name, content, char_count, conversation_id) VALUES (?, ?, ?, ?, ?)",
+            (observation_id, str(tool_name or "tool"), text, len(text), cid),
         )
     return observation_id
 
 
 def read_observation(observation_id: str = "", offset: int = 0, length: int = 5000) -> str:
-    """Read a bounded slice of a large tool result previously stored by the harness."""
     observation_id = str(observation_id or "").strip()
     if not observation_id:
         return "Error: Missing required 'observation_id' parameter."
     offset = max(0, int(offset))
     length = max(100, min(int(length), 10000))
-    init_db()
+    cid = ensure_conversation()
     with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
         row = conn.execute(
-            "SELECT tool_name, content, char_count FROM tool_observations WHERE id = ?",
-            (observation_id,),
+            "SELECT tool_name, content, char_count FROM tool_observations WHERE id = ? AND conversation_id = ?",
+            (observation_id, cid),
         ).fetchone()
     if not row:
-        return f"Observation '{observation_id}' was not found."
+        return f"Observation '{observation_id}' was not found in this conversation."
     tool_name, content, char_count = row
     chunk = str(content)[offset:offset + length]
     return json.dumps(
@@ -254,7 +385,6 @@ def read_observation(observation_id: str = "", offset: int = 0, length: int = 50
         ensure_ascii=False,
         indent=2,
     )
-
 
 def remember(topic: str = "general_knowledge", fact: str = "Recorded by agent action") -> str:
     """Persist an unchanging user/system fact for later retrieval."""

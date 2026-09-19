@@ -67,7 +67,8 @@ The Web UI provides a ChatGPT-style local interface with:
 - streaming responses and inline tool activity
 - a status message directly below the active user prompt
 - persistent command history with Up/Down navigation
-- conversation search
+- durable per-conversation history in the Recent sidebar
+- non-destructive New Chat creation with isolated working state/observations
 - a complete-chat copy button
 - collapsible navigation and workspace sidebars
 - drag-and-drop attachments
@@ -77,6 +78,10 @@ The Web UI provides a ChatGPT-style local interface with:
 - persistent branding and profile images
 
 The full Al Agent image is used as the application logo. The yellow smiley face is used as the browser favicon.
+
+On first run, the Web UI opens a profile questionnaire for stable user context (name, role, timezone, optional location/email/interests, response style, research depth, and optional profile image). **Profile setup** in the sidebar can rerun it and replace questionnaire-owned context. The CLI runs the same OOBE on an interactive TTY and exposes `/profile` to rerun it.
+
+Each browser thread has its own conversation ID, chat rows, rolling summary, tool observations, compaction watermark, and working state. Creating a new chat no longer deletes the previous thread.
 
 ### User profile picture
 
@@ -128,6 +133,7 @@ Examples of available tool families include:
 - **Files/text:** `read_text`, `read_lines`, `text_search`, `json_query`, `write_file`
 - **Network:** `local_subnets`, `scan_subnet`, `dns_diagnose`, `network_path`, `http_probe`
 - **Web:** `web_search`, `browse_url`, `extract_document`, `page_diff`
+- **Weather:** `geocode_location`, `weather_forecast` (structured first; verified web fallback)
 - **Git/repository:** `repo_status`, `repo_diff`, `repo_checks`, `get_repo_map`
 - **Research:** `enqueue_research`, `get_research_status`
 - **Automation:** `schedule_reminder`, `list_reminders`, durable jobs
@@ -145,7 +151,7 @@ When a successful workflow does not match an existing recipe, the agent can ask 
 Typical examples:
 
 ```text
-weather lookup       web_search -> browse_url
+weather lookup       geocode_location -> weather_forecast  (web_search -> browse_url fallback)
 host health check    host_snapshot -> pressure_snapshot -> filesystem_snapshot
 LAN discovery        local_subnets -> scan_subnet
 repository review    get_repo_map -> repo_status -> repo_checks
@@ -239,7 +245,7 @@ If normal correction still fails, the harness now has one final fall-through bef
 
 Fact-retrieval turns have a deterministic finalization gate in addition to the model-based loop validator. The gate classifies the fact type requested by the user and checks harness-owned observation provenance/content before a factual answer can finalize. A successful unrelated observation does not satisfy the gate.
 
-Weather is deliberately strict: a current-turn answer requires weather-bearing `web_search` **and** `browse_url` observations, a verified weather recipe/API observation, or a sufficiently fresh carried weather observation. `current_time` alone therefore produces a `missing_evidence` validator event. The harness then executes the built-in `weather.current_forecast` recipe (search → verified page → composed evidence), falling back to the same typed primitive chain if the recipe store is unavailable. Candidate factual prose is buffered until this gate passes, so a premature weather answer is discarded rather than streamed as a final response.
+Weather is deliberately strict: a current-turn answer requires a weather-bearing structured provider observation, a verified weather recipe, linked `web_search` + `browse_url` observations, or a sufficiently fresh carried weather observation. `current_time` never satisfies weather. Before the first answer generation, the harness executes the built-in `weather.current_forecast` recipe (`geocode_location` → `weather_forecast` → composed evidence) using the requested location or the explicitly stored OOBE location. If the structured provider fails, it falls back to `web_search` → `browse_url`. Pre-generation evidence acquisition is normal tool work and does not surface a `missing_evidence` validator warning; that warning is reserved for an actual recovery/finalization failure. Candidate factual prose is buffered until the grounding gate passes.
 
 The default stored-weather freshness window is 10,800 seconds (3 hours) and can be changed with `agent.grounding.weather_max_age_seconds`. The grounding registry also covers current time, host state, network state, repository state, and explicit web-fact retrieval, and is intended to be extended with additional fact types as typed tools are added.
 
@@ -273,7 +279,7 @@ Important defaults:
 agent:
   model: "qwen3.5:4b"
   fast_model: "qwen3.5:2b"
-  fast_model_keep_alive: 0
+  fast_model_keep_alive: "2m"
   thinking_default: false
   max_iterations: 12
   max_tools_per_turn: 12
@@ -287,7 +293,7 @@ agent:
 
   warmup:
     enabled: true
-    prime_system_prefix: true
+    prime_system_prefix: false
 
   working_state:
     minimize_schema_churn: true
@@ -313,7 +319,7 @@ agent:
     validator_fallback_max_tools: 12
 ```
 
-`fast_model_keep_alive: 0` is deliberate: every fast-model validator/research request asks Ollama to unload that model immediately after the request. This lowers host memory pressure at the cost of a possible cold-load delay the next time the fast model is needed. The interactive main model keeps its existing residency behavior.
+`fast_model_keep_alive: "2m"` keeps the fast validator/research model resident briefly so clustered recovery calls avoid repeated cold loads. If the main and fast models cannot coexist comfortably, reduce the TTL or set it to `0`; use the emitted `load_ms` metric to decide on the target machine.
 
 ### Ollama server settings
 
@@ -344,7 +350,7 @@ The harness is optimized around local-model constraints:
 - fast-model offload for validation and research support
 - removal of completed requirement schemas during long checklist tasks
 
-When performance telemetry is enabled, responses can show TTFT, prompt tokens, cached tokens, prefill throughput, generation throughput, and load time when Ollama reports them.
+Performance telemetry separates user-visible and backend costs: queue wait, turn preparation, model load, prompt evaluation, model TTFT, first visible answer, cache-hit percentage, generation counts, and total turn time. The latest measurements are also persisted in monitor state as `agent.last_model_stats` and `agent.last_turn_metrics`.
 
 ### Time to first token
 
@@ -352,13 +358,13 @@ On a local server the dominant term in TTFT is prompt prefill, and Ollama/llama.
 
 - **Volatile blocks go last.** The harness working state and evidence digest are rewritten on every tool-loop iteration. They are emitted after the stable system prompt and conversation history (`context.volatile_blocks_last`), so a changed working state no longer invalidates the cached prefix. Set it to `false` for a chat template that requires every system message to precede the conversation.
 - **The tool set stays byte-stable.** Pruning satisfied requirement schemas, and reordering them pending-first, both invalidate the whole prefix. Under `working_state.minimize_schema_churn` they happen only during an iteration that must change the set anyway to expose a still-pending requirement. Repeats of a completed check are still suppressed deterministically, and the pending list is still carried by the working state.
-- **Warm-up loads weights and primes the prefix.** Both frontends start a background warm-up (`warmup.enabled`) that loads the model and, with `warmup.prime_system_prefix`, sends the system prompt once at `num_predict: 1` so the first real turn prefills only what that turn adds. The warm-up deliberately uses `main_options`, because Ollama keys a loaded runner by context size.
+- **Warm-up loads weights; prefix priming is measurement-driven.** Both frontends start a background warm-up (`warmup.enabled`) that loads the model using the same `main_options` as interactive turns. `warmup.prime_system_prefix` defaults to `false`: tool-capable chat templates may place dynamic schemas before messages, so a system-only prime is not guaranteed to be a reusable prefix. Use `scripts/benchmark_warmup.py` and `prompt_eval_cached_count` before enabling it.
 - **Background compaction does not evict the foreground model.** When `compaction_model` is empty the worker reuses the interactive model, and it now reuses the interactive `num_ctx` as well. Requesting the same model with a smaller context would unload and reload it, making the next user turn pay a full model load plus a full prefill.
 - **Harness control notes are de-duplicated.** Idempotent guidance ("the previous call was rejected", "the candidate answer was discarded") is appended once per turn instead of once per iteration, so the prompt stops growing when the loop is not making progress.
 - **Selection has a relevance floor.** A single incidental description-word match no longer fills the per-turn schema budget, so conversational turns send no tool schemas at all instead of a dozen irrelevant ones.
 - **The fallback finalizer streams.** The "safety limit reached" summary is streamed and emits deltas rather than blocking until the whole answer is generated.
 
-`scripts/simulate_turns.py` measures the prefix-reuse effect of these without a model server.
+`scripts/simulate_turns.py` measures prompt-prefix behavior without a model server. On the target Ollama host, `scripts/benchmark_warmup.py` compares cold, weight-preloaded, and system-prefix-primed turns using the real harness options and reports load/prefill/cache metrics.
 
 ## Self-optimization
 

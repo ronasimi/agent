@@ -26,6 +26,9 @@
       <button id="searchChat" class="sidebar-action">
         <span class="side-icon">⌕</span><span>Search</span>
       </button>
+      <button id="profileSetup" class="sidebar-action">
+        <span class="side-icon">◎</span><span>Profile setup</span>
+      </button>
 
       <nav class="nav" aria-label="Agent views">
         <button class="nav-item" data-panel="state"><span class="side-icon">◈</span><span>Working state</span></button>
@@ -34,9 +37,7 @@
       </nav>
 
       <div class="sidebar-section-title">Recent</div>
-      <button class="recent-item active" data-panel="chat" title="Current shared conversation">
-        <span id="recentTitle">Current conversation</span>
-      </button>
+      <div id="recentConversations" class="recent-conversations" aria-label="Recent conversations"></div>
 
       <div class="sidebar-footer">
         <div class="model-summary">
@@ -126,6 +127,25 @@
       <div id="workspaceFoot" class="workspace-foot muted"></div>
     </aside>
   </div>
+  <dialog id="onboardingDialog" class="onboarding-dialog">
+    <form id="onboardingForm" method="dialog">
+      <div class="onboarding-head"><div><h2>Set up Al Agent</h2><p>These details stay in the local agent knowledge base and help with future tasks.</p></div></div>
+      <div class="onboarding-grid">
+        <label>Name<input id="oobeName" autocomplete="name" /></label>
+        <label>Role / occupation<input id="oobeRole" /></label>
+        <label>Timezone<input id="oobeTimezone" placeholder="America/Toronto" /></label>
+        <label>Location<input id="oobeLocation" placeholder="City, region, country" /></label>
+        <label>Email (optional)<input id="oobeEmail" type="email" autocomplete="email" /></label>
+        <label>Interests<input id="oobeInterests" placeholder="Linux, networking, research" /></label>
+        <label>Response style<select id="oobeStyle"><option value="concise">Concise</option><option value="balanced">Balanced</option><option value="detailed">Detailed</option></select></label>
+        <label>Research depth<select id="oobeResearch"><option value="quick">Quick</option><option value="balanced" selected>Balanced</option><option value="deep">Deep</option></select></label>
+        <label class="onboarding-wide">Profile picture (optional)<input id="oobePhoto" type="file" accept="image/png,image/jpeg,image/webp" /></label>
+      </div>
+      <div id="oobeError" class="onboarding-error" role="alert"></div>
+      <div class="onboarding-actions"><button id="oobeSave" type="submit">Save profile</button></div>
+    </form>
+  </dialog>
+
   <script src="/static/command_history.js"></script>
   <script src="/static/rich_output.js"></script>
   <script src="/static/app.js"></script>

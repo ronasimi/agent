@@ -5,7 +5,7 @@ import importlib
 import pkgutil
 from . import provider_groups
 
-MUTATING_TOOLS = {'set_profile_image', 'image_crop', 'enqueue_self_optimization', 'write_file', 'execute_python', 'reload_tools', 'render_document_page', 'remember_semantic', 'cancel_reminder', 'create_or_update_tool', 'install_package', 'enqueue_research', 'cancel_background_job', 'schedule_reminder', 'queue_work', 'generate_pdf_report', 'save_recipe', 'image_convert', 'execute_shell', 'page_diff', 'take_web_screenshot', 'map_network', 'notify_desktop', 'archive_extract', 'update_work_status', 'remember', 'image_resize'}
+MUTATING_TOOLS = {'set_user_identity', 'set_research_preference', 'set_profile_image', 'image_crop', 'enqueue_self_optimization', 'write_file', 'execute_python', 'reload_tools', 'render_document_page', 'remember_semantic', 'cancel_reminder', 'create_or_update_tool', 'install_package', 'enqueue_research', 'cancel_background_job', 'schedule_reminder', 'queue_work', 'generate_pdf_report', 'save_recipe', 'image_convert', 'execute_shell', 'page_diff', 'take_web_screenshot', 'map_network', 'notify_desktop', 'archive_extract', 'update_work_status', 'remember', 'image_resize'}
 
 REPEAT_SAFE_TOOLS = {'generate_pdf_report', 'take_web_screenshot', 'map_network'}
 
@@ -45,10 +45,10 @@ TOOL_BUNDLES = (
      ('execute_python',)),
     ({'benchmark', 'self', 'performance', 'optimization', 'refactor', 'optimize'},
      ('get_repo_map', 'search_repo_symbols', 'read_repo_symbol', 'repo_status', 'repo_diff', 'repo_checks', 'dependency_audit', 'tool_health', 'enqueue_self_optimization', 'get_self_optimization_status', 'list_self_optimization_candidates')),
-    ({'source', 'url', 'sources', 'search', 'web', 'site', 'research', 'internet'},
-     ('web_search', 'browse_url', 'page_metadata', 'page_links', 'discover_site', 'read_feed', 'extract_document', 'page_fingerprint', 'page_diff', 'fetch_url', 'extract_readable_text', 'extract_links', 'extract_metadata', 'extract_images', 'extract_jsonld', 'take_web_screenshot', 'enqueue_research', 'get_research_status', 'read_observation')),
+    ({'source', 'url', 'sources', 'search', 'web', 'site', 'research', 'internet', 'news', 'headline', 'headlines', 'latest'},
+     ('news_search', 'web_search', 'browse_url', 'page_metadata', 'page_links', 'discover_site', 'read_feed', 'extract_document', 'page_fingerprint', 'page_diff', 'fetch_url', 'extract_readable_text', 'extract_links', 'extract_metadata', 'extract_images', 'extract_jsonld', 'take_web_screenshot', 'enqueue_research', 'get_research_status', 'read_observation')),
     ({'weather', 'forecast', 'forecasts', 'precipitation', 'rainfall', 'snowfall'},
-     ('web_search', 'browse_url', 'read_observation')),
+     ('geocode_location', 'weather_forecast', 'web_search', 'browse_url', 'read_observation')),
     ({'media', 'images', 'photo', 'screenshots', 'vision', 'image', 'screenshot', 'picture', 'visual', 'profile', 'avatar'},
      ('attach_media', 'image_info', 'mime_type', 'profile_image_info', 'set_profile_image')),
     ({'clock', 'time', 'local', 'today', 'utc', 'timezone', 'date'},
@@ -67,8 +67,8 @@ TOOL_BUNDLES = (
      ('search_recipes', 'list_recipes', 'run_recipe', 'run_pipeline', 'save_recipe', 'recipe_coverage')),
     ({'path', 'hash', 'mime', 'folder', 'directory', 'find', 'json', 'tail', 'diff', 'regex', 'grep'},
      ('find_paths', 'list_directory', 'path_stat', 'read_text', 'read_lines', 'directory_size', 'tail_file', 'file_hash', 'mime_type', 'text_search', 'regex_extract', 'regex_replace', 'text_split', 'text_head', 'text_tail', 'text_count', 'text_sort', 'text_unique', 'json_query', 'json_filter', 'json_sort', 'json_head', 'json_count', 'json_keys', 'json_diff', 'yaml_query', 'csv_query', 'csv_summary', 'text_diff', 'run_pipeline')),
-    ({'remember', 'preference', 'recall'},
-     ('search_memory', 'remember')),
+    ({'remember', 'preference', 'recall', 'profile', 'identity'},
+     ('search_memory', 'remember', 'set_user_identity', 'set_research_preference', 'profile_image_info')),
     ({'timer', 'schedule', 'remind', 'reminder'},
      ('schedule_reminder', 'cancel_reminder', 'list_reminders')),
 )

@@ -107,3 +107,26 @@ def test_retryable_transport_error_classifies_server_and_rate_limit_errors():
     assert is_retryable_transport_error(ResponseError(429))
     assert is_retryable_transport_error(ResponseError(503))
     assert not is_retryable_transport_error(ResponseError(404))
+
+
+def test_textual_readonly_tool_call_can_be_repaired(monkeypatch):
+    from al_agent import turn_support
+
+    def demo(query=""):
+        return query
+    demo.__name__ = "web_search"
+    demo._agent_tool_name = "web_search"
+    demo._agent_tool_readonly = True
+    monkeypatch.setitem(turn_support.AVAILABLE_TOOLS_MAP, "web_search", demo)
+    monkeypatch.setitem(turn_support.TOOL_METADATA, "web_search", {"readonly": True})
+    monkeypatch.setattr(turn_support, "get_tool_schema", lambda name: {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+        },
+    })
+    text = '''To find it, I will search.\n\n**Tool call:**\n```json\n{"tool_name":"web_search","query":"London ON news","params":{"depth":"balanced"}}\n```'''
+    calls, name = turn_support._recover_textual_readonly_tool_call(text, {"web_search"})
+    assert name == "web_search"
+    assert calls[0]["function"]["arguments"] == {"query": "London ON news"}

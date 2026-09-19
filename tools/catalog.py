@@ -6,6 +6,7 @@ loaded through the same registry contract.
 """
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import inspect
 import re
@@ -21,6 +22,36 @@ from .providers import (
     TOOL_SELECTION_STOPWORDS,
 )
 from .tool_registry import agent_tool, function_schema, normalize_arguments
+try:
+    from .builtin_manifest import BUILTIN_MANIFEST
+except ImportError:  # bootstrap path used by scripts/generate_builtin_manifest.py
+    BUILTIN_MANIFEST = []
+
+
+class LazyBuiltinTool:
+    """Callable proxy that defers importing a builtin implementation until use."""
+    def __init__(self, entry: dict):
+        self.module_name = str(entry["module"])
+        self.function_name = str(entry["function"])
+        self.__name__ = self.function_name
+        self._agent_tool_name = self.function_name
+        self._agent_tool = True
+        self._agent_tool_schema = entry["schema"]
+        self._agent_tool_readonly = bool(entry.get("readonly", True))
+        self._agent_tool_repeat_safe = bool(entry.get("repeat_safe", False))
+        self._agent_tool_safe_artifact = bool(entry.get("safe_artifact", False))
+        self._agent_tool_timeout = entry.get("timeout")
+        self.__doc__ = str(entry.get("schema", {}).get("function", {}).get("description") or self.function_name)
+        self._loaded = None
+
+    def load(self):
+        if self._loaded is None:
+            module = importlib.import_module(f"tools.{self.module_name}")
+            self._loaded = getattr(module, self.function_name)
+        return self._loaded
+
+    def __call__(self, **kwargs):
+        return self.load()(**kwargs)
 
 ALL_TOOLS: list = []
 AVAILABLE_TOOLS_MAP: dict[str, object] = {}
@@ -49,10 +80,17 @@ def load_tools() -> tuple[int, dict[str, str]]:
     ALL_TOOLS.clear(); AVAILABLE_TOOLS_MAP.clear(); TOOL_SCHEMAS.clear(); TOOL_METADATA.clear()
     errors: dict[str, str] = {}
 
+    manifest = {(str(item.get("module")), str(item.get("function"))): item for item in BUILTIN_MANIFEST}
     for module_name, function_name in BUILTINS:
         try:
-            module = __import__(f"tools.{module_name}", fromlist=[function_name])
-            _register(getattr(module, function_name), builtin_name=function_name)
+            entry = manifest.get((module_name, function_name))
+            if entry is None:
+                # Safe fallback for a newly added builtin whose manifest has not
+                # yet been regenerated; only that provider pays eager import.
+                module = importlib.import_module(f"tools.{module_name}")
+                _register(getattr(module, function_name), builtin_name=function_name)
+            else:
+                _register(LazyBuiltinTool(entry), builtin_name=function_name)
         except Exception as exc:
             errors[f"{module_name}.{function_name}"] = str(exc)
 
@@ -184,7 +222,9 @@ def get_tools_prompt_summary(compact: bool = False) -> str:
         )
     lines = ["\n\n### Tool inventory", "Tools are explicitly typed; native schemas are authoritative."]
     for name, func in AVAILABLE_TOOLS_MAP.items():
-        doc = (inspect.getdoc(func) or "No description.").splitlines()[0]
+        schema = get_tool_schema(name) or {}
+        description = str((schema.get("function") or {}).get("description") or "").strip()
+        doc = (description or inspect.getdoc(func) or "No description.").splitlines()[0]
         flags = "read-only" if TOOL_METADATA[name].get("readonly") else "mutating"
         lines.append(f"- **{name}** ({flags}): {doc}")
     return "\n".join(lines)

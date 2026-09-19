@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .runtime import DB_PATH, DB_TIMEOUT, utc_now
+from .conversation_context import DEFAULT_CONVERSATION_ID, get_active_conversation_id, normalize_conversation_id
 
 _STATE_ID = 1
 _DEFAULT_LIMITS = {
@@ -59,6 +60,8 @@ def _connect() -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=15000")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
+    # Legacy singleton retained for older installations/tests; new code uses the
+    # conversation-keyed table so browser tabs and saved chats cannot share state.
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS working_state (
@@ -70,14 +73,32 @@ def _connect() -> sqlite3.Connection:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS working_states (
+            conversation_id TEXT PRIMARY KEY,
+            turn_id INTEGER NOT NULL DEFAULT 0,
+            version INTEGER NOT NULL DEFAULT 3,
+            state_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    legacy = conn.execute("SELECT turn_id, state_json, updated_at FROM working_state WHERE id=1").fetchone()
+    if legacy:
+        conn.execute(
+            "INSERT OR IGNORE INTO working_states(conversation_id, turn_id, version, state_json, updated_at) VALUES (?, ?, 3, ?, ?)",
+            (DEFAULT_CONVERSATION_ID, int(legacy[0] or 0), str(legacy[1] or '{}'), str(legacy[2] or utc_now())),
+        )
     return conn
 
 
 def _empty_state() -> dict[str, Any]:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "turn_id": 0,
         "task_epoch": 0,
+        "task_frame": {},
         "status": "idle",
         "objective": "",
         "background": {"rolling_summary": "", "recent_context": "", "recalled_context": ""},
@@ -93,9 +114,14 @@ def _empty_state() -> dict[str, Any]:
     }
 
 
-def _load() -> dict[str, Any]:
+def _resolved_conversation_id(conversation_id: str | None = None) -> str:
+    return normalize_conversation_id(conversation_id or get_active_conversation_id())
+
+
+def _load(conversation_id: str | None = None) -> dict[str, Any]:
+    cid = _resolved_conversation_id(conversation_id)
     with _connect() as conn:
-        row = conn.execute("SELECT state_json FROM working_state WHERE id = ?", (_STATE_ID,)).fetchone()
+        row = conn.execute("SELECT state_json FROM working_states WHERE conversation_id = ?", (cid,)).fetchone()
     if not row:
         return _empty_state()
     try:
@@ -104,34 +130,41 @@ def _load() -> dict[str, Any]:
         return _empty_state()
     if not isinstance(value, dict):
         return _empty_state()
-    # Forward-fill keys from older state versions without carrying old task-local
-    # values into a new task implicitly.
     merged = _empty_state()
     merged.update(value)
     merged.setdefault("task_epoch", 0)
+    merged.setdefault("task_frame", {})
     merged.setdefault("requirements", [])
     return merged
 
 
-def _save(state: dict[str, Any]) -> None:
+def _save(state: dict[str, Any], conversation_id: str | None = None) -> None:
+    cid = _resolved_conversation_id(conversation_id)
     state = dict(state or {})
-    state["schema_version"] = 2
+    state["schema_version"] = 3
     state["updated_at"] = utc_now()
     turn_id = int(state.get("turn_id") or 0)
     with _connect() as conn:
         conn.execute(
             """
-            INSERT INTO working_state(id, turn_id, version, state_json, updated_at)
-            VALUES(1, ?, 2, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
+            INSERT INTO working_states(conversation_id, turn_id, version, state_json, updated_at)
+            VALUES(?, ?, 3, ?, ?)
+            ON CONFLICT(conversation_id) DO UPDATE SET
                 turn_id=excluded.turn_id,
                 version=excluded.version,
                 state_json=excluded.state_json,
                 updated_at=excluded.updated_at
             """,
-            (turn_id, _json(state), state["updated_at"]),
+            (cid, turn_id, _json(state), state["updated_at"]),
         )
-
+        if cid == DEFAULT_CONVERSATION_ID:
+            conn.execute(
+                """INSERT INTO working_state(id, turn_id, version, state_json, updated_at)
+                   VALUES(1, ?, 3, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET turn_id=excluded.turn_id, version=excluded.version,
+                     state_json=excluded.state_json, updated_at=excluded.updated_at""",
+                (turn_id, _json(state), state["updated_at"]),
+            )
 
 def _extract_constraints(user_text: str, policy_note: str, limit: int = 8) -> list[str]:
     items: list[str] = []
@@ -203,6 +236,7 @@ def _clean_requirements(items: list[dict[str, Any]], limit: int) -> list[dict[st
             "attempts": int(item.get("attempts") or 0),
             "last_reason": _clip(item.get("last_reason"), 100),
             "fingerprint": _clip(item.get("fingerprint"), 32),
+            "scope": item.get("scope") if isinstance(item.get("scope"), dict) else {},
         })
     return clean
 
@@ -212,6 +246,7 @@ class WorkingStateStore:
     """Small persisted source-of-truth object owned exclusively by the harness."""
 
     limits: dict[str, int] | None = None
+    conversation_id: str | None = None
 
     def __post_init__(self) -> None:
         merged = dict(_DEFAULT_LIMITS)
@@ -222,11 +257,16 @@ class WorkingStateStore:
                 except (TypeError, ValueError):
                     pass
         self.limits = merged
+        if self.conversation_id is not None:
+            self.conversation_id = _resolved_conversation_id(self.conversation_id)
         with _connect():
             pass
 
+    def _cid(self) -> str:
+        return _resolved_conversation_id(self.conversation_id)
+
     def load(self) -> dict[str, Any]:
-        return _load()
+        return _load(self._cid())
 
     def begin_turn(
         self,
@@ -240,8 +280,9 @@ class WorkingStateStore:
         tool_schemas: list[dict[str, Any]],
         requirements: list[dict[str, Any]] | None = None,
         continuation: bool = False,
+        task_frame: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        previous = _load()
+        previous = _load(self._cid())
         state = _empty_state()
         previous_epoch = int(previous.get("task_epoch") or 0)
         state["task_epoch"] = previous_epoch if continuation and previous_epoch else previous_epoch + 1
@@ -288,6 +329,7 @@ class WorkingStateStore:
             "turn_id": max(0, int(turn_id)),
             "status": "active",
             "objective": _clip(objective, self.limits["objective_chars"]),
+            "task_frame": dict(task_frame or {}),
             "background": {
                 "rolling_summary": _clip(rolling_summary, self.limits["background_chars"]) if continuation else "",
                 # Avoid stale task leakage. Raw recent conversational setup is
@@ -299,21 +341,21 @@ class WorkingStateStore:
             "requirements": state_requirements,
             "tool_capabilities": _tool_capabilities(tool_schemas),
         })
-        _save(state)
+        _save(state, self._cid())
         return state
 
     def update_tools(self, tool_schemas: list[dict[str, Any]]) -> None:
-        state = _load()
+        state = _load(self._cid())
         state["tool_capabilities"] = _tool_capabilities(tool_schemas)
-        _save(state)
+        _save(state, self._cid())
 
     def update_requirements(self, requirements: list[dict[str, Any]]) -> None:
-        state = _load()
+        state = _load(self._cid())
         state["requirements"] = _clean_requirements(requirements, self.limits["requirement_items"])
-        _save(state)
+        _save(state, self._cid())
 
     def set_plan(self, plan: list[dict[str, Any]] | list[str]) -> None:
-        state = _load()
+        state = _load(self._cid())
         clean: list[Any] = []
         for item in list(plan or [])[: self.limits["plan_items"]]:
             if isinstance(item, dict):
@@ -325,7 +367,7 @@ class WorkingStateStore:
             else:
                 clean.append(_clip(item, 240))
         state["current_plan"] = clean
-        _save(state)
+        _save(state, self._cid())
 
     def record_tool_result(
         self,
@@ -338,15 +380,20 @@ class WorkingStateStore:
         fingerprint: str = "",
         observation_id: str = "",
     ) -> None:
-        state = _load()
+        state = _load(self._cid())
         status = str(status or "error")
         from .grounding import grounding_metadata
-        grounding = grounding_metadata(tool_name, result_text)
+        grounding = grounding_metadata(tool_name, result_text, arguments=arguments)
         record = {
             "tool": _clip(tool_name, 80),
             "status": status,
             "reason": _clip(reason, 100),
             "arguments_digest": _args_digest(arguments),
+            "arguments": grounding.get("arguments", {}),
+            "target": grounding.get("target", ""),
+            "time_scope": grounding.get("time_scope", ""),
+            "source_url": grounding.get("source_url", ""),
+            "discovered_urls": grounding.get("discovered_urls", []),
             "fingerprint": _clip(fingerprint, 32),
             "evidence_ref": _clip(observation_id, 64),
             # Persisted for an explicitly untrusted evidence digest. It is never
@@ -377,10 +424,10 @@ class WorkingStateStore:
             })
             state["failed_approaches"] = failures[-self.limits["failure_items"]:]
         state["current_plan"] = []
-        _save(state)
+        _save(state, self._cid())
 
     def record_validator(self, report: dict[str, Any], signal: dict[str, Any] | None = None) -> None:
-        state = _load()
+        state = _load(self._cid())
         event: dict[str, Any] = {
             "decision": _clip(report.get("decision"), 40),
             "diagnosis": _clip(report.get("diagnosis") or "unknown", 64),
@@ -404,17 +451,17 @@ class WorkingStateStore:
             questions = list(state.get("open_questions") or [])
             questions.append(_clip(f"Blocked after validator diagnosis: {event.get('diagnosis')}", 240))
             state["open_questions"] = questions[-4:]
-        _save(state)
+        _save(state, self._cid())
 
     def complete_turn(self, *, blocked: bool = False) -> None:
-        state = _load()
+        state = _load(self._cid())
         state["status"] = "blocked" if blocked else "complete"
         state["current_plan"] = []
-        _save(state)
+        _save(state, self._cid())
 
     def render_evidence(self, max_chars: int | None = None) -> str:
         """Render bounded untrusted evidence excerpts for a user-role prompt block."""
-        state = _load()
+        state = _load(self._cid())
         limit = max(400, int(max_chars or self.limits["evidence_render_chars"]))
         rows: list[dict[str, Any]] = []
         for item in list(state.get("verified_observations") or [])[-self.limits["evidence_items"]:]:
@@ -425,6 +472,9 @@ class WorkingStateStore:
                 "status": item.get("status", ""),
                 "reason": item.get("reason", ""),
                 "evidence_ref": item.get("evidence_ref", ""),
+                "target": item.get("target", ""),
+                "time_scope": item.get("time_scope", ""),
+                "source_url": item.get("source_url", ""),
                 "excerpt": _clip(item.get("evidence_preview"), min(420, self.limits["evidence_preview_chars"])),
             })
         text = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
@@ -452,10 +502,11 @@ class WorkingStateStore:
         The main model already receives native tool schemas, so callers may omit
         the duplicate capability descriptions. The fast validator can retain them.
         """
-        state = _load()
+        state = _load(self._cid())
         compact = {
             "turn_id": state.get("turn_id", 0),
             "task_epoch": state.get("task_epoch", 0),
+            "task_frame": dict(state.get("task_frame", {}) or {}),
             "status": state.get("status", "idle"),
             "objective": state.get("objective", ""),
             "background": dict(state.get("background", {}) or {}),
@@ -540,4 +591,6 @@ class WorkingStateStore:
 
     def clear(self) -> None:
         with _connect() as conn:
-            conn.execute("DELETE FROM working_state WHERE id = ?", (_STATE_ID,))
+            conn.execute("DELETE FROM working_states WHERE conversation_id = ?", (self._cid(),))
+            if self._cid() == DEFAULT_CONVERSATION_ID:
+                conn.execute("DELETE FROM working_state WHERE id = ?", (_STATE_ID,))

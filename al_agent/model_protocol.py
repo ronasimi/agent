@@ -156,17 +156,18 @@ def warm_model(
     system_prompt: str = "",
     on_error: Callable[[Exception], None] | None = None,
 ) -> bool:
-    """Load the model and optionally pre-fill the stable system prefix.
+    """Load the model and optionally attempt to prime a stable prompt prefix.
 
-    Two distinct costs show up in the first token of a turn: loading model
-    weights, and prefilling the prompt.  An empty ``messages`` request makes
-    Ollama load and pin the weights.  Sending the byte-stable system prefix with
-    ``num_predict: 1`` additionally leaves that prefix in the server's KV cache,
-    so the first real turn only prefills what the turn itself adds.
+    The empty-message request is the reliable part: it asks Ollama to load and
+    keep the model resident. Prefix priming is deliberately optional because a
+    tool-capable chat template may serialize dynamic tool schemas before normal
+    messages; in that case a system-only request is not the common byte prefix
+    of a real turn and may provide little or no KV-cache reuse. Measure
+    ``prompt_eval_cached_count`` with ``scripts/benchmark_warmup.py`` before
+    enabling it.
 
-    ``options`` must match the options used by interactive turns: Ollama keys a
-    loaded runner by context size, so warming with a different ``num_ctx`` would
-    reload the model on the first real request and waste the warm-up entirely.
+    ``options`` must match interactive turns, especially ``num_ctx``, otherwise
+    Ollama can select/reload a different runner and invalidate the measurement.
     """
     base_options = dict(options or {})
     try:

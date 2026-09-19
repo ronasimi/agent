@@ -1,6 +1,9 @@
 """Builtin tool provider group."""
 TOOL_SPECS = [
+    ('weather', 'geocode_location'),
+    ('weather', 'weather_forecast'),
     ('web', 'web_search'),
+    ('web', 'news_search'),
     ('web', 'wiki_search'),
     ('web', 'browse_url'),
     ('web_research', 'page_metadata'),

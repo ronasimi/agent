@@ -91,9 +91,9 @@ def _finalize_after_limit(messages, turn_tail=None, reason="The tool-call safety
     return _turn_support._finalize_after_limit(messages, turn_tail, reason)
 
 
-def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bool) -> None:
+def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bool, **kwargs) -> None:
     _sync_compat_overrides()
-    return _turn_engine.handle_user_turn(messages, user_input, thinking_enabled)
+    return _turn_engine.handle_user_turn(messages, user_input, thinking_enabled, **kwargs)
 
 
 def print_jobs() -> None:

@@ -9,6 +9,7 @@ from tools import clear_chat_history, get_tools_prompt_summary, load_tools
 from tools.job_tools import cancel_background_job, enqueue_research
 from tools.reminders import list_reminders
 from tools.self_optimization import approve_self_optimization, enqueue_self_optimization, list_self_optimization_candidates
+from tools.user_profile import run_terminal_onboarding
 from .prompts import build_system_prompt
 
 
@@ -72,6 +73,9 @@ def _think(text: str, ctx: CliContext) -> bool:
 def _tools(text: str, ctx: CliContext) -> bool:
     print(get_tools_prompt_summary()); return False
 
+def _profile(text: str, ctx: CliContext) -> bool:
+    run_terminal_onboarding(reset=True); return False
+
 def _reload(text: str, ctx: CliContext) -> bool:
     count,errors=load_tools(); print(f'[System]: Reloaded {count} tools.')
     for key,value in errors.items(): print(f'  - {key}: {value}')
@@ -93,6 +97,7 @@ COMMANDS = (
     CliCommand('/forget', lambda s:s.lower()=='/forget', _forget),
     CliCommand('/think', lambda s:s.lower().startswith('/think'), _think),
     CliCommand('/tools', lambda s:s.lower()=='/tools', _tools),
+    CliCommand('/profile', lambda s:s.lower()=='/profile', _profile),
     CliCommand('/reload', lambda s:s.lower()=='/reload', _reload),
 )
 

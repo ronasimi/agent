@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import json
 import re
-import signal
-import threading
 import uuid
 from typing import Any
 
@@ -13,6 +11,8 @@ from tools.context import build_active_messages, compaction_cutoff_id, estimate_
 from tools.loop_validator import tool_call_signature
 from tools.runtime import create_singleton_job
 from tools.task_requirements import TaskRequirementLedger
+from tools.conversation_context import get_active_conversation_id
+from tools.executor import execute_registered_tool
 from .events import emit_event
 from .model_protocol import ollama_wire_messages
 from .prompts import append_and_save, build_system_prompt
@@ -71,6 +71,61 @@ def _parse_tool_calls(raw_calls: Any, allowed_names: set[str] | None = None) -> 
             errors.append(f"call {index}: malformed tool call: {exc}")
     return result, errors
 
+
+def _recover_textual_readonly_tool_call(content: str, allowed_names: set[str]) -> tuple[list[dict], str]:
+    """Recover a narrowly formatted read-only pseudo tool call emitted as prose.
+
+    Small local models occasionally print a ``Tool call:`` JSON envelope instead
+    of using Ollama's native tool channel.  Only repair this when the text
+    explicitly labels itself as a tool call, the JSON names a supplied read-only
+    tool, and its arguments validate against the real callable schema. Mutating
+    tools are never recovered from prose.
+    """
+    text = str(content or "")
+    if not re.search(r"\btool\s*call\s*:", text, re.I):
+        return [], ""
+    blocks = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.I | re.S)
+    if not blocks:
+        return [], ""
+    payload = None
+    for raw in reversed(blocks):
+        try:
+            candidate = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict) and candidate.get("tool_name"):
+            payload = candidate
+            break
+    if not isinstance(payload, dict):
+        return [], ""
+    requested = str(payload.get("tool_name") or "").strip()
+    canonical = next((name for name in allowed_names if name.lower() == requested.lower()), "")
+    if not canonical or canonical not in AVAILABLE_TOOLS_MAP:
+        return [], ""
+    if not bool(TOOL_METADATA.get(canonical, {}).get("readonly", True)):
+        return [], ""
+
+    schema = next((
+        item.get("function", {}).get("parameters", {})
+        for item in [get_tool_schema(canonical)] if item
+    ), {}) or {}
+    properties = set((schema.get("properties") or {}).keys())
+    args: dict[str, Any] = {}
+    nested = payload.get("params")
+    if isinstance(nested, dict):
+        args.update({k: v for k, v in nested.items() if k in properties})
+    args.update({k: v for k, v in payload.items() if k not in {"tool_name", "params"} and k in properties})
+    try:
+        normalized = normalize_arguments(AVAILABLE_TOOLS_MAP[canonical], args)
+    except Exception:
+        return [], ""
+    return [{
+        "id": uuid.uuid4().hex,
+        "type": "function",
+        "function": {"name": canonical, "arguments": normalized},
+    }], canonical
+
+
 def _extract_tool_calls(raw_calls: Any) -> list[dict]:
     """Compatibility wrapper used by tests/integrations that need valid calls only."""
     calls, _ = _parse_tool_calls(raw_calls)
@@ -119,29 +174,8 @@ def _tool_status_prefix(success: bool, reason: str, status: str = "") -> str:
     return f"[Harness status=error reason={safe_reason}]"
 
 def _execute_registered_tool(name: str, args: dict[str, Any]) -> Any:
-    """Execute one tool, enforcing decorator timeouts for custom tools.
-
-    Built-ins already implement operation-specific subprocess/network timeouts.
-    Custom tools default to a 60-second SIGALRM guard so a buggy generated tool
-    cannot wedge the interactive loop indefinitely.
-    """
-    func = AVAILABLE_TOOLS_MAP[name]
-    timeout = TOOL_METADATA.get(name, {}).get("timeout")
-    if not timeout or threading.current_thread() is not threading.main_thread() or not hasattr(signal, "SIGALRM"):
-        return func(**args)
-    seconds = max(1, min(int(timeout), 300))
-    previous_handler = signal.getsignal(signal.SIGALRM)
-
-    def _raise_timeout(_signum, _frame):
-        raise TimeoutError(f"Tool '{name}' exceeded its {seconds}-second harness timeout.")
-
-    signal.signal(signal.SIGALRM, _raise_timeout)
-    signal.setitimer(signal.ITIMER_REAL, seconds)
-    try:
-        return func(**args)
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous_handler)
+    """Compatibility wrapper around the canonical tool executor."""
+    return execute_registered_tool(name, args)
 
 def _add_recovery_schema(tool_schemas: list[dict], tool_name: str) -> bool:
     """Expose one validator-suggested read-only tool for the corrective iteration.
@@ -331,9 +365,10 @@ def _queue_compaction_if_needed(messages: list[dict]) -> bool:
     return bool(create_singleton_job(
         "context_compaction",
         "Compact conversation context",
-        payload={"through_id": through_id},
+        payload={"through_id": through_id, "conversation_id": get_active_conversation_id()},
         priority=-10,
         max_attempts=5,
+        singleton_key=get_active_conversation_id(),
     ))
 
 def _bounded_tool_result_with_ref(tool_name: str, result: Any) -> tuple[str, str]:

@@ -22,6 +22,11 @@ from .memory import (
     _save_message_to_db,
     apply_conversation_compaction,
     clear_chat_history,
+    create_conversation,
+    delete_conversation,
+    ensure_conversation,
+    list_conversations,
+    rename_conversation,
     get_all_memories_prompt_summary,
     get_compacted_through_id,
     get_conversation_summary,
@@ -38,7 +43,7 @@ __all__ = [
     "ALL_TOOLS", "AVAILABLE_TOOLS_MAP", "TOOL_SCHEMAS", "TOOL_METADATA",
     "load_tools", "get_tools_prompt_summary", "select_tool_schemas", "get_tool_schema", "normalize_arguments",
     "init_db", "_init_chat_db", "_init_checkpoint_db", "_load_chat_history_from_db",
-    "_save_message_to_db", "clear_chat_history", "get_all_memories_prompt_summary",
+    "_save_message_to_db", "clear_chat_history", "create_conversation", "delete_conversation", "ensure_conversation", "list_conversations", "rename_conversation", "get_all_memories_prompt_summary",
     "get_conversation_summary", "set_conversation_summary", "get_compacted_through_id",
     "get_messages_for_compaction", "apply_conversation_compaction", "store_tool_observation",
     "read_observation", "get_relevant_memories", "search_memory", "agent_tool",
@@ -46,3 +51,6 @@ __all__ = [
 
 # Backward-compatible selector-policy aliases used by tests/extensions.
 from .providers import ALWAYS_TOOL_NAMES as _ALWAYS_TOOL_NAMES
+
+from .conversation_context import DEFAULT_CONVERSATION_ID, conversation_context, get_active_conversation_id, normalize_conversation_id
+__all__ += ["DEFAULT_CONVERSATION_ID", "conversation_context", "get_active_conversation_id", "normalize_conversation_id"]

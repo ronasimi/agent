@@ -5,13 +5,17 @@ P = lambda default, description: {"default": default, "description": description
 
 RECIPE_SPECS = [
     {
-        "key":"grounding.weather.current_forecast","version":1,"name":"weather.current_forecast","target_tool":"weather_grounding",
-        "description":"Ground current weather/forecast retrieval with source discovery followed by page verification.","tags":["weather","forecast","grounding","web","verification"],
-        "parameters":{"query":P("current weather forecast","Weather query including the requested or recalled location")},
+        "key":"grounding.weather.current_forecast","version":2,"name":"weather.current_forecast","target_tool":"weather_grounding",
+        "description":"Ground current weather/forecast retrieval with keyless structured geocoding and forecast data; web discovery remains an independent fallback.","tags":["weather","forecast","grounding","structured","open-meteo"],
+        "parameters":{
+            "location":P("London, Ontario, Canada","Requested or explicitly stored place name"),
+            "forecast_days":P(8,"Forecast horizon including today, bounded to 1-16 days"),
+            "query":P("current weather forecast","Fallback weather query including the requested or recalled location"),
+        },
         "pipeline":[
-            {"id":"search","tool":"web_search","args":{"query":{"$param":"query","default":"current weather forecast"}}},
-            {"id":"verify","tool":"browse_url","args":{"url":{"$ref":"search","path":"0.url"}}},
-            {"id":"result","tool":"compose_object","args":{"data":{"query":{"$param":"query","default":"current weather forecast"},"discovery":{"$ref":"search"},"verification":{"$ref":"verify"}}}},
+            {"id":"place","tool":"geocode_location","args":{"query":{"$param":"location"},"count":1}},
+            {"id":"forecast","tool":"weather_forecast","args":{"latitude":{"$ref":"place","path":"0.latitude"},"longitude":{"$ref":"place","path":"0.longitude"},"forecast_days":{"$param":"forecast_days","default":8},"timezone_name":"auto"}},
+            {"id":"result","tool":"compose_object","args":{"data":{"location":{"$param":"location"},"place":{"$ref":"place","path":"0"},"forecast":{"$ref":"forecast"}}}},
         ],
     },
     {
@@ -80,6 +84,7 @@ RECIPE_SPECS = [
 ]
 
 NATIVE_ONLY = {
+    "news_search": "news metasearch is already a narrow external-source primitive and has no lower local composition",
     "web_search": "search-engine discovery is already a narrow external-source primitive and has no lower local composition",
     "wiki_search": "specialized external search endpoint; no smaller local composition",
     "discover_site": "bounded sitemap/robots traversal requires a queue/recursive fetch loop beyond current recipe semantics",
