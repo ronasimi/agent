@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="dark" />
   <title>Al Agent</title>
+  <link rel="icon" type="image/x-icon" href="/static/assets/favicon.ico" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/assets/favicon.png" />
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
@@ -12,7 +14,7 @@
     <aside class="sidebar" aria-label="Navigation">
       <div class="sidebar-head">
         <div class="brand" title="Al Agent">
-          <span class="brand-mark">A</span>
+          <img class="brand-logo" src="/static/assets/agent-logo.png" alt="Al Agent logo" />
           <span class="brand-name">Al Agent</span>
         </div>
         <button id="collapseSidebar" class="ghost-icon desktop-only" title="Collapse sidebar" aria-label="Collapse sidebar" aria-expanded="true">◫</button>
@@ -38,7 +40,7 @@
 
       <div class="sidebar-footer">
         <div class="model-summary">
-          <div class="agent-avatar">A</div>
+          <div class="agent-avatar" aria-label="User profile image"><img id="userProfileImage" alt="User profile image" /><span id="userProfileFallback">U</span></div>
           <div class="model-copy">
             <strong id="mainModel">—</strong>
             <span><span id="fastModel">—</span> · <span id="contextSize">—</span></span>
@@ -53,15 +55,16 @@
           <button id="mobileSidebar" class="ghost-icon mobile-only" title="Menu" aria-label="Menu" aria-expanded="false">☰</button>
           <button id="sidebarExpand" class="ghost-icon desktop-sidebar-expand hidden" title="Expand sidebar" aria-label="Expand sidebar" aria-expanded="false">☷</button>
           <div class="panel-heading" aria-label="Current view">
+            <img class="panel-logo" src="/static/assets/agent-logo.png" alt="Al Agent logo" />
             <span id="panelTitle">Al Agent</span>
           </div>
-          <span id="status" class="status"><span class="status-dot"></span><span class="status-text">Ready</span></span>
         </div>
         <div class="topbar-actions">
           <button id="workspaceToggle" class="top-action" title="Toggle files in workspace" aria-expanded="false" aria-controls="workspaceDrawer">
             <span>⇧</span><span class="top-action-label">Files in workspace</span>
           </button>
           <button id="refresh" class="ghost-icon" title="Refresh" aria-label="Refresh">↻</button>
+          <button id="copyChat" class="ghost-icon" title="Copy entire chat history" aria-label="Copy entire chat history">⧉</button>
         </div>
       </header>
 

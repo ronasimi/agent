@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .common import *  # noqa: F403
-from .common import _json, _bounded_int, _safe_workspace, _source_text, _load_json, _get_path
+from .common import _json, _bounded_int, _safe_workspace, _source_text, _load_json, _get_path, _binary_text_reason
 
 def path_stat(path: str) -> str:
     """Return bounded metadata for one path inside the workspace."""
@@ -55,6 +55,9 @@ def read_text(path: str, offset: int = 0, limit: int = 20000) -> str:
     """Read a bounded UTF-8 text slice from a workspace file."""
     try:
         p=_safe_workspace(path); offset=max(0,int(offset)); limit=_bounded_int(limit,1,MAX_TEXT)
+        binary_reason = _binary_text_reason(p)
+        if binary_reason:
+            return f"Error: read_text only supports text files; '{p}' appears to be binary ({binary_reason}). Use image_info/attach_media for images, document_text for documents, or read_bytes for raw bytes."
         with p.open("r",encoding="utf-8",errors="replace") as f: f.seek(offset); data=f.read(limit)
         return _json({"path":str(p),"offset":offset,"text":data,"truncated":len(data)>=limit})
     except Exception as exc: return f"Error: read_text failed: {exc}"

@@ -5,6 +5,8 @@ TOOL_SPECS = [
     ('memory', 'remember_semantic'),
     ('memory', 'search_semantic_memory'),
     ('memory', 'read_observation'),
+    ('user_profile', 'set_profile_image'),
+    ('user_profile', 'profile_image_info'),
     ('repo_map', 'get_repo_map'),
     ('repo_map', 'search_repo_symbols'),
     ('repo_map', 'read_repo_symbol'),

@@ -2,11 +2,32 @@
 from __future__ import annotations
 
 import json
+from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
 
 from .netutil import fetch_text
+
+_TRACKING_SEARCH_HOSTS = {"googleadservices.com", "www.googleadservices.com"}
+
+def _search_result_url_allowed(value: str) -> bool:
+    """Drop obvious ad/tracking redirect results before they reach the model."""
+    try:
+        parsed = urlparse(str(value or "").strip())
+    except ValueError:
+        return False
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    host = (parsed.hostname or "").lower()
+    path = parsed.path.lower()
+    if host in _TRACKING_SEARCH_HOSTS:
+        return False
+    if host.endswith("bing.com") and path.startswith("/aclick"):
+        return False
+    if any(token in path for token in ("/aclk", "/pagead/aclk")):
+        return False
+    return True
 
 
 def web_search(query: str = "") -> str:
@@ -18,15 +39,23 @@ def web_search(query: str = "") -> str:
         return "Error: Query is limited to 1000 characters."
     try:
         from ddgs import DDGS
-        results = list(DDGS().text(query, max_results=5))
-        compact = [
-            {
+        # Ask for a few extra candidates so removing sponsored redirect links
+        # still leaves a useful bounded result set.
+        results = list(DDGS().text(query, max_results=8))
+        compact = []
+        seen_urls: set[str] = set()
+        for item in results:
+            url = str(item.get("href", "") or "").strip()
+            if not _search_result_url_allowed(url) or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            compact.append({
                 "title": item.get("title", ""),
-                "url": item.get("href", ""),
+                "url": url,
                 "snippet": item.get("body", ""),
-            }
-            for item in results
-        ]
+            })
+            if len(compact) >= 5:
+                break
         return json.dumps(compact, ensure_ascii=False, indent=2)
     except Exception as exc:
         return f"Error: web search failed: {exc}"

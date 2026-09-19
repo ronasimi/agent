@@ -1,4 +1,4 @@
-from tools.task_requirements import TaskRequirementLedger, is_followup_request
+from tools.task_requirements import TaskRequirementLedger, is_evidence_reuse_request, is_followup_request
 from tools.turn_policy import derive_turn_tool_policy
 
 
@@ -98,3 +98,22 @@ def test_pending_hint_is_ephemeral_style_and_lists_only_unfinished_checks():
     assert "pressure_snapshot" in hint
     assert "host_snapshot" not in hint
     assert "Do not draft the final report yet" in hint
+
+
+def test_weather_requests_require_search_and_verification():
+    ledger = TaskRequirementLedger.from_request("What is the weather forecast for the next five days?")
+    assert set(ledger.required_tools()) == {"web_search", "browse_url"}
+
+
+def test_display_forecast_is_evidence_reuse_followup_not_new_weather_requirement():
+    text = "display the forecast"
+    assert is_evidence_reuse_request(text) is True
+    assert is_followup_request(text) is True
+    assert TaskRequirementLedger.from_request(text).required_tools() == []
+
+
+def test_local_network_scan_has_deterministic_discovery_requirements():
+    ledger = TaskRequirementLedger.from_request(
+        "scan the local network and subnets for hosts, then compile a list of hosts"
+    )
+    assert {"local_subnets", "scan_subnet"} <= set(ledger.required_tools())

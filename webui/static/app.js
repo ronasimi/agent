@@ -1,6 +1,6 @@
 const $=(s)=>document.querySelector(s);
-const messagesEl=$('#messages'),statusEl=$('#status'),statusText=$('.status-text'),promptEl=$('#prompt'),appShell=$('#appShell');
-let socket=null,activeTurn=null,assistantNode=null,attachments=[],workspacePath='',workspaceRows=[];
+const messagesEl=$('#messages'),promptEl=$('#prompt'),appShell=$('#appShell');
+let socket=null,activeTurn=null,assistantNode=null,activeUserMessageEl=null,attachments=[],workspacePath='',workspaceRows=[];
 let followOutput=true;
 const artifactCards=new Map();
 const UI_STATE_KEYS={left:'agent.webui.leftSidebarCollapsed',right:'agent.webui.workspaceOpen',commandHistory:'agent.webui.commandHistory.v1'};
@@ -37,7 +37,18 @@ function renderMarkdown(text){
   }closeList();
   return out.join('').replace(/@@CODE(\d+)@@/g,(_,i)=>blocks[Number(i)]||'');
 }
-function setStatus(text,state='ok'){statusText.textContent=text;const dot=$('.status-dot');dot.style.background=state==='error'?'var(--danger)':state==='busy'?'var(--warn)':'var(--success)';}
+function clearTurnStatus(){
+  if(activeUserMessageEl)activeUserMessageEl.querySelector('.turn-status')?.remove();
+}
+function setStatus(text,state='ok'){
+  const value=String(text||'').trim();
+  if(!activeUserMessageEl)return;
+  let node=activeUserMessageEl.querySelector('.turn-status');
+  if(!value||value==='Ready'){node?.remove();return;}
+  if(!node){node=document.createElement('div');node.className='turn-status';node.setAttribute('role','status');node.setAttribute('aria-live','polite');node.innerHTML='<span class="turn-status-dot"></span><span class="turn-status-text"></span>';activeUserMessageEl.appendChild(node);}
+  node.classList.toggle('error',state==='error');node.classList.toggle('busy',state==='busy');
+  node.querySelector('.turn-status-text').textContent=value;scrollBottom();
+}
 function isNearBottom(threshold=120){return messagesEl.scrollHeight-messagesEl.scrollTop-messagesEl.clientHeight<=threshold;}
 function updateScrollFollow(){followOutput=isNearBottom();$('#scrollLatest')?.classList.toggle('hidden',followOutput);}
 function scrollBottom(force=false){if(!force&&!followOutput)return;requestAnimationFrame(()=>{messagesEl.scrollTop=messagesEl.scrollHeight;followOutput=true;$('#scrollLatest')?.classList.add('hidden');});}
@@ -79,7 +90,8 @@ async function api(path,opts={}){const r=await fetch(path,opts);if(!r.ok)throw n
 function cssVar(name,value){document.documentElement.style.setProperty(name,value);}
 async function loadTheme(){try{const t=await api('/api/theme');const c=t.colors||{};const map={foreground:'--xr-foreground',background:'--xr-background',cursorColor:'--xr-cursor'};for(const[k,v]of Object.entries(map))if(c[k])cssVar(v,c[k]);for(let i=0;i<16;i++)if(c[`color${i}`])cssVar(`--xr-color${i}`,c[`color${i}`]);}catch(e){console.warn('Theme load failed',e);}}
 async function loadHealth(){const h=await api('/api/health');$('#mainModel').textContent=h.main_model;$('#fastModel').textContent=h.fast_model;$('#contextSize').textContent=(h.context/1024).toFixed(0)+'K';}
-async function loadHistory(){const rows=await api('/api/history');messagesEl.innerHTML='';artifactCards.clear();let firstUser='';for(const m of rows){if(m.role==='user'||m.role==='assistant'){addMessage(m.role,m.content);if(!firstUser&&m.role==='user')firstUser=(m.content||'').split('\n')[0].slice(0,42);}else if(m.role==='tool')addTool(m.name||'tool','history',m.content);}$('#recentTitle').textContent=firstUser||'Current conversation';applyChatSearch();scrollBottom(true);}
+function refreshProfileImage(){const avatar=document.querySelector('.agent-avatar'),img=$('#userProfileImage');if(!avatar||!img)return;img.onload=()=>avatar.classList.add('has-image');img.onerror=()=>avatar.classList.remove('has-image');img.src=`/api/profile-image?v=${Date.now()}`;}
+async function loadHistory(){const rows=await api('/api/history');messagesEl.innerHTML='';artifactCards.clear();activeUserMessageEl=null;let firstUser='';for(const m of rows){if(m.role==='user'||m.role==='assistant'){addMessage(m.role,m.content);if(!firstUser&&m.role==='user')firstUser=(m.content||'').split('\n')[0].slice(0,42);}else if(m.role==='tool')addTool(m.name||'tool','history',m.content);}$('#recentTitle').textContent=firstUser||'Current conversation';applyChatSearch();scrollBottom(true);}
 async function loadState(){$('#stateView').textContent=JSON.stringify(await api('/api/state'),null,2);}
 async function loadJobs(){const rows=await api('/api/jobs');$('#jobsView').innerHTML=rows.length?rows.map(j=>`<div class="data-card"><strong>${esc(j.title)}</strong><div class="muted">${esc(j.job_type)} · ${esc(j.status)} · ${esc(j.id).slice(0,8)}</div>${j.error?`<pre>${esc(j.error)}</pre>`:''}</div>`).join(''):'<div class="muted">No jobs.</div>';}
 async function loadReminders(){const rows=await api('/api/reminders');$('#remindersView').innerHTML=rows.length?rows.map(r=>`<div class="data-card"><strong>${esc(r.title)}</strong><div class="muted">${esc(r.when_iso)} · ${esc(r.repeat_mode)} · ${esc(r.status)}</div><div>${esc(r.message||'')}</div></div>`).join(''):'<div class="muted">No reminders.</div>';}
@@ -139,8 +151,8 @@ function restoreSidebarState(){
 }
 
 function showPanel(name){document.querySelectorAll('.panel').forEach(x=>x.classList.add('hidden'));$(`#${name}Panel`).classList.remove('hidden');document.querySelectorAll('.nav-item,.recent-item').forEach(b=>b.classList.toggle('active',b.dataset.panel===name));$('#panelTitle').textContent={chat:'Al Agent',state:'Working state',jobs:'Jobs',reminders:'Reminders'}[name]||'Al Agent';if(name==='state')loadState();if(name==='jobs')loadJobs();if(name==='reminders')loadReminders();}
-function connect(){socket=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws/chat`);socket.onopen=()=>setStatus('Ready');socket.onclose=()=>{setStatus('Disconnected','error');setTimeout(connect,1200)};socket.onmessage=(ev)=>{const e=JSON.parse(ev.data);if(e.type==='accepted'){activeTurn=e.turn_id;setStatus('Working…','busy');$('#send').classList.add('hidden');$('#stop').classList.remove('hidden');assistantNode=null;}else if(e.type==='queue_wait'){setStatus('Queued for inference…','busy');}else if(e.type==='queue_acquired'){setStatus('Thinking…','busy');}else if(e.type==='recipe_check'){setStatus(e.best_match?`Recipe checked: ${e.best_match}`:'Recipes checked','busy');}else if(e.type==='assistant_delta'){appendAssistant(e.content||'');}else if(e.type==='tool_start'){assistantNode=null;setStatus(`Running ${e.name}…`,'busy');}else if(e.type==='tool_result'){addTool(e.name,e.status,e.content);addMedia(e.media);setStatus('Thinking…','busy');if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}else if(e.type==='artifact_created'){assistantNode=null;void addArtifact(e.artifact||{});setStatus(`Created ${(e.artifact&&e.artifact.name)||'file'}`,'busy');if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}else if(e.type==='validator'){assistantNode=null;addValidator(e);}else if(e.type==='recipe_suggestion'){assistantNode=null;addRecipeSuggestion(e);}else if(e.type==='requirements'){setStatus('Completing requested checks…','busy');}else if(e.type==='media_attached'){setStatus('Inspecting media…','busy');}else if(e.type==='assistant_final'){if(!assistantNode&&e.content)assistantNode=addMessage('assistant',e.content);setStatus('Ready');}else if(e.type==='turn_cancelled'){setStatus('Cancelled');finishTurn();}else if(e.type==='turn_end'){finishTurn();}else if(e.type==='history_refresh'){loadState();loadJobs();if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}else if(e.type==='error'){addMessage('assistant',`Error: ${e.message}`);setStatus('Error','error');finishTurn();}};}
-function finishTurn(){activeTurn=null;assistantNode=null;$('#send').classList.remove('hidden');$('#stop').classList.add('hidden');setStatus('Ready');}
+function connect(){socket=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws/chat`);socket.onopen=()=>{};socket.onclose=()=>{setStatus('Disconnected','error');setTimeout(connect,1200)};socket.onmessage=(ev)=>{const e=JSON.parse(ev.data);if(e.type==='accepted'){activeTurn=e.turn_id;setStatus('Working…','busy');$('#send').classList.add('hidden');$('#stop').classList.remove('hidden');assistantNode=null;}else if(e.type==='queue_wait'){setStatus('Queued for inference…','busy');}else if(e.type==='queue_acquired'){setStatus('Thinking…','busy');}else if(e.type==='recipe_check'){setStatus(e.best_match?`Recipe checked: ${e.best_match}`:'Recipes checked','busy');}else if(e.type==='assistant_delta'){appendAssistant(e.content||'');}else if(e.type==='tool_start'){assistantNode=null;setStatus(`Running ${e.name}…`,'busy');}else if(e.type==='tool_result'){addTool(e.name,e.status,e.content);addMedia(e.media);if(e.name==='set_profile_image'&&e.status==='ok')refreshProfileImage();setStatus('Thinking…','busy');if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}else if(e.type==='artifact_created'){assistantNode=null;void addArtifact(e.artifact||{});setStatus(`Created ${(e.artifact&&e.artifact.name)||'file'}`,'busy');if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}else if(e.type==='validator'){assistantNode=null;addValidator(e);}else if(e.type==='recipe_suggestion'){assistantNode=null;addRecipeSuggestion(e);}else if(e.type==='requirements'){setStatus('Completing requested checks…','busy');}else if(e.type==='media_attached'){setStatus('Inspecting media…','busy');}else if(e.type==='assistant_final'){if(!assistantNode&&e.content)assistantNode=addMessage('assistant',e.content);setStatus('Ready');}else if(e.type==='turn_cancelled'){setStatus('Cancelled');finishTurn();}else if(e.type==='turn_end'){finishTurn();}else if(e.type==='history_refresh'){loadState();loadJobs();if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}else if(e.type==='error'){addMessage('assistant',`Error: ${e.message}`);setStatus('Error','error');finishTurn();}};}
+function finishTurn(){clearTurnStatus();activeTurn=null;assistantNode=null;activeUserMessageEl=null;$('#send').classList.remove('hidden');$('#stop').classList.add('hidden');}
 
 async function uploadChatFiles(files){
   const items=Array.from(files||[]).filter(Boolean);
@@ -165,7 +177,7 @@ async function uploadWorkspaceFiles(files){
 }
 function renderAttachments(){$('#attachments').innerHTML=attachments.map((a,i)=>`<span class="attachment-chip">${esc(a.name)} <button data-i="${i}" aria-label="Remove">×</button></span>`).join('');$('#attachments').querySelectorAll('button').forEach(b=>b.onclick=()=>{attachments.splice(Number(b.dataset.i),1);renderAttachments();});}
 
-$('#composer').addEventListener('submit',(ev)=>{ev.preventDefault();const text=promptEl.value.trim();if((!text&&!attachments.length)||activeTurn)return;commandHistory.push(text);addMessage('user',text||attachments.map(a=>a.name).join(', '),{forceScroll:true});const turn_id=crypto.randomUUID();socket.send(JSON.stringify({type:'message',turn_id,content:text,attachments:attachments.map(a=>a.path),thinking:$('#thinking').checked}));setPromptValue('');resetHistoryNavigation();attachments=[];renderAttachments();});
+$('#composer').addEventListener('submit',(ev)=>{ev.preventDefault();const text=promptEl.value.trim();if((!text&&!attachments.length)||activeTurn)return;commandHistory.push(text);const bubble=addMessage('user',text||attachments.map(a=>a.name).join(', '),{forceScroll:true});activeUserMessageEl=bubble.closest('.message');setStatus('Sending…','busy');const turn_id=crypto.randomUUID();socket.send(JSON.stringify({type:'message',turn_id,content:text,attachments:attachments.map(a=>a.path),thinking:$('#thinking').checked}));setPromptValue('');resetHistoryNavigation();attachments=[];renderAttachments();});
 $('#stop').addEventListener('click',()=>{if(activeTurn)socket.send(JSON.stringify({type:'cancel',turn_id:activeTurn}));});
 $('#composerAddFile').addEventListener('click',()=>$('#fileInput').click());
 $('#fileInput').addEventListener('change',async(ev)=>{await uploadChatFiles(ev.target.files);ev.target.value='';});
@@ -185,6 +197,17 @@ messagesEl.addEventListener('scroll',updateScrollFollow,{passive:true});
 $('#scrollLatest').addEventListener('click',()=>scrollBottom(true));
 $('#newChat').addEventListener('click',async()=>{if(activeTurn)return;if(!confirm('Clear the shared conversation history and working state?'))return;await api('/api/history',{method:'DELETE'});await loadHistory();await loadState();showPanel('chat');});
 $('#refresh').addEventListener('click',()=>Promise.all([loadHistory(),loadState(),loadJobs(),loadReminders(),loadWorkspace(workspacePath)]));
+async function copyEntireChat(){
+  const button=$('#copyChat');const original=button.textContent;
+  try{
+    const response=await fetch('/api/history/export');if(!response.ok)throw new Error(await response.text());const text=await response.text();
+    if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(text);
+    else{const area=document.createElement('textarea');area.value=text;area.style.position='fixed';area.style.opacity='0';document.body.appendChild(area);area.select();document.execCommand('copy');area.remove();}
+    button.textContent='✓';button.title='Copied chat history';
+  }catch(e){console.error('Copy chat history failed',e);button.textContent='!';button.title='Copy failed';}
+  finally{setTimeout(()=>{button.textContent=original;button.title='Copy entire chat history';},1200);}
+}
+$('#copyChat').addEventListener('click',copyEntireChat);
 document.querySelectorAll('[data-panel]').forEach(btn=>btn.onclick=()=>{showPanel(btn.dataset.panel);if(window.matchMedia('(max-width: 760px)').matches)toggleLeftSidebar(false);});
 $('#workspaceToggle').onclick=()=>toggleWorkspace();$('#workspaceClose').onclick=()=>toggleWorkspace(false);$('#workspaceRefresh').onclick=()=>loadWorkspace(workspacePath);$('#workspaceBack').onclick=()=>loadWorkspace($('#workspaceBack').dataset.parent||'');$('#workspaceFilter').oninput=renderWorkspace;
 $('#collapseSidebar').onclick=()=>toggleLeftSidebar(false);$('#sidebarExpand').onclick=()=>toggleLeftSidebar(true);$('#mobileSidebar').onclick=()=>toggleLeftSidebar();
@@ -209,4 +232,5 @@ window.addEventListener('resize',()=>{
     setLeftSidebarCollapsed(readUiState(UI_STATE_KEYS.left,false),{persist:false});
   }
 });
+refreshProfileImage();
 Promise.all([loadTheme(),loadHealth(),loadHistory(),loadState(),loadJobs(),loadReminders(),loadWorkspace('')]).finally(connect);

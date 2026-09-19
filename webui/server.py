@@ -13,13 +13,14 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile, WebSocket
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 import agent as agent_runtime
 from tools import _load_chat_history_from_db, clear_chat_history
 from tools.reminders import list_reminders
 from tools.runtime import list_jobs
+from tools.user_profile import get_profile_image_path
 from tools.working_state import WorkingStateStore
 
 from . import workspace_ops as _workspace_ops
@@ -33,7 +34,7 @@ from .config import (
     WORKSPACE as _DEFAULT_WORKSPACE,
     XRESOURCES_PATH,
 )
-from .history import _history
+from .history import _history, _history_export
 from .theme import DEFAULT_THEME, read_xresources_theme
 
 # Mutable compatibility alias: tests/integrations historically monkeypatch
@@ -129,6 +130,21 @@ def health() -> dict[str, Any]:
 @app.get("/api/history")
 def history(limit: int = 200) -> list[dict[str, Any]]:
     return _history(limit)
+
+
+@app.get("/api/history/export", response_class=PlainTextResponse)
+def history_export(limit: int = 0) -> str:
+    return _history_export(limit)
+
+
+
+
+@app.get("/api/profile-image")
+def profile_image() -> FileResponse:
+    path = get_profile_image_path(migrate_legacy=True)
+    if path is None or not path.is_file():
+        raise HTTPException(status_code=404, detail="No profile image configured")
+    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/theme")

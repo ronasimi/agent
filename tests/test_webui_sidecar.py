@@ -264,3 +264,28 @@ def test_webui_static_assets_are_no_store_to_avoid_stale_rebuilds():
     server = (root / "webui" / "server.py").read_text(encoding="utf-8")
     assert 'request.url.path.startswith("/static/")' in server
     assert 'response.headers["Cache-Control"] = "no-store, max-age=0"' in server
+
+
+def test_webui_brand_assets_and_user_profile_footer_exist():
+    root = Path(__file__).resolve().parents[1]
+    html = (root / "webui" / "static" / "index.html").read_text(encoding="utf-8")
+    js = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
+    for name in ("agent-logo.png", "favicon.png", "favicon.ico"):
+        assert (root / "webui" / "static" / "assets" / name).is_file()
+    assert '/static/assets/agent-logo.png' in html
+    assert '/static/assets/favicon.ico' in html
+    assert 'id="userProfileImage"' in html
+    assert "/api/profile-image" in js
+    assert "refreshProfileImage" in js
+    assert "set_profile_image" in js
+
+
+def test_profile_image_endpoint_uses_durable_user_picture(tmp_path, monkeypatch):
+    from webui import server
+
+    profile = tmp_path / "user_picture.png"
+    profile.write_bytes(b"not-used-by-FileResponse-constructor")
+    monkeypatch.setattr(server, "get_profile_image_path", lambda migrate_legacy=True: profile)
+    response = server.profile_image()
+    assert Path(response.path) == profile
+    assert response.media_type == "image/png"

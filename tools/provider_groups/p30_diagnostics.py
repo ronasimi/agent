@@ -20,6 +20,8 @@ TOOL_SPECS = [
     ('network_diagnostics', 'network_path'),
     ('network_diagnostics', 'endpoint_probe'),
     ('network_diagnostics', 'http_probe'),
+    ('network_mapper', 'local_subnets'),
+    ('network_mapper', 'scan_subnet'),
     ('network_mapper', 'map_network'),
     ('mdns_scanner', 'scan_mdns'),
 ]

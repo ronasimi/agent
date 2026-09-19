@@ -67,3 +67,33 @@ def test_recipe_suggestion_uses_normal_composer_submit_path():
     js = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
     assert "sendMessage()" not in js
     assert "$('#composer').requestSubmit()" in js
+
+
+def test_header_copy_control_and_inline_turn_status_contract():
+    root = Path(__file__).resolve().parents[1]
+    html = (root / "webui" / "static" / "index.html").read_text(encoding="utf-8")
+    js = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
+    css = (root / "webui" / "static" / "style.css").read_text(encoding="utf-8")
+
+    assert 'id="copyChat"' in html
+    assert 'id="status"' not in html
+    assert "/api/history/export" in js
+    assert "copyEntireChat" in js
+    assert "activeUserMessageEl" in js
+    assert "turn-status" in js
+    assert ".turn-status" in css
+    assert ".message.user{display:flex;flex-direction:column;align-items:flex-end}" in css
+
+
+def test_history_export_formats_complete_rows(monkeypatch):
+    from webui import history
+
+    monkeypatch.setattr(history, "_load_chat_history_from_db", lambda limit, include_compacted=False: [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+        {"role": "tool", "name": "current_time", "content": "{\"time\":\"12:00\"}"},
+    ])
+    exported = history._history_export()
+    assert "User:\nhello" in exported
+    assert "Assistant:\nhi" in exported
+    assert "Tool [current_time]:" in exported

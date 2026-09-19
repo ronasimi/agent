@@ -1,40 +1,176 @@
-# ==========================================
-# FILE: tools/user_profile.py
-# User Identity and Preferences Management
-# ==========================================
-import sqlite3
+"""User identity, preferences, and Web UI profile-image persistence."""
+from __future__ import annotations
+
 import json
-import yaml
+import os
+import re
+import sqlite3
+from pathlib import Path
+from typing import Any
 
-DB_PATH = "/app/memory/knowledge.db"
-DB_TIMEOUT = 10.0
+from PIL import Image, ImageOps
+
+from .runtime import DB_PATH, DB_TIMEOUT
+
+PROFILE_DIR = Path(os.environ.get("AGENT_PROFILE_DIR", "/app/memory/profile")).resolve()
+PROFILE_IMAGE_PATH = PROFILE_DIR / "user_picture.png"
+WORKSPACE_ROOT = Path(os.environ.get("AGENT_WORKSPACE", "/app/workspace")).resolve()
+_ALLOWED_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp"}
+_IMAGE_PATH_RE = re.compile(r"(?:Attached file:\s*)?(/[^\s\"'<>]+\.(?:png|jpe?g|webp))", re.I)
+_SELF_PHOTO_RE = re.compile(r"\b(?:photo|picture|image)\s+of\s+me\b|\bmy\s+(?:photo|picture|image)\b|\bthis\s+is\s+(?:a\s+photo\s+of\s+)?me\b", re.I)
 
 
-def init_user_profile_db():
-    """Initialize user profile tables."""
+def _connect() -> sqlite3.Connection:
+    Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
+    conn.execute("PRAGMA busy_timeout=15000")
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
+def init_user_profile_db() -> None:
+    """Initialize user-profile tables."""
+    with _connect() as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS user_profile (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS user_preferences (
+                   category TEXT, key TEXT, value TEXT,
+                   PRIMARY KEY (category, key)
+               )"""
+        )
+
+
+def _safe_workspace_image(path: str) -> Path:
+    raw = str(path or "").strip()
+    if not raw:
+        raise ValueError("Missing required image path.")
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = WORKSPACE_ROOT / candidate
+    candidate = candidate.resolve()
     try:
-        conn.execute("PRAGMA journal_mode=WAL;")
-        
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS user_profile (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-        """)
-        
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS user_preferences (
-                category TEXT,
-                key TEXT,
-                value TEXT,
-                PRIMARY KEY (category, key)
-            )
-        """)
-        
-        conn.commit()
+        candidate.relative_to(WORKSPACE_ROOT)
+    except ValueError as exc:
+        raise ValueError("Profile images must come from the agent workspace.") from exc
+    if not candidate.is_file():
+        raise FileNotFoundError(f"Image not found: {candidate}")
+    if candidate.suffix.lower() not in _ALLOWED_IMAGE_EXT:
+        raise ValueError("Profile image must be PNG, JPEG, or WebP.")
+    return candidate
+
+
+def _install_profile_image(source: Path, *, update_memory: bool = True) -> Path:
+    """Normalize a workspace image into the durable shared profile location."""
+    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = PROFILE_DIR / ".user_picture.tmp.png"
+    try:
+        with Image.open(source) as opened:
+            image = ImageOps.exif_transpose(opened)
+            if image.mode not in {"RGB", "RGBA"}:
+                image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
+            # Keep enough detail for future UI sizes without storing giant camera originals.
+            image.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+            image.save(tmp, format="PNG", optimize=True)
+        os.replace(tmp, PROFILE_IMAGE_PATH)
     finally:
-        conn.close()
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+    if update_memory:
+        try:
+            with _connect() as conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS memory (topic TEXT PRIMARY KEY, fact TEXT, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+                )
+                conn.execute(
+                    "INSERT INTO memory(topic, fact, updated_at) VALUES ('user_picture', ?, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT(topic) DO UPDATE SET fact=excluded.fact, updated_at=CURRENT_TIMESTAMP",
+                    (f"Current Web UI profile image: {PROFILE_IMAGE_PATH}",),
+                )
+        except sqlite3.Error:
+            pass
+    return PROFILE_IMAGE_PATH
+
+
+def set_profile_image(path: str) -> str:
+    """Set the user's Web UI profile image from an existing workspace image after explicit user approval."""
+    source = _safe_workspace_image(path)
+    destination = _install_profile_image(source)
+    return json.dumps(
+        {"ok": True, "source": str(source), "profile_image": str(destination)},
+        ensure_ascii=False,
+    )
+
+
+def _legacy_profile_candidate() -> Path | None:
+    """Recover a previously identified user photo from memory/chat history when possible."""
+    try:
+        with _connect() as conn:
+            # First prefer an explicit durable path saved under the newer or legacy topic.
+            try:
+                rows = conn.execute(
+                    "SELECT topic, fact FROM memory WHERE topic IN ('user_picture','user_photo') "
+                    "ORDER BY CASE topic WHEN 'user_picture' THEN 0 ELSE 1 END"
+                ).fetchall()
+            except sqlite3.Error:
+                rows = []
+            for _, fact in rows:
+                match = _IMAGE_PATH_RE.search(str(fact or ""))
+                if match:
+                    try:
+                        return _safe_workspace_image(match.group(1))
+                    except (OSError, ValueError, FileNotFoundError):
+                        pass
+
+            # Older chats often stored only "this is a photo of me" in memory.
+            # Recover the nearest prior attached image path without doing face recognition.
+            try:
+                history = conn.execute(
+                    "SELECT role, content FROM ("
+                    "SELECT id, role, content FROM chat_history ORDER BY id DESC LIMIT 1000"
+                    ") ORDER BY id ASC"
+                ).fetchall()
+            except sqlite3.Error:
+                history = []
+            last_image: Path | None = None
+            for role, content in history:
+                if str(role) != "user":
+                    continue
+                text = str(content or "")
+                matches = list(_IMAGE_PATH_RE.finditer(text))
+                if matches:
+                    try:
+                        last_image = _safe_workspace_image(matches[-1].group(1))
+                    except (OSError, ValueError, FileNotFoundError):
+                        last_image = None
+                if last_image is not None and _SELF_PHOTO_RE.search(text):
+                    return last_image
+    except sqlite3.Error:
+        return None
+    return None
+
+
+def get_profile_image_path(*, migrate_legacy: bool = True) -> Path | None:
+    """Return the durable profile image, optionally migrating a legacy remembered photo."""
+    if PROFILE_IMAGE_PATH.is_file():
+        return PROFILE_IMAGE_PATH
+    if not migrate_legacy:
+        return None
+    candidate = _legacy_profile_candidate()
+    if candidate is None:
+        return None
+    try:
+        return _install_profile_image(candidate)
+    except (OSError, ValueError):
+        return None
+
+
+def profile_image_info() -> str:
+    """Report whether a durable Web UI profile image is currently available."""
+    path = get_profile_image_path(migrate_legacy=True)
+    return json.dumps({"present": bool(path), "profile_image": str(path) if path else ""}, ensure_ascii=False)
 
 
 def set_user_identity(
@@ -42,277 +178,124 @@ def set_user_identity(
     role: str = "",
     timezone: str = "UTC",
     email: str = "",
-    interests: list = None
+    interests: list | None = None,
 ) -> str:
-    """
-    Configure who 'you' are for the agent to act as.
-    
-    Args:
-        name: Your name
-        role: Your role/title
-        timezone: Your timezone (e.g., America/New_York)
-        email: Your email address
-        interests: List of interests/topics
-    
-    Returns: Confirmation message
-    
-    Example:
-        >>> result = set_user_identity(name="Alice", role="Researcher")
-        >>> "User profile set" in result
-        True
-    """
-    profile = {
-        "name": name,
-        "role": role,
-        "timezone": timezone,
-        "email": email,
-        "interests": interests or []
-    }
-    
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
-    try:
-        for k, v in profile.items():
-            value = json.dumps(v) if isinstance(v, (list, dict)) else str(v)
-            conn.execute(
-                "INSERT OR REPLACE INTO user_profile (key, value) VALUES (?, ?)",
-                (f"identity.{k}", value)
-            )
-        conn.commit()
-        return f"User profile set: {name} ({role})"
-    finally:
-        conn.close()
+    """Configure stable user identity fields for the local agent."""
+    profile = {"name": name, "role": role, "timezone": timezone, "email": email, "interests": interests or []}
+    with _connect() as conn:
+        for key, value in profile.items():
+            encoded = json.dumps(value) if isinstance(value, (list, dict)) else str(value)
+            conn.execute("INSERT OR REPLACE INTO user_profile (key, value) VALUES (?, ?)", (f"identity.{key}", encoded))
+    return f"User profile set: {name} ({role})"
 
 
-def get_user_identity() -> dict:
-    """
-    Retrieve user identity information.
-    
-    Returns: Dictionary with user identity
-    
-    Example:
-        >>> set_user_identity(name="Bob", role="Engineer")
-        'User profile set: Bob (Engineer)'
-        >>> identity = get_user_identity()
-        >>> identity.get("name")
-        'Bob'
-    """
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
-    try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT key, value FROM user_profile WHERE key LIKE 'identity.%'")
-        
-        identity = {}
-        for k, v in cursor.fetchall():
-            key = k.replace("identity.", "")
-            try:
-                identity[key] = json.loads(v)
-            except (TypeError, json.JSONDecodeError):
-                identity[key] = v
-        
-        return identity
-    finally:
-        conn.close()
+def get_user_identity() -> dict[str, Any]:
+    """Retrieve configured user identity information."""
+    init_user_profile_db()
+    with _connect() as conn:
+        rows = conn.execute("SELECT key, value FROM user_profile WHERE key LIKE 'identity.%'").fetchall()
+    identity: dict[str, Any] = {}
+    for key, value in rows:
+        short = str(key).replace("identity.", "", 1)
+        try:
+            identity[short] = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            identity[short] = value
+    return identity
 
 
 def set_research_preference(category: str, key: str, value: str) -> str:
-    """
-    Set research behavior preferences.
-    
-    Categories:
-    - search_depth: light, balanced, deep
-    - output_format: summary, detailed, bullets
-    - academic_weight: 0.0-1.0
-    - recency_weight: 0.0-1.0
-    - max_results: number
-    
-    Args:
-        category: Preference category
-        key: Preference key
-        value: Preference value
-    
-    Returns: Confirmation message
-    
-    Example:
-        >>> set_research_preference("search_depth", "depth", "deep")
-        'Preference set: search_depth.depth = deep'
-    """
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
-    try:
-        conn.execute("""
-            INSERT OR REPLACE INTO user_preferences (category, key, value)
-            VALUES (?, ?, ?)
-        """, (category, key, value))
-        conn.commit()
-        return f"Preference set: {category}.{key} = {value}"
-    finally:
-        conn.close()
+    """Set a durable research preference."""
+    init_user_profile_db()
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO user_preferences (category, key, value) VALUES (?, ?, ?)",
+            (category, key, value),
+        )
+    return f"Preference set: {category}.{key} = {value}"
 
 
-def get_user_preferences() -> dict:
-    """
-    Retrieve all user preferences.
-    
-    Returns: Dictionary of preferences by category
-    
-    Example:
-        >>> set_research_preference("search_depth", "depth", "balanced")
-        'Preference set: search_depth.depth = balanced'
-        >>> prefs = get_user_preferences()
-        >>> prefs.get("search_depth", {}).get("depth")
-        'balanced'
-    """
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
-    try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT category, key, value FROM user_preferences")
-        
-        prefs = {}
-        for cat, k, v in cursor.fetchall():
-            if cat not in prefs:
-                prefs[cat] = {}
-            prefs[cat][k] = v
-        
-        return prefs
-    finally:
-        conn.close()
+def get_user_preferences() -> dict[str, dict[str, str]]:
+    """Retrieve all configured user preferences."""
+    init_user_profile_db()
+    with _connect() as conn:
+        rows = conn.execute("SELECT category, key, value FROM user_preferences").fetchall()
+    prefs: dict[str, dict[str, str]] = {}
+    for category, key, value in rows:
+        prefs.setdefault(str(category), {})[str(key)] = str(value)
+    return prefs
 
 
 def get_user_prompt_context() -> str:
-    """
-    Load user identity & preferences into system prompt format.
-    
-    Returns: Formatted string for system prompt injection
-    
-    Example:
-        >>> set_user_identity(name="Charlie", role="Manager")
-        'User profile set: Charlie (Manager)'
-        >>> context = get_user_prompt_context()
-        >>> "Charlie" in context
-        True
-    """
+    """Render user identity and preferences as prompt context."""
     identity = get_user_identity()
     prefs = get_user_preferences()
-    
-    context = "\n### User Context\n"
-    
+    lines = ["\n### User Context"]
     if identity:
-        name = identity.get('name', 'Unknown')
-        role = identity.get('role', 'N/A')
-        tz = identity.get('timezone', 'UTC')
-        
-        context += f"**Name**: {name}\n"
-        context += f"**Role**: {role}\n"
-        context += f"**Timezone**: {tz}\n"
-        
-        interests = identity.get('interests', [])
+        lines += [
+            f"**Name**: {identity.get('name', 'Unknown')}",
+            f"**Role**: {identity.get('role', 'N/A')}",
+            f"**Timezone**: {identity.get('timezone', 'UTC')}",
+        ]
+        interests = identity.get("interests", [])
         if interests:
-            context += f"**Interests**: {', '.join(interests)}\n"
+            lines.append(f"**Interests**: {', '.join(map(str, interests))}")
     else:
-        context += "[No user profile configured yet]\n"
-    
+        lines.append("[No user profile configured yet]")
     if prefs:
-        context += "\n**Preferences**:\n"
-        for cat, items in prefs.items():
-            for k, v in items.items():
-                context += f"- {cat}.{k}: {v}\n"
-    
-    return context
+        lines.append("\n**Preferences**:")
+        for category, items in prefs.items():
+            for key, value in items.items():
+                lines.append(f"- {category}.{key} = {value}")
+    return "\n".join(lines) + "\n"
 
 
-def get_user_research_style() -> dict:
-    """
-    Get research style preferences for decision-making.
-    
-    Returns: Dictionary with research configuration
-    
-    Example:
-        >>> style = get_user_research_style()
-        >>> isinstance(style, dict)
-        True
-        >>> "depth" in style
-        True
-    """
-    prefs = get_user_preferences()
-    search_prefs = prefs.get("search_depth", {})
-    
-    style = {
-        "depth": search_prefs.get("depth", "balanced"),  # light, balanced, deep
-        "academic_weight": float(search_prefs.get("academic_weight", 0.5)),  # 0.0-1.0
-        "recency_weight": float(search_prefs.get("recency_weight", 0.5)),  # 0.0-1.0
-        "max_results": int(search_prefs.get("max_results", 5))
+def get_user_research_style() -> dict[str, Any]:
+    """Get research style preferences with defaults."""
+    search_prefs = get_user_preferences().get("search_depth", {})
+    return {
+        "depth": search_prefs.get("depth", "balanced"),
+        "academic_weight": float(search_prefs.get("academic_weight", 0.5)),
+        "recency_weight": float(search_prefs.get("recency_weight", 0.5)),
+        "max_results": int(search_prefs.get("max_results", 5)),
     }
-    
-    return style
 
 
 def clear_user_profile() -> str:
-    """Clear all user profile data."""
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
-    try:
+    """Clear configured profile fields and preferences (not the profile image)."""
+    init_user_profile_db()
+    with _connect() as conn:
         conn.execute("DELETE FROM user_profile")
         conn.execute("DELETE FROM user_preferences")
-        conn.commit()
-        return "User profile cleared"
-    finally:
-        conn.close()
+    return "User profile cleared"
 
 
 def export_user_profile() -> str:
-    """
-    Export user profile as JSON string.
-    
-    Returns: JSON string of full profile
-    """
-    identity = get_user_identity()
-    prefs = get_user_preferences()
-    
-    profile = {
-        "identity": identity,
-        "preferences": prefs
-    }
-    
-    return json.dumps(profile, indent=2)
+    """Export identity and preferences as JSON."""
+    return json.dumps({"identity": get_user_identity(), "preferences": get_user_preferences()}, indent=2)
 
 
 def import_user_profile(profile_json: str) -> str:
-    """
-    Import user profile from JSON string.
-    
-    Args:
-        profile_json: JSON string with identity and preferences
-    
-    Returns: Confirmation message
-    """
+    """Import identity and preferences from JSON."""
     try:
         data = json.loads(profile_json)
-        
-        # Import identity
         if "identity" in data:
             identity = data["identity"]
             set_user_identity(
-                name=identity.get("name", ""),
-                role=identity.get("role", ""),
-                timezone=identity.get("timezone", "UTC"),
-                email=identity.get("email", ""),
-                interests=identity.get("interests", [])
+                name=identity.get("name", ""), role=identity.get("role", ""),
+                timezone=identity.get("timezone", "UTC"), email=identity.get("email", ""),
+                interests=identity.get("interests", []),
             )
-        
-        # Import preferences
-        if "preferences" in data:
-            prefs = data["preferences"]
-            for category, items in prefs.items():
-                for key, value in items.items():
-                    set_research_preference(category, key, value)
-        
+        for category, items in data.get("preferences", {}).items():
+            for key, value in items.items():
+                set_research_preference(category, key, value)
         return "User profile imported successfully"
     except json.JSONDecodeError:
         return "Error: Invalid JSON format"
-    except Exception as e:
-        return f"Error importing profile: {e}"
+    except Exception as exc:
+        return f"Error importing profile: {exc}"
 
 
-# Initialize on import. Read-only/test environments may not expose the
-# persistent profile database, so only expected storage failures are ignored.
 try:
     init_user_profile_db()
 except (OSError, sqlite3.Error):

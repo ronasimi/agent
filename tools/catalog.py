@@ -105,6 +105,10 @@ def select_tool_schemas(user_text: str, max_tools: int = 12, context_text: str =
         name = str(fn.get("name", ""))
         description = str(fn.get("description", ""))
         name_tokens = _selection_tokens(name)
+        # Reloading the registry is a side effect, not a discovery operation.
+        # Only expose it lexically when the user actually asked to reload.
+        if name == "reload_tools" and "reload" not in current_tokens:
+            continue
         haystack = name_tokens | _selection_tokens(description)
         current_score = sum(4 if token in name_tokens else 2 for token in current_tokens & haystack)
         context_score = sum(2 if token in name_tokens else 1 for token in context_tokens & haystack)

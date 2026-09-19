@@ -85,7 +85,7 @@ agent:
       temperature: 0.0
       top_p: 0.9
       top_k: 20
-      num_predict: 192
+      num_predict: 96
 
   # Reusable Unix-style workflows are persisted separately from conversation
   # memory. FTS5 provides local semantic-ish lookup without another model call.
@@ -125,7 +125,7 @@ agent:
 
   main_options:
     num_ctx: 16384
-    temperature: 0.4
+    temperature: 0.2
     top_p: 0.9
     top_k: 20
 

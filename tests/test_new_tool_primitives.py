@@ -28,3 +28,19 @@ def test_shell_nonzero_with_stdout_is_partial():
 def test_shell_nonzero_without_stdout_is_error():
     result = execute_shell("exit 3")
     assert result.startswith("Error:")
+
+
+def test_text_readers_reject_binary_images(tmp_path, monkeypatch):
+    from tools import workspace
+    from tools.primitive_modules import filesystem
+
+    monkeypatch.setattr(workspace, "WORKSPACE_DIR", str(tmp_path.resolve()))
+    image = tmp_path / "pixel.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + b"\x00" * 32)
+
+    legacy = workspace.read_file(str(image))
+    primitive = filesystem.read_text(str(image))
+    assert legacy.startswith("Error: read_file only supports text files")
+    assert primitive.startswith("Error: read_text only supports text files")
+    assert "image/png" in legacy
+    assert "image/png" in primitive

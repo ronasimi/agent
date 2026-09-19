@@ -23,7 +23,7 @@ from tools.model_context import SharedModelContext
 from tools.recipe_learning import handle_recipe_confirmation, maybe_create_recipe_candidate, pending_recipe_prompt
 from tools.recipe_store import check_recipes_for_task, render_recipe_preflight
 from tools.runtime import record_monitor_state, utc_now
-from tools.task_requirements import TaskRequirementLedger, is_followup_request
+from tools.task_requirements import TaskRequirementLedger, is_evidence_reuse_request, is_followup_request
 from tools.turn_policy import derive_turn_tool_policy
 
 from .console import Spinner, print_perf_stats as _print_perf_stats
@@ -97,6 +97,15 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
             recent_selection_context += (
                 f"\nSaved recipe match: {relevant_recipe['name']} - {relevant_recipe['description']}"
             )
+        continuation = is_followup_request(user_input)
+        evidence_reuse_request = is_evidence_reuse_request(user_input)
+        previous_working_state = WORKING_STATE.load() if WORKING_STATE_ENABLED and continuation else {}
+        prior_evidence_refs = [
+            str(item.get("evidence_ref") or "")
+            for item in list(previous_working_state.get("verified_observations") or [])
+            if isinstance(item, dict) and item.get("evidence_ref")
+        ]
+
         requirement_ledger = TaskRequirementLedger.from_request(user_input)
         required_tools = requirement_ledger.required_tools()
         selection_limit = min(REQUIREMENT_TOOL_CAP, max(MAX_TOOLS_PER_TURN, len(required_tools) + 4))
@@ -117,8 +126,32 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
         blocked_required = _ensure_tool_schemas(tool_schemas, required_tools, turn_tool_policy)
         for blocked_name in blocked_required:
             requirement_ledger.mark_blocked(blocked_name, "blocked or unavailable under harness policy")
+
+        # An image already encoded on the current message is directly visible to
+        # the multimodal main model. Do not tempt a small model to decode the PNG
+        # through text/byte readers or redundantly re-attach the same file.
+        if detected_images:
+            direct_media_blocklist = {"read_file", "read_text", "read_bytes", "tail_file", "read_lines", "attach_media"}
+            tool_schemas[:] = [
+                schema for schema in tool_schemas
+                if str(schema.get("function", {}).get("name") or "") not in direct_media_blocklist
+            ]
+
+        # Short presentation follow-ups (for example, "display the forecast")
+        # should consume the exact prior observation instead of silently changing
+        # location/source by launching a fresh web search.
+        if evidence_reuse_request and prior_evidence_refs:
+            schema = get_tool_schema("read_observation")
+            tool_schemas[:] = (
+                [schema]
+                if schema and turn_tool_policy.allowed("read_observation", TOOL_METADATA.get("read_observation", {}))
+                else []
+            )
+
+        # Put deterministic completion requirements first on iteration one too,
+        # not only after a tool result, improving 2B/4B tool-choice reliability.
+        _refresh_requirement_tool_schemas(tool_schemas, requirement_ledger, turn_tool_policy)
         policy_note = turn_tool_policy.note()
-        continuation = is_followup_request(user_input)
         # Keep the first system message byte-stable for better prompt-prefix cache
         # reuse. Dynamic per-turn policy is carried by the harness working state.
         if policy_note and not WORKING_STATE_ENABLED:
@@ -133,6 +166,11 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
                     tool_schemas.append(schema)
         model_user_msg = model_message(msg)
         request_context = []
+        if detected_images:
+            request_context.append(
+                f"[Harness: {len(detected_images)} user-provided image(s) are already attached to this message. "
+                "Inspect the pixels directly. Do not call text/byte file readers to infer their visual content.]"
+            )
         if RECIPES_ENABLED:
             request_context.append(render_recipe_preflight(recipe_preflight))
         if memory_context and not WORKING_STATE_ENABLED:

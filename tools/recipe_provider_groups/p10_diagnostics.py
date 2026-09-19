@@ -145,6 +145,8 @@ RECIPE_SPECS = [
 ]
 
 NATIVE_ONLY = {
+    "local_subnets": "derives active private IPv4 networks from live interface/routing state and remains an atomic read-only discovery primitive",
+    "scan_subnet": "bounded active LAN discovery combines ARP/neighbor, DNS, service, and optional OS hints under one safety envelope; keep native rather than reproduce scanning policy in a recipe",
     "list_host_monitor_events": "durable monitor-event query; already a narrow storage accessor rather than a monolithic computation",
     "read_host_journal": "journalctl filtering and host journal namespace access are not yet decomposed into safe primitives",
     "tail_host_log": "host-log fallback logic spans file and journal backends and remains a narrow native accessor",

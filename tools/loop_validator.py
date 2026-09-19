@@ -330,6 +330,49 @@ def _stall_schema(tool_names: list[str]) -> dict[str, Any]:
     }
 
 
+def _parse_structured_payload(raw: Any) -> dict[str, Any]:
+    """Decode a small JSON object even when a local model adds fences/preamble."""
+    if isinstance(raw, dict):
+        return raw
+    text = str(raw or "").strip()
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I).strip()
+    try:
+        payload = json.loads(text)
+        if isinstance(payload, dict):
+            return payload
+    except json.JSONDecodeError:
+        pass
+    start = text.find("{")
+    if start >= 0:
+        try:
+            payload, _ = json.JSONDecoder().raw_decode(text[start:])
+            if isinstance(payload, dict):
+                return payload
+        except json.JSONDecodeError:
+            pass
+    raise ValueError("validator did not return a JSON object")
+
+
+def _fallback_stalled_step(signal: dict[str, Any], exc: Exception) -> dict[str, str]:
+    """Fail closed after a repeated stall instead of emitting blind retry loops."""
+    kind = str(signal.get("kind") or "unknown")
+    if kind == "model_failure":
+        decision, diagnosis = "retry", "bad_arguments"
+    elif kind == "repeated_result":
+        decision, diagnosis = "blocked", "repeated_call"
+    elif kind == "tool_failure":
+        decision, diagnosis = "blocked", "tool_unavailable"
+    else:
+        decision, diagnosis = "blocked", "insufficient_evidence"
+    return {
+        "decision": decision,
+        "suggested_tool": "",
+        "diagnosis": diagnosis,
+        "reason": f"validator unavailable; deterministic fallback after repeated stall: {exc}"[:500],
+        "source": "fallback",
+    }
+
+
 def validate_tool_loop(
     client: Any,
     model: str,
@@ -364,7 +407,7 @@ def validate_tool_loop(
             think=False,
         )
         raw = response.get("response", "{}") if isinstance(response, dict) else getattr(response, "response", "{}")
-        payload = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", str(raw).strip(), flags=re.I))
+        payload = _parse_structured_payload(raw)
         decision = str(payload.get("decision") or "").strip()
         if decision not in DECISIONS:
             raise ValueError("invalid validator decision")
@@ -376,7 +419,10 @@ def validate_tool_loop(
             diagnosis = "unknown"
         return {"decision": decision, "suggested_tool": suggested, "diagnosis": diagnosis, "reason": str(payload.get("reason") or "")[:500]}
     except Exception as exc:
-        return {"decision": "corrective_tool", "suggested_tool": "", "diagnosis": "unknown", "reason": f"validator unavailable: {exc}"[:500]}
+        # This validator runs at the absolute safety-limit edge. If it is
+        # unavailable, another unguided tool call is more likely to repeat the
+        # loop than recover it, so finish from the evidence already collected.
+        return {"decision": "finish", "suggested_tool": "", "diagnosis": "insufficient_evidence", "reason": f"validator unavailable: {exc}"[:500], "source": "fallback"}
 
 
 def validate_stalled_step(
@@ -425,7 +471,7 @@ def validate_stalled_step(
             think=False,
         )
         raw = response.get("response", "{}") if isinstance(response, dict) else getattr(response, "response", "{}")
-        payload = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", str(raw).strip(), flags=re.I))
+        payload = _parse_structured_payload(raw)
         decision = str(payload.get("decision") or "").strip()
         if decision not in STALL_DECISIONS:
             raise ValueError("invalid stalled-step validator decision")
@@ -437,9 +483,7 @@ def validate_stalled_step(
             diagnosis = "unknown"
         return {"decision": decision, "suggested_tool": suggested, "diagnosis": diagnosis, "reason": str(payload.get("reason") or "")[:500]}
     except Exception as exc:
-        # Failing open to one corrected main-model attempt is safer than silently
-        # terminating a user task because the optional validator is unavailable.
-        return {"decision": "retry", "suggested_tool": "", "diagnosis": "unknown", "reason": f"validator unavailable: {exc}"[:500]}
+        return _fallback_stalled_step(safe_signal, exc)
 
 
 def build_recovery_message(report: dict[str, str]) -> str:

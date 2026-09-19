@@ -43,6 +43,18 @@ _RULES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     ("network_state", "network_snapshot", "network interfaces/routes/listeners", (r"\bnetwork (?:interfaces|routes|health|state)\b", r"\blistening sockets?\b")),
     ("neighbors", "neighbor_snapshot", "network neighbor table", (r"\bneighbors?\b", r"\barp\b", r"\bndp\b")),
     ("connections", "connection_snapshot", "established network connections", (r"\bestablished connections?\b", r"\bconnection snapshot\b", r"\bactive connections?\b")),
+    ("local_subnets", "local_subnets", "active local private subnets", (
+        r"\bscan (?:the )?local network\b",
+        r"\bscan .*subnets?.*\bhosts?\b",
+        r"\blocal network.*\bhosts?\b",
+        r"\bdiscover .*\blocal (?:network|subnets?)\b",
+    )),
+    ("scan_subnet", "scan_subnet", "local subnet host discovery and fingerprinting", (
+        r"\bscan (?:the )?local network\b",
+        r"\bscan .*subnets?.*\bhosts?\b",
+        r"\blocal network.*\bhosts?\b",
+        r"\bdiscover .*\bhosts?\b.*\b(?:lan|subnet|local network)\b",
+    )),
     ("dns", "dns_diagnose", "DNS resolution/diagnosis", (r"\bresolve\s+[a-z0-9.-]+", r"\bdns (?:resolution|diagnos|lookup)", r"\bresolve dns\b")),
     ("http", "http_probe", "HTTP/HTTPS connectivity probe", (r"\bprobe (?:https?|connectivity)", r"\bhttps? connectivity\b", r"\bhttp probe\b")),
     ("path", "network_path", "network path/hop diagnosis", (r"\bnetwork path\b", r"\btraceroute\b", r"\bmtr\b", r"\broute tracing\b")),
@@ -50,6 +62,16 @@ _RULES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     ("dependency_audit", "dependency_audit", "runtime dependency audit", (r"\bdependency health\b", r"\bdependency audit\b", r"\btool/?dependency health\b")),
     ("web_search", "web_search", "current web source discovery", (r"\bweb research\b", r"\bresearch the current\b", r"\bcurrent .*documentation\b", r"\blook up\b", r"\bsearch the web\b")),
     ("web_verify", "browse_url", "authoritative source content verification", (r"\bcurrent .*documentation\b", r"\bofficial .*documentation\b", r"\bsource urls?\b", r"\bverify .*source\b", r"\bweb research\b")),
+    ("weather_search", "web_search", "current weather/forecast source discovery", (
+        r"\bwhat(?:'s| is) (?:the )?(?:weather|forecast)\b",
+        r"\b(?:weather|forecast)\b.*\b(?:today|tomorrow|next|current|now|week|days?|hours?)\b",
+        r"\bfind\b.*\b(?:weather|forecast)\b",
+    )),
+    ("weather_verify", "browse_url", "current weather/forecast source verification", (
+        r"\bwhat(?:'s| is) (?:the )?(?:weather|forecast)\b",
+        r"\b(?:weather|forecast)\b.*\b(?:today|tomorrow|next|current|now|week|days?|hours?)\b",
+        r"\bfind\b.*\b(?:weather|forecast)\b",
+    )),
     ("screenshot", "take_web_screenshot", "requested webpage screenshot", (r"\btake (?:a )?screenshot\b", r"\bscreenshot of\b", r"\bcapture .*page\b")),
     ("repo_status", "repo_status", "repository status", (r"\brepository status\b", r"\brepo status\b")),
     ("repo_checks", "repo_checks", "repository compile/config/lint/test checks", (r"\brepository health\b", r"\brepo checks?\b", r"\bcompile/config/lint/test\b", r"\b(?:compile|lint|pytest|tests?).*checks?\b")),
@@ -72,7 +94,7 @@ _EXPLICIT_TOOL_NAMES = {
     "dns_diagnose", "network_path", "endpoint_probe", "http_probe", "tool_health",
     "dependency_audit", "web_search", "browse_url", "take_web_screenshot",
     "repo_status", "repo_checks", "page_metadata", "page_links", "extract_document",
-    "current_time", "hostname", "environment_summary",
+    "current_time", "hostname", "environment_summary", "local_subnets", "scan_subnet",
 }
 
 
@@ -97,6 +119,22 @@ def derive_requirements(user_text: str) -> list[Requirement]:
     return result
 
 
+def is_evidence_reuse_request(user_text: str) -> bool:
+    """Detect short commands that ask to present already-collected evidence.
+
+    These should reuse the preceding working-state observation rather than start
+    a fresh web/system lookup merely because a noun such as ``forecast`` is
+    present.
+    """
+    text = " ".join(str(user_text or "").strip().split())
+    if not text or len(text) > 180:
+        return False
+    lower = text.lower()
+    if not re.match(r"^(?:display|show|summarize|summarise|repeat|list|give me|present)\b", lower):
+        return False
+    return bool(re.search(r"\b(?:forecast|results?|findings?|report|answer|data|output|that|those|previous|above)\b", lower))
+
+
 def is_followup_request(user_text: str) -> bool:
     """Conservatively detect requests that intentionally depend on the prior task.
 
@@ -114,6 +152,8 @@ def is_followup_request(user_text: str) -> bool:
         "the above", "follow up", "follow-up",
     )
     if any(phrase in lower for phrase in continuity):
+        return True
+    if is_evidence_reuse_request(text):
         return True
     if len(text) <= 180 and re.match(r"^(?:and|also|now|then|so|what about|what else|can you|could you)\b", lower):
         return True

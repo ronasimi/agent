@@ -48,13 +48,14 @@ def test_recovery_message_is_deterministic_and_does_not_relay_reason():
     assert report["reason"] not in message
 
 
-def test_validator_failure_degrades_to_one_bounded_recovery_attempt():
+def test_validator_failure_finishes_instead_of_starting_an_unguided_final_retry():
     class BrokenClient:
         def generate(self, **_kwargs):
             raise TimeoutError("offline")
 
     report = validate_tool_loop(BrokenClient(), "fast", "request", [], [], {})
-    assert report["decision"] == "corrective_tool"
+    assert report["decision"] == "finish"
+    assert report["diagnosis"] == "insufficient_evidence"
     assert report["suggested_tool"] == ""
 
 
@@ -177,3 +178,26 @@ def test_recovery_shares_only_structured_diagnosis_not_freeform_reason():
     message = build_recovery_message(report)
     assert "Diagnosis: bad_arguments" in message
     assert report["reason"] not in message
+
+
+def test_validator_accepts_json_after_small_model_preamble():
+    client = FakeClient('Result follows:\n```json\n{"decision":"finish","diagnosis":"task_complete","reason":"done","suggested_tool":""}\n```')
+    report = validate_tool_loop(client, "fast", "request", [], [], {})
+    assert report["decision"] == "finish"
+    assert report["diagnosis"] == "task_complete"
+
+
+def test_stalled_validator_failure_fails_closed_for_repeated_tool_failure():
+    from tools.loop_validator import validate_stalled_step
+
+    class BrokenClient:
+        def generate(self, **_kwargs):
+            raise TimeoutError("offline")
+
+    report = validate_stalled_step(
+        BrokenClient(), "fast", "request", [],
+        {"kind":"tool_failure","key":"browse_url","attempts":3,"reason":"timeout"},
+        ["browse_url", "web_search"], {},
+    )
+    assert report["decision"] == "blocked"
+    assert report["diagnosis"] == "tool_unavailable"

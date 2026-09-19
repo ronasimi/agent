@@ -28,6 +28,31 @@ from ..workspace import _get_safe_path
 
 MAX_TEXT = 100_000
 
+_BINARY_TEXT_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".ico",
+    ".pdf", ".zip", ".gz", ".bz2", ".xz", ".7z", ".tar",
+    ".mp3", ".wav", ".ogg", ".flac", ".mp4", ".webm", ".mov",
+}
+
+def _binary_text_reason(path: Path) -> str:
+    """Return a MIME/reason string when a path should not be decoded as text."""
+    suffix = path.suffix.lower()
+    mime, _ = mimetypes.guess_type(str(path))
+    if suffix in _BINARY_TEXT_EXTENSIONS or (mime and mime.split("/", 1)[0] in {"image", "audio", "video"}):
+        return mime or suffix.lstrip(".") or "binary"
+    try:
+        with path.open("rb") as handle:
+            probe = handle.read(2048)
+    except OSError:
+        return ""
+    if b"\x00" in probe:
+        return mime or "binary data"
+    if probe:
+        controls = sum(1 for byte in probe if byte < 32 and byte not in {9, 10, 13})
+        if controls / len(probe) > 0.08:
+            return mime or "binary data"
+    return ""
+
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2, default=str)
 

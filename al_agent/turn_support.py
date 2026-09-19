@@ -312,9 +312,14 @@ def _queue_compaction_if_needed(messages: list[dict]) -> bool:
 def _bounded_tool_result_with_ref(tool_name: str, result: Any) -> tuple[str, str]:
     """Keep a head/tail preview and return the durable observation handle."""
     text = str(result)
+    # Persist moderately large successful evidence even when it fits in the
+    # current context window. Follow-up turns can then retrieve the exact prior
+    # observation instead of re-running a web/system tool.
+    observation_id = store_tool_observation(tool_name, text) if len(text) >= min(1000, MAX_TOOL_OUTPUT) else ""
     if len(text) <= MAX_TOOL_OUTPUT:
-        return text, ""
-    observation_id = store_tool_observation(tool_name, text)
+        return text, observation_id
+    if not observation_id:
+        observation_id = store_tool_observation(tool_name, text)
     marker = (
         f"\n\n[Harness: middle truncated; full {len(text)}-character result stored as observation "
         f"{observation_id}. Use read_observation(observation_id, offset, length) for another slice.]\n\n"

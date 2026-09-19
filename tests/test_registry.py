@@ -181,3 +181,29 @@ def test_cancel_reminder_rejects_empty_id_before_slug_fallback():
     from tools.reminders import cancel_reminder
 
     assert cancel_reminder("").startswith("Error:")
+
+
+def test_weather_intent_exposes_search_and_browse():
+    import tools
+    tools.load_tools()
+    names = {schema["function"]["name"] for schema in tools.select_tool_schemas("weather forecast for the next 5 days", max_tools=12)}
+    assert {"web_search", "browse_url"} <= names
+    assert "environment_summary" not in names
+
+
+def test_tool_discovery_does_not_mutate_registry():
+    import tools
+    tools.load_tools()
+    names = {schema["function"]["name"] for schema in tools.select_tool_schemas("what tools are available?", max_tools=12)}
+    assert "tool_health" in names
+    assert "reload_tools" not in names
+
+
+def test_local_network_scan_intent_exposes_readonly_discovery_primitives():
+    import tools
+    tools.load_tools()
+    names = {schema["function"]["name"] for schema in tools.select_tool_schemas(
+        "scan the local network and subnets for hosts", max_tools=16
+    )}
+    assert {"local_subnets", "scan_subnet"} <= names
+    assert "network_reachability" not in names

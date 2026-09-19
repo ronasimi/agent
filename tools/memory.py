@@ -81,16 +81,39 @@ def _save_message_to_db(msg: dict) -> int:
         return int(cursor.lastrowid)
 
 
-def _load_chat_history_from_db(limit: int = 20) -> list[dict]:
+def _load_chat_history_from_db(limit: int = 20, *, include_compacted: bool = False) -> list[dict]:
+    """Load recent model history or, for export only, the complete stored chat.
+
+    Normal model/UI history remains bounded to uncompacted rows. ``include_compacted``
+    is deliberately opt-in so copying/exporting the conversation can include the
+    original rows that have already been summarized out of the model context.
+    """
     init_db()
-    limit = max(1, min(int(limit), 200))
+    requested_limit = int(limit)
+    if include_compacted:
+        # Export callers may pass 0 to request every stored row. Ordinary model/UI
+        # history remains bounded below and never takes this unbounded path.
+        export_limit = 0 if requested_limit <= 0 else min(requested_limit, 100000)
+    else:
+        export_limit = max(1, min(requested_limit, 200))
     with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
-        row = conn.execute("SELECT compacted_through_id FROM conversation_state WHERE id = 1").fetchone()
-        watermark = int(row[0] or 0) if row else 0
-        rows = conn.execute(
-            "SELECT id, role, content, name, extra FROM chat_history WHERE id > ? ORDER BY id DESC LIMIT ?",
-            (watermark, limit),
-        ).fetchall()
+        if include_compacted:
+            if export_limit == 0:
+                rows = conn.execute(
+                    "SELECT id, role, content, name, extra FROM chat_history ORDER BY id DESC"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT id, role, content, name, extra FROM chat_history ORDER BY id DESC LIMIT ?",
+                    (export_limit,),
+                ).fetchall()
+        else:
+            row = conn.execute("SELECT compacted_through_id FROM conversation_state WHERE id = 1").fetchone()
+            watermark = int(row[0] or 0) if row else 0
+            rows = conn.execute(
+                "SELECT id, role, content, name, extra FROM chat_history WHERE id > ? ORDER BY id DESC LIMIT ?",
+                (watermark, export_limit),
+            ).fetchall()
     rows.reverse()
     result = []
     for message_id, role, content, name, extra in rows:
