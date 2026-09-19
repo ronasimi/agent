@@ -210,6 +210,65 @@ def search_recipes(query: str, limit: int = 8) -> list[dict[str, Any]]:
     return sorted(scored,key=lambda x:(-x["semantic_score"], 0 if x.get("origin")=="user" else 1, -x["use_count"]))[:limit]
 
 
+def check_recipes_for_task(query: str, threshold: float = 0.35, limit: int = 3) -> dict[str, Any]:
+    """Deterministically search saved recipes before a model plans a user request."""
+    report: dict[str, Any] = {
+        "status": "checked", "checked": True, "query": str(query or "")[:1000],
+        "threshold": float(threshold), "candidates": [], "relevant": [], "error": "",
+    }
+    try:
+        matches = search_recipes(str(query or ""), limit=max(1, min(int(limit), 8)))
+    except Exception as exc:
+        report.update({"status": "error", "checked": False, "error": str(exc)[:500]})
+        return report
+    for item in matches:
+        candidate = {
+            "name": str(item.get("name") or "")[:120],
+            "description": str(item.get("description") or "")[:500],
+            "semantic_score": float(item.get("semantic_score") or 0.0),
+            "origin": str(item.get("origin") or "user"),
+            "target_tool": str(item.get("target_tool") or ""),
+            "parameters": dict(item.get("parameters") or {}),
+        }
+        report["candidates"].append(candidate)
+        if candidate["semantic_score"] >= float(threshold):
+            report["relevant"].append(candidate)
+    return report
+
+
+def render_recipe_preflight(report: dict[str, Any]) -> str:
+    """Render a compact, trusted control note that makes recipe consideration auditable."""
+    if not report.get("checked"):
+        detail = str(report.get("error") or "unknown recipe-store error")[:300]
+        return (
+            "[Harness recipe preflight]\n"
+            f"The automatic saved-recipe check failed: {detail}. "
+            "Use search_recipes before planning a multi-step workflow if that tool is supplied."
+        )
+    relevant = list(report.get("relevant") or [])
+    if not relevant:
+        return (
+            "[Harness recipe preflight]\n"
+            "Saved recipes were checked for this request and no candidate met the configured relevance threshold. "
+            "Proceed with the smallest suitable primitives; do not repeat the same recipe search unless the user explicitly asks to browse recipes."
+        )
+    rows = []
+    for item in relevant[:3]:
+        name = json.dumps(str(item.get("name") or ""), ensure_ascii=False)
+        description = json.dumps(str(item.get("description") or ""), ensure_ascii=False)
+        parameters = json.dumps(item.get("parameters") or {}, ensure_ascii=False, separators=(",", ":"))[:500]
+        rows.append(
+            f"- name={name}; score={item['semantic_score']:.3f}; origin={item['origin']}; "
+            f"parameters={parameters}; description={description}"
+        )
+    return (
+        "[Harness recipe preflight]\n"
+        "Saved recipes were checked before task planning. Consider the compatible candidates below before composing manual steps. "
+        "Use run_recipe only when its workflow and parameters fit the current request and policy; otherwise use primitives.\n"
+        + "\n".join(rows)
+    )
+
+
 def recipe_exists_for_task(objective: str, pipeline: list[dict[str, Any]]) -> bool:
     init_recipe_store(); fp=pipeline_fingerprint(pipeline)
     with _connect() as conn:

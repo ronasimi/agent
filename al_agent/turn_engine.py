@@ -21,7 +21,7 @@ from tools.loop_validator import (
 from tools.media import unpack_media_result
 from tools.model_context import SharedModelContext
 from tools.recipe_learning import handle_recipe_confirmation, maybe_create_recipe_candidate, pending_recipe_prompt
-from tools.recipe_store import search_recipes as semantic_search_recipes
+from tools.recipe_store import check_recipes_for_task, render_recipe_preflight
 from tools.runtime import record_monitor_state, utc_now
 from tools.task_requirements import TaskRequirementLedger, is_followup_request
 from tools.turn_policy import derive_turn_tool_policy
@@ -77,13 +77,22 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
             for item in messages[-7:-1]
             if item.get("role") in {"user", "assistant"} and item.get("content")
         )[-3000:]
-        recipe_matches = []
+        recipe_preflight = {
+            "status": "disabled", "checked": False, "candidates": [], "relevant": [], "error": "",
+        }
         if RECIPES_ENABLED:
-            try:
-                recipe_matches = semantic_search_recipes(user_input, limit=3)
-            except Exception:
-                recipe_matches = []
-        relevant_recipe = next((r for r in recipe_matches if float(r.get("semantic_score", 0)) >= RECIPE_MATCH_THRESHOLD), None)
+            recipe_preflight = check_recipes_for_task(
+                user_input, threshold=RECIPE_MATCH_THRESHOLD, limit=RECIPE_PREFLIGHT_LIMIT,
+            )
+            emit_event(
+                "recipe_check",
+                status=recipe_preflight.get("status", "error"),
+                checked=bool(recipe_preflight.get("checked")),
+                candidate_count=len(recipe_preflight.get("candidates") or []),
+                relevant_count=len(recipe_preflight.get("relevant") or []),
+                best_match=(recipe_preflight.get("relevant") or [{}])[0].get("name", ""),
+            )
+        relevant_recipe = next(iter(recipe_preflight.get("relevant") or []), None)
         if relevant_recipe:
             recent_selection_context += (
                 f"\nSaved recipe match: {relevant_recipe['name']} - {relevant_recipe['description']}"
@@ -100,7 +109,7 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
         turn_tool_policy.allow_explicit_requirements(set(required_tools), TOOL_METADATA)
         tool_schemas = turn_tool_policy.filter_schemas(selected_tool_schemas, TOOL_METADATA)
         if relevant_recipe:
-            for recipe_tool in ("run_recipe", "search_recipes"):
+            for recipe_tool in ("run_recipe",):
                 if recipe_tool not in {str(x.get("function", {}).get("name") or "") for x in tool_schemas}:
                     schema = get_tool_schema(recipe_tool)
                     if schema and turn_tool_policy.allowed(recipe_tool, TOOL_METADATA.get(recipe_tool, {})):
@@ -116,20 +125,23 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
             system_prompt += "\n\n### Harness-enforced turn tool policy\n" + policy_note
         summary = get_conversation_summary()
         memory_context = build_memory_context(user_input)
+        if RECIPES_ENABLED and not recipe_preflight.get("checked"):
+            recipe_tool = "search_recipes"
+            if recipe_tool not in {str(x.get("function", {}).get("name") or "") for x in tool_schemas}:
+                schema = get_tool_schema(recipe_tool)
+                if schema and turn_tool_policy.allowed(recipe_tool, TOOL_METADATA.get(recipe_tool, {})):
+                    tool_schemas.append(schema)
         model_user_msg = model_message(msg)
-        if relevant_recipe:
-            model_user_msg["content"] = (
-                f"[Harness saved-recipe match] A reusable recipe named '{relevant_recipe['name']}' "
-                f"may apply to this request (semantic score {relevant_recipe.get('semantic_score', 0):.2f}). "
-                "Prefer run_recipe when it safely fits; otherwise use primitives directly.\n\n"
-                + str(model_user_msg.get("content") or "")
-            )
+        request_context = []
+        if RECIPES_ENABLED:
+            request_context.append(render_recipe_preflight(recipe_preflight))
         if memory_context and not WORKING_STATE_ENABLED:
+            request_context.append("### Relevant stored context\n" + memory_context)
+        if request_context:
             model_user_msg["content"] = (
-                "### Relevant stored context\n"
-                + memory_context
+                "\n\n".join(request_context)
                 + "\n\n### Current request\n"
-                + user_input
+                + str(model_user_msg.get("content") or user_input)
             )
         model_history = [*messages[1:-1], model_user_msg]
         shared_context = SharedModelContext(

@@ -485,7 +485,10 @@ The agent includes small read-only primitives for common questions that should n
 Al Agent exposes small typed primitives for filesystem discovery/reads, text and
 JSON transforms, process/system inspection, network layers, web extraction,
 documents/media metadata, Git, safe SQLite reads, arithmetic/time, encoding, and
-IP/URL utilities. The main model normally sees only the small subset selected for
+IP/URL utilities. Additional focused primitives cover numbered line reads,
+bounded directory sizing, regex replacement and splitting, JSON keys and CSV
+summaries, CPU/OS inspection, process trees, ICMP checks, HTML table extraction,
+and Git branches. The main model normally sees only the small subset selected for
 the current request.
 
 `run_pipeline` can execute up to sixteen **read-only** primitive stages inside the
@@ -513,8 +516,11 @@ If none exists it asks whether the workflow should be saved. Reply `yes save it`
 and Not now buttons.
 
 Useful recipe tools are `search_recipes`, `list_recipes`, `run_recipe`, and
-`save_recipe`. A semantically relevant saved recipe is surfaced automatically on
-future turns, but current user constraints and tool policy always take precedence.
+`save_recipe`. Before every enabled task turn, the harness now performs a
+deterministic recipe preflight and injects the checked result into the model's
+planning context. A relevant match exposes `run_recipe` and its parameter schema;
+a failed preflight exposes `search_recipes` for recovery. Current user constraints
+and tool policy always take precedence.
 
 Harness-owned compatibility recipes are seeded automatically into the same semantic recipe table. They are versioned with `origin=builtin`, use names such as `compat.host_snapshot`, and reproduce high-level diagnostic/research tools from smaller primitives wherever the semantics can be preserved safely. `recipe_coverage()` reports the full/partial/native-only coverage matrix and documents why a remaining monolithic tool cannot be represented as a read-only recipe. User recipes remain separate (`origin=user`) and builtin recipe names are reserved.
 

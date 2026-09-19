@@ -264,3 +264,31 @@ def trace_route(target: str, max_hops: int = 20, probes: int = 3) -> str:
         if payload is None: return f"Error: mtr returned an unrecognized output format: {(proc.stdout or proc.stderr).strip()[:500]}"
         if proc.returncode: payload["warning"] = f"mtr exited with status {proc.returncode}: {proc.stderr.strip()[:300]}"
         return _json(payload)
+
+
+def ping_host(host: str, count: int = 3, timeout: float = 2.0) -> str:
+    """Run a bounded ICMP echo check and return packet-loss and latency output."""
+    target = str(host or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,253}", target) or target.startswith("-"):
+        return "Error: invalid host."
+    binary = shutil.which("ping")
+    if not binary:
+        return "Error: ping is not installed."
+    count = _bounded_int(count, 1, 8); timeout = max(0.2, min(float(timeout), 10.0))
+    started = time.monotonic()
+    try:
+        proc = subprocess.run(
+            [binary, "-n", "-c", str(count), "-W", str(max(1, int(timeout))), target],
+            capture_output=True, text=True, timeout=(count * timeout) + 3, stdin=subprocess.DEVNULL,
+        )
+        output = (proc.stdout or proc.stderr).strip()[:8000]
+        loss = re.search(r"([0-9.]+)%\s*packet loss", output)
+        timing = re.search(r"(?:rtt|round-trip).*?=\s*([0-9.]+)/([0-9.]+)/([0-9.]+)/([0-9.]+)\s*ms", output)
+        return _json({
+            "host": target, "ok": proc.returncode == 0, "returncode": proc.returncode,
+            "packet_loss_percent": float(loss.group(1)) if loss else None,
+            "latency_ms": ({"min": float(timing.group(1)), "avg": float(timing.group(2)), "max": float(timing.group(3)), "mdev": float(timing.group(4))} if timing else {}),
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 1), "output": output,
+        })
+    except Exception as exc:
+        return f"Error: ping_host failed: {exc}"

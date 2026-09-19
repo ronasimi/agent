@@ -67,3 +67,24 @@ def text_unique(text: str = "", path: str = "", limit: int = 5000) -> str:
             if len(out)>=_bounded_int(limit,1,10000):break
         return "\n".join(out)
     except Exception as exc:return f"Error: text_unique failed: {exc}"
+
+
+def regex_replace(pattern: str, replacement: str, text: str = "", path: str = "", count: int = 0, ignore_case: bool = False) -> str:
+    """Apply a bounded regular-expression replacement to text or a workspace file in memory."""
+    try:
+        source = _source_text(text, path); count = _bounded_int(count, 0, 10000)
+        compiled = re.compile(pattern, re.I if ignore_case else 0)
+        output, replacements = compiled.subn(replacement, source, count=count)
+        return _json({"text": output[:MAX_TEXT], "replacements": replacements, "truncated": len(output) > MAX_TEXT})
+    except Exception as exc:
+        return f"Error: regex_replace failed: {exc}"
+
+
+def text_split(text: str = "", path: str = "", delimiter: str = "", limit: int = 200) -> str:
+    """Split text into a bounded JSON list using a delimiter, or lines when it is empty."""
+    try:
+        source = _source_text(text, path); limit = _bounded_int(limit, 1, 2000)
+        parts = source.split(delimiter) if delimiter else source.splitlines()
+        return _json({"parts": parts[:limit], "count": len(parts), "truncated": len(parts) > limit})
+    except Exception as exc:
+        return f"Error: text_split failed: {exc}"

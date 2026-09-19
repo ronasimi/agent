@@ -125,3 +125,42 @@ def host_read_text(path: str = "/etc/resolv.conf", max_chars: int = 20000) -> st
         text=safe.read_text(errors="replace"); limit=_bounded_int(max_chars,100,100000)
         return text[:limit] + ("\n[truncated]" if len(text)>limit else "")
     except Exception as exc:return f"Error: host_read_text failed: {exc}"
+
+
+def cpu_info() -> str:
+    """Return CPU topology, frequency, utilization, and bounded model identity."""
+    try:
+        source = Path("/host/proc/cpuinfo") if Path("/host/proc/cpuinfo").is_file() else Path("/proc/cpuinfo")
+        models = []
+        for line in source.read_text(errors="replace").splitlines():
+            key, sep, value = line.partition(":")
+            if sep and key.strip().lower() in {"model name", "hardware", "processor"}:
+                value = value.strip()
+                if value and value not in models:
+                    models.append(value)
+        frequency = psutil.cpu_freq()
+        return _json({
+            "logical_cpus": psutil.cpu_count(logical=True),
+            "physical_cores": psutil.cpu_count(logical=False),
+            "frequency_mhz": frequency._asdict() if frequency else {},
+            "utilization_percent": psutil.cpu_percent(interval=0.1, percpu=True),
+            "models": models[:8],
+            "source": str(source),
+        })
+    except Exception as exc:
+        return f"Error: cpu_info failed: {exc}"
+
+
+def os_release() -> str:
+    """Return parsed host/container operating-system release metadata."""
+    source = Path("/host/etc/os-release") if Path("/host/etc/os-release").is_file() else Path("/etc/os-release")
+    try:
+        values = {}
+        for line in source.read_text(errors="replace").splitlines():
+            if not line or line.lstrip().startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip().strip('"').strip("'")[:1000]
+        return _json({"source": str(source), "release": values})
+    except Exception as exc:
+        return f"Error: os_release failed: {exc}"

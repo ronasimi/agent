@@ -123,3 +123,44 @@ def map_value(value: Any, mapping: dict, default: Any = None) -> str:
     if key in mapping:
         return _json(mapping[key])
     return _json(default if default is not None else value)
+
+
+def json_keys(path_expr: str = "$", data: Any = "", path: str = "", limit: int = 200) -> str:
+    """List bounded keys or indexes at a simple dotted path in JSON data."""
+    try:
+        value = _get_path(_load_json(data, path), path_expr); limit = _bounded_int(limit, 1, 1000)
+        if isinstance(value, dict):
+            keys = list(value.keys())
+        elif isinstance(value, list):
+            keys = list(range(len(value)))
+        else:
+            return _json({"type": type(value).__name__, "keys": [], "count": 0})
+        return _json({"type": type(value).__name__, "keys": keys[:limit], "count": len(keys), "truncated": len(keys) > limit})
+    except Exception as exc:
+        return f"Error: json_keys failed: {exc}"
+
+
+def csv_summary(text: str = "", path: str = "", sample_rows: int = 5) -> str:
+    """Summarize columns, missing values, numeric ranges, and sample rows from bounded CSV."""
+    import io
+    try:
+        reader = csv.DictReader(io.StringIO(_source_text(text, path)))
+        columns = list(reader.fieldnames or []); rows = list(reader)
+        missing = {name: 0 for name in columns}; numeric: dict[str, list[float]] = {name: [] for name in columns}
+        for row in rows:
+            for name in columns:
+                raw = str(row.get(name, "") or "").strip()
+                if not raw:
+                    missing[name] += 1; continue
+                try:
+                    numeric[name].append(float(raw))
+                except ValueError:
+                    pass
+        stats = {
+            name: {"count": len(values), "min": min(values), "max": max(values), "mean": sum(values) / len(values)}
+            for name, values in numeric.items() if values
+        }
+        sample_rows = _bounded_int(sample_rows, 0, 50)
+        return _json({"columns": columns, "row_count": len(rows), "missing": missing, "numeric": stats, "sample": rows[:sample_rows]})
+    except Exception as exc:
+        return f"Error: csv_summary failed: {exc}"

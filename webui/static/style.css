@@ -20,7 +20,7 @@
 html,body{height:100%;margin:0}
 body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--text);overflow:hidden;overscroll-behavior:none}
 button,textarea,input{font:inherit}button{color:inherit}.hidden{display:none!important}.muted{color:var(--muted)}.small{font-size:11px}
-.app-shell{height:100vh;height:100dvh;min-height:0;overflow:hidden;display:grid;grid-template-columns:var(--sidebar-width) minmax(0,1fr) 0;background:var(--bg);transition:grid-template-columns .18s ease}
+.app-shell{width:100%;height:100vh;height:100dvh;min-height:0;overflow:hidden;display:grid;grid-template-columns:var(--sidebar-width) minmax(0,1fr) 0;grid-template-rows:minmax(0,1fr);background:var(--bg);transition:grid-template-columns .18s ease}
 .app-shell.workspace-open{grid-template-columns:var(--sidebar-width) minmax(0,1fr) var(--drawer-width)}
 .app-shell.sidebar-collapsed{--sidebar-width:0}
 .sidebar{min-width:0;background:var(--sidebar);display:flex;flex-direction:column;padding:10px 10px 8px;border-right:1px solid color-mix(in srgb,var(--border) 65%,transparent);overflow:hidden}
@@ -87,3 +87,12 @@ button,textarea,input{font:inherit}button{color:inherit}.hidden{display:none!imp
 /* Persistent composer history buffer. */
 .composer.history-active{border-color:color-mix(in srgb,var(--accent) 52%,var(--border))}
 @media(max-width:620px){.history-hint{display:none}}
+
+/* Keep the implicit grid/flex minimums from growing beyond the viewport.
+   The transcript is the only chat scroll owner; the composer stays visible. */
+.main,.chat-panel{max-height:100%;min-block-size:0}
+.chat-panel{height:100%}
+.messages{height:0;scrollbar-width:thin;touch-action:pan-y;-webkit-overflow-scrolling:touch}
+.messages::-webkit-scrollbar{width:10px}
+.messages::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--xr-color0) 72%,transparent);border:3px solid transparent;border-radius:999px;background-clip:padding-box}
+.messages::-webkit-scrollbar-track{background:transparent}

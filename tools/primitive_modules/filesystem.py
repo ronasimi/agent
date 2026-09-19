@@ -104,3 +104,51 @@ def disk_usage(path: str = ".") -> str:
         p=_safe_workspace(path); d=shutil.disk_usage(p)
         return _json({"path":str(p),"total":d.total,"used":d.used,"free":d.free,"used_percent":round(d.used/d.total*100,1) if d.total else 0})
     except Exception as exc: return f"Error: disk_usage failed: {exc}"
+
+
+def read_lines(path: str, start_line: int = 1, end_line: int = 200) -> str:
+    """Read an inclusive, numbered line range from a workspace text file."""
+    try:
+        start = max(1, int(start_line)); end = max(start, int(end_line))
+        if end - start + 1 > 2000:
+            end = start + 1999
+        p = _safe_workspace(path); rows = []
+        with p.open("r", encoding="utf-8", errors="replace") as handle:
+            for number, line in enumerate(handle, 1):
+                if number < start:
+                    continue
+                if number > end:
+                    break
+                rows.append({"line": number, "text": line.rstrip("\n\r")[:4000]})
+        return _json({"path": str(p), "start_line": start, "end_line": end, "lines": rows})
+    except Exception as exc:
+        return f"Error: read_lines failed: {exc}"
+
+
+def directory_size(path: str = ".", max_depth: int = 6, max_entries: int = 10000) -> str:
+    """Summarize bounded workspace directory size, file count, and directory count."""
+    try:
+        root = _safe_workspace(path); max_depth = _bounded_int(max_depth, 0, 20)
+        max_entries = _bounded_int(max_entries, 1, 50000)
+        if not root.is_dir():
+            return "Error: path is not a directory."
+        total = files = directories = scanned = 0; truncated = False
+        for current, dirs, names in os.walk(root):
+            depth = len(Path(current).relative_to(root).parts)
+            if depth >= max_depth:
+                dirs[:] = []
+            directories += len(dirs); scanned += len(dirs)
+            for name in names:
+                if scanned >= max_entries:
+                    truncated = True; break
+                scanned += 1; files += 1
+                try:
+                    total += (Path(current) / name).stat().st_size
+                except OSError:
+                    pass
+            if truncated or scanned >= max_entries:
+                truncated = scanned >= max_entries
+                break
+        return _json({"path": str(root), "bytes": total, "files": files, "directories": directories, "entries_scanned": scanned, "truncated": truncated})
+    except Exception as exc:
+        return f"Error: directory_size failed: {exc}"

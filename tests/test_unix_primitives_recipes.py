@@ -18,6 +18,9 @@ def test_primitive_registry_and_readonly_metadata():
         "resolve_host", "route_lookup", "tcp_connect", "tls_handshake", "http_request",
         "document_info", "document_text", "archive_list", "calculate", "command_available",
         "run_pipeline", "run_recipe", "search_recipes", "list_recipes", "save_recipe",
+        "read_lines", "directory_size", "regex_replace", "text_split", "json_keys",
+        "csv_summary", "cpu_info", "os_release", "process_tree", "ping_host",
+        "extract_tables", "git_branches",
     }
     assert expected <= set(AVAILABLE_TOOLS_MAP)
     assert TOOL_METADATA["run_pipeline"]["readonly"] is True
@@ -39,6 +42,32 @@ def test_file_text_json_and_calculator_primitives(tmp_path, monkeypatch):
     assert json.loads(p.text_search("error", path="a.txt"))["matches"][0]["line"] == 2
     assert json.loads(p.json_sort("v", path="data.json"))[0]["v"] == 1
     assert json.loads(p.calculate("111042/3600"))["result"] == 30.845
+
+
+def test_additional_text_structured_and_filesystem_primitives(tmp_path, monkeypatch):
+    import tools.workspace as ws
+    import tools.primitive_ops as p
+    root = tmp_path / "workspace"; root.mkdir()
+    monkeypatch.setattr(ws, "WORKSPACE_DIR", str(root))
+    (root / "lines.txt").write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
+    (root / "rows.csv").write_text("name,value\na,2\nb,4\nc,\n", encoding="utf-8")
+
+    selected = json.loads(p.read_lines("lines.txt", 2, 3))
+    assert [row["text"] for row in selected["lines"]] == ["two", "three"]
+    assert json.loads(p.directory_size("."))["files"] == 2
+    replaced = json.loads(p.regex_replace(r"t\w+", "T", text="one two three"))
+    assert replaced["text"] == "one T T" and replaced["replacements"] == 2
+    assert json.loads(p.text_split(text="a|b|c", delimiter="|"))["parts"] == ["a", "b", "c"]
+    assert json.loads(p.json_keys(data={"a": 1, "b": 2}))["keys"] == ["a", "b"]
+    summary = json.loads(p.csv_summary(path="rows.csv"))
+    assert summary["row_count"] == 3 and summary["numeric"]["value"]["mean"] == 3.0
+
+
+def test_extract_tables_primitive():
+    from tools.primitive_ops import extract_tables
+    payload = json.loads(extract_tables("<table><caption>T</caption><tr><th>A</th></tr><tr><td>1</td></tr></table>"))
+    assert payload["tables"][0]["caption"] == "T"
+    assert payload["tables"][0]["headers"] == ["A"]
 
 
 def test_pipeline_passes_intermediate_refs_without_model_roundtrip(monkeypatch):
@@ -84,6 +113,22 @@ def test_semantic_recipe_store_and_execution(tmp_path, monkeypatch):
     assert payload["ok"] is True
     assert payload["result"]["result"] == 2.0
     assert get_recipe("Convert uptime to hours")["use_count"] == 1
+
+
+def test_recipe_preflight_checks_and_renders_relevant_recipe(tmp_path, monkeypatch):
+    _set_recipe_db(tmp_path, monkeypatch)
+    from tools.recipe_store import save_recipe, check_recipes_for_task, render_recipe_preflight
+    save_recipe(
+        "Check website connectivity", "check website connectivity with DNS and TCP",
+        [{"tool": "resolve_host", "args": {"host": {"$param": "host"}}}],
+        {"host": {"description": "hostname"}}, ["website", "connectivity"],
+    )
+    report = check_recipes_for_task("check website connectivity", threshold=0.2)
+    assert report["checked"] is True
+    assert report["relevant"][0]["name"] == "Check website connectivity"
+    rendered = render_recipe_preflight(report)
+    assert "Harness recipe preflight" in rendered
+    assert "Check website connectivity" in rendered
 
 
 def test_successful_trace_candidate_and_confirmation(tmp_path, monkeypatch):
@@ -167,6 +212,43 @@ def test_successful_turn_emits_recipe_suggestion(tmp_path, monkeypatch):
     with agent.frontend_event_context(lambda e: events.append(e)):
         agent.handle_user_turn(messages, "Resolve example.com and test TCP connectivity to port 443", False)
     assert any(e.get("type") == "recipe_suggestion" for e in events)
+
+
+def test_turn_preflights_recipes_before_model_planning(tmp_path, monkeypatch):
+    _set_recipe_db(tmp_path, monkeypatch)
+    from tools.recipe_store import save_recipe
+    save_recipe(
+        "Check website connectivity", "check website connectivity with DNS and TCP",
+        [{"tool": "resolve_host", "args": {"host": {"$param": "host"}}}],
+        {"host": {"description": "hostname"}}, ["website", "connectivity"],
+    )
+    import agent
+    monkeypatch.setattr(agent, "_acquire_inference_lock", lambda: None)
+    monkeypatch.setattr(agent, "_release_inference_lock", lambda lock: None)
+    monkeypatch.setattr(agent, "record_monitor_state", lambda *a, **k: None)
+    monkeypatch.setattr(agent, "_queue_compaction_if_needed", lambda *a, **k: None)
+    monkeypatch.setattr(agent, "append_and_save", lambda messages, msg: messages.append(msg))
+    monkeypatch.setattr(agent, "RECIPE_MATCH_THRESHOLD", 0.1)
+    monkeypatch.setattr(agent.TaskRequirementLedger, "from_request", classmethod(lambda cls, text: cls([])))
+
+    class FakeClient:
+        def __init__(self): self.requests = []
+        def chat(self, **kwargs):
+            self.requests.append(kwargs)
+            return iter([{"done": True, "message": {"content": "Connectivity task considered.", "tool_calls": []}}])
+
+    client = FakeClient(); monkeypatch.setattr(agent, "OLLAMA", client)
+    events = []; messages = [{"role": "system", "content": "system"}]
+    with agent.frontend_event_context(lambda event: events.append(event)):
+        agent.handle_user_turn(messages, "check website connectivity", False)
+
+    event_types = [event.get("type") for event in events]
+    assert event_types.index("recipe_check") < event_types.index("model_start")
+    assert next(event for event in events if event.get("type") == "recipe_check")["best_match"] == "Check website connectivity"
+    prompt = "\n".join(str(item.get("content") or "") for item in client.requests[0]["messages"])
+    assert "[Harness recipe preflight]" in prompt and "Check website connectivity" in prompt
+    exposed = {item["function"]["name"] for item in client.requests[0]["tools"]}
+    assert "run_recipe" in exposed
 
 
 def test_pipeline_extended_bound_and_foreach_condition(monkeypatch):

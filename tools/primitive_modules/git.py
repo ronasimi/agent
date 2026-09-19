@@ -50,3 +50,22 @@ def git_diff(max_chars: int = 20000) -> str:
         p2=subprocess.run(["git","diff","--cached","--"],cwd="/app/source",capture_output=True,text=True,timeout=15,stdin=subprocess.DEVNULL)
         return _json({"ok":p1.returncode==0 and p2.returncode==0,"unstaged":p1.stdout[:max_chars],"staged":p2.stdout[:max_chars],"stderr":(p1.stderr+p2.stderr)[:4000],"truncated":len(p1.stdout)>max_chars or len(p2.stdout)>max_chars})
     except Exception as exc:return f"Error: git_diff failed: {exc}"
+
+
+def git_branches(limit: int = 100) -> str:
+    """List bounded local and remote Git branches and identify the current branch."""
+    try:
+        limit = _bounded_int(limit, 1, 500)
+        proc = subprocess.run(
+            ["git", "for-each-ref", "--format=%(refname)%09%(refname:short)%09%(objectname)%09%(HEAD)", "refs/heads", "refs/remotes"],
+            cwd="/app/source", capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL,
+        )
+        if proc.returncode:
+            return f"Error: git branches failed: {proc.stderr.strip()}"
+        rows = []
+        for line in proc.stdout.splitlines()[:limit]:
+            full_ref, name, commit, marker = (line.split("\t") + ["", "", ""])[:4]
+            rows.append({"name": name, "commit": commit, "current": marker.strip() == "*", "remote": full_ref.startswith("refs/remotes/")})
+        return _json({"branches": rows, "truncated": len(proc.stdout.splitlines()) > limit})
+    except Exception as exc:
+        return f"Error: git_branches failed: {exc}"

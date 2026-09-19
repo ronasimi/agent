@@ -114,3 +114,24 @@ def fetch_json(url: str, max_bytes: int = 262144, allow_private: bool = False) -
         final, response, body=fetch_bytes(url,timeout=10,max_bytes=max_bytes,max_redirects=3,allow_private=bool(allow_private))
         return _json(json.loads(body.decode(response.encoding or "utf-8",errors="replace")))
     except Exception as exc:return f"Error: fetch_json failed: {exc}"
+
+
+def extract_tables(html: str, limit: int = 10, max_rows: int = 50) -> str:
+    """Extract bounded HTML tables into captions, headers, and cell rows."""
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(str(html)[:1048576], "html.parser")
+        limit = _bounded_int(limit, 1, 30); max_rows = _bounded_int(max_rows, 1, 500); tables = []
+        for table in soup.find_all("table")[:limit]:
+            caption = table.find("caption")
+            rows = []
+            for tr in table.find_all("tr")[:max_rows]:
+                cells = [cell.get_text(" ", strip=True)[:2000] for cell in tr.find_all(["th", "td"])]
+                if cells:
+                    rows.append(cells)
+            first = table.find("tr")
+            headers = [cell.get_text(" ", strip=True)[:500] for cell in first.find_all("th")] if first else []
+            tables.append({"caption": caption.get_text(" ", strip=True)[:500] if caption else "", "headers": headers, "rows": rows, "truncated": len(table.find_all("tr")) > max_rows})
+        return _json({"tables": tables, "count": len(tables)})
+    except Exception as exc:
+        return f"Error: extract_tables failed: {exc}"

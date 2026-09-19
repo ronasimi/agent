@@ -248,6 +248,15 @@ def test_chat_pane_has_independent_scroll_container_and_fixed_composer():
     assert "isNearBottom" in js
     assert "followOutput" in js
     assert "messagesEl.addEventListener('scroll',updateScrollFollow" in js
+    assert "grid-template-rows:minmax(0,1fr)" in css
+    assert ".messages{height:0;scrollbar-width:thin;touch-action:pan-y" in css
+
+
+def test_webui_reports_automatic_recipe_preflight_status():
+    root = Path(__file__).resolve().parents[1]
+    js = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
+    assert "e.type==='recipe_check'" in js
+    assert "Recipes checked" in js
 
 
 def test_webui_static_assets_are_no_store_to_avoid_stale_rebuilds():

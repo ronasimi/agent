@@ -62,6 +62,7 @@ RECIPES_ENABLED = bool(RECIPE_CFG.get("enabled", True))
 RECIPE_SUGGEST = bool(RECIPE_CFG.get("suggest_after_success", True))
 RECIPE_MIN_STAGES = max(1, int(RECIPE_CFG.get("min_stages", 1)))
 RECIPE_MATCH_THRESHOLD = float(RECIPE_CFG.get("semantic_match_threshold", 0.35))
+RECIPE_PREFLIGHT_LIMIT = max(1, min(int(RECIPE_CFG.get("preflight_limit", 3)), 8))
 INFERENCE_LOCK_PATH = os.environ.get("AGENT_INFERENCE_LOCK", "/app/workspace/.agent_inference.lock")
 
 OLLAMA = Client(host=OLLAMA_HOST)

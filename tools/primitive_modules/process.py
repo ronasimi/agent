@@ -58,3 +58,27 @@ def list_processes(limit: int = 100, include_command: bool = False, include_io: 
             rows.append(row)
         except (psutil.NoSuchProcess,psutil.AccessDenied,psutil.ZombieProcess): pass
     return _json(rows[:_bounded_int(limit,1,500)])
+
+
+def process_tree(pid: int = 1, depth: int = 3, limit: int = 100) -> str:
+    """Return a bounded parent/child process tree rooted at one PID."""
+    try:
+        root = psutil.Process(int(pid)); depth = _bounded_int(depth, 0, 8); limit = _bounded_int(limit, 1, 500)
+        rows = []
+
+        def visit(proc, level: int) -> None:
+            if len(rows) >= limit or level > depth:
+                return
+            try:
+                rows.append({"pid": proc.pid, "ppid": proc.ppid(), "name": proc.name(), "status": proc.status(), "depth": level})
+                for child in sorted(proc.children(), key=lambda item: item.pid):
+                    visit(child, level + 1)
+                    if len(rows) >= limit:
+                        break
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                return
+
+        visit(root, 0)
+        return _json({"root_pid": int(pid), "processes": rows, "truncated": len(rows) >= limit})
+    except Exception as exc:
+        return f"Error: process_tree failed: {exc}"
