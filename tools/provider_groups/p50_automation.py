@@ -1,0 +1,23 @@
+"""Builtin tool provider group."""
+TOOL_SPECS = [
+    ('job_tools', 'enqueue_research'),
+    ('job_tools', 'get_research_status'),
+    ('job_tools', 'list_background_jobs'),
+    ('job_tools', 'cancel_background_job'),
+    ('self_optimization', 'enqueue_self_optimization'),
+    ('self_optimization', 'get_self_optimization_status'),
+    ('self_optimization', 'list_self_optimization_candidates'),
+    ('reminders', 'schedule_reminder'),
+    ('reminders', 'cancel_reminder'),
+    ('reminders', 'list_reminders'),
+    ('notify', 'notify_desktop'),
+    ('work_queue', 'queue_work'),
+    ('work_queue', 'list_work_queue'),
+    ('work_queue', 'get_work_details'),
+    ('work_queue', 'get_work_result'),
+    ('work_queue', 'update_work_status'),
+    ('work_queue', 'get_work_statistics'),
+    ('task_manager', 'list_tasks'),
+    ('task_manager', 'get_task_info'),
+    ('task_manager', 'get_task_logs'),
+]

@@ -411,3 +411,119 @@ The generic `attach_media(path, context="")` tool can re-attach an existing work
 PNG/JPEG/WebP image or the first page of a PDF. Public image URLs are also supported and
 remain subject to the existing public-URL and response-size checks. Tool media is bounded
 by `agent.vision.max_images_per_turn` and `agent.vision.max_image_bytes`.
+
+## Optional Web UI sidecar
+
+A browser frontend is included under `webui/`. It uses the same `agent.py` runtime, SQLite state, tools, validator, jobs, reminders, and working-state store as the CLI. It is a second frontend, not a second agent implementation.
+
+Start the normal stack plus the Web UI:
+
+```bash
+docker compose --profile web up -d --build
+```
+
+By default the UI binds only to the local machine at:
+
+```text
+http://127.0.0.1:8080
+```
+
+To expose it on the LAN, explicitly opt in before starting the profile:
+
+```bash
+WEBUI_HOST=0.0.0.0 docker compose --profile web up -d --build
+```
+
+If you expose the interface beyond localhost, put it behind an authenticated reverse proxy. The sidecar intentionally does not expose direct HTTP endpoints for shell execution or arbitrary tool invocation; messages always pass through the existing agent control loop and its policies.
+
+The UI provides:
+
+- a ChatGPT-inspired three-column layout with a left navigation rail, centered chat, and optional **Files in workspace** drawer
+- colors loaded from the host `~/.Xresources` at startup (with the bundled Base16-style fallback palette if unavailable)
+- streaming assistant output over WebSocket with lightweight Markdown/code rendering
+- collapsible tool execution/result cards and fast-validator events
+- image/PDF and bounded text-file uploads
+- a ChatGPT-style **+** button in the composer plus drag-and-drop file/media attachment onto the message box
+- actual multimodal image attachment through the existing Ollama media path
+- a toggleable `/app/workspace` browser with folder navigation, filtering, open/download, **attach to message**, and **Add file** uploads directly into the current workspace folder
+- current harness working-state inspection
+- durable jobs and reminders views
+- stop/cancel for an active browser turn
+- shared CLI/Web conversation history
+- automatic inline previews for files created by agent tools during a Web UI turn, with persistent Open/Download actions (images, PDF first pages, text/Markdown, audio, and video where supported)
+- workspace artifact access without exposing arbitrary host paths
+
+The CLI and Web UI serialize foreground inference using `/app/workspace/.agent_inference.lock`, which prevents two frontend processes from racing the single Ollama inference slot. Background durable worker jobs retain their existing scheduling behavior.
+
+Optional environment variables:
+
+```text
+WEBUI_HOST=127.0.0.1
+WEBUI_PORT=8080
+WEBUI_MAX_UPLOAD_BYTES=16777216
+WEBUI_WORKSPACE_LIST_LIMIT=250
+WEBUI_PREVIEW_TEXT_BYTES=49152
+WEBUI_ARTIFACT_SCAN_LIMIT=10000
+WEBUI_ARTIFACT_MAX_PER_TURN=24
+```
+
+The Compose profile points `WEBUI_XRESOURCES` at the host user's `~/.Xresources` through the existing read-only `/host` mount. Recognized `*.foreground`, `*.background`, `*.cursorColor`, and `*.color0` through `*.color15` values are applied as CSS theme variables; unrelated X resources are ignored.
+
+## Deterministic clock and environment primitives
+
+The agent includes small read-only primitives for common questions that should not require shell execution:
+
+- `current_time()` returns the current UTC timestamp plus configured local time/date/timezone.
+- `hostname()` returns host and runtime hostnames without performing DNS lookups.
+- `environment_summary()` returns a bounded non-secret runtime summary (clock, platform, Python, configured models, and workspace availability).
+
+`current_time()` is part of the always-available read-only tool core and is also a deterministic requirement for direct current-time/date requests. The runtime policy explicitly forbids inferring the current clock from uptime or stale observation timestamps. Runtime containers receive `TZ` plus a read-only `/etc/localtime` bind mount so local timestamps follow the host/configured timezone.
+
+## Unix-style primitives, pipelines, and recipes
+
+Al Agent exposes small typed primitives for filesystem discovery/reads, text and
+JSON transforms, process/system inspection, network layers, web extraction,
+documents/media metadata, Git, safe SQLite reads, arithmetic/time, encoding, and
+IP/URL utilities. The main model normally sees only the small subset selected for
+the current request.
+
+`run_pipeline` can execute up to eight **read-only** primitive stages inside the
+harness. Later stages can consume earlier structured output without copying the
+intermediate data through model context:
+
+```json
+[
+  {"id":"s1","tool":"resolve_host","args":{"host":{"$param":"host"}}},
+  {"id":"s2","tool":"route_lookup","args":{"target":{"$ref":"s1","path":"addresses.0"}}}
+]
+```
+
+Pipeline references use `{"$ref":"stage-id","path":"field.0"}` and recipe
+parameters use `{"$param":"name","default":"optional value"}`. Generic pipelines
+reject mutating tools, shell/Python execution, recursive pipeline/recipe calls,
+and more than eight stages.
+
+Reusable recipes are stored separately in `/app/memory/recipes.db`. The store has
+an FTS5 semantic index over recipe names, descriptions, tags, and tool names, plus
+usage/success counters and parameterized pipeline JSON. After a successful
+nontrivial read-only workflow, the harness checks for an existing semantic match.
+If none exists it asks whether the workflow should be saved. Reply `yes save it`,
+`save it as <name>`, or `no thanks`. The Web UI presents the same prompt with Save
+and Not now buttons.
+
+Useful recipe tools are `search_recipes`, `list_recipes`, `run_recipe`, and
+`save_recipe`. A semantically relevant saved recipe is surfaced automatically on
+future turns, but current user constraints and tool policy always take precedence.
+
+## Modular extension architecture
+
+The runtime has been refactored so the top-level `agent.py` and `worker.py` are compatibility/composition entry points rather than feature monoliths.  Tool loading is declarative and provider-based, Unix primitives are split by domain, background job types are auto-discovered providers, CLI slash commands are registered handlers, and Web UI filesystem/chat/theme concerns live in separate modules.
+
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the module map and extension recipes.  The short version is:
+
+- add primitives under `tools/primitive_modules/`;
+- add builtin tool manifests under `tools/provider_groups/`;
+- add durable job handlers under `al_agent/background/job_providers/`;
+- add CLI commands in `al_agent/cli_commands.py`;
+- keep deterministic multi-step behavior in pipelines/recipes instead of growing the turn engine;
+- keep `agent.py`, `worker.py`, and `tools/primitive_ops.py` as stable compatibility facades.

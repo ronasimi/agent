@@ -64,6 +64,7 @@ services:
       - /run/user/1000/bus:/run/user/1000/bus
       - ${HOME}/.config/systemd/user:/home/agent/.config/systemd/user
       - /etc/machine-id:/etc/machine-id:ro
+      - /etc/localtime:/etc/localtime:ro
 
   worker:
     build: .
@@ -102,6 +103,7 @@ services:
       - /run/user/1000/bus:/run/user/1000/bus
       - ${HOME}/.config/systemd/user:/home/agent/.config/systemd/user
       - /etc/machine-id:/etc/machine-id:ro
+      - /etc/localtime:/etc/localtime:ro
 
   optimizer-validator:
     build: .
@@ -136,3 +138,47 @@ services:
       - ./workspace/self_optimization/candidates:/candidates:ro
       - ./workspace/self_optimization/validation/inbox:/validation/inbox:ro
       - ./workspace/self_optimization/validation/outbox:/validation/outbox
+
+  webui:
+    build: .
+    image: agent
+    container_name: agent-webui
+    profiles:
+      - web
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 20s
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    user: "1000:1000"
+    pid: host
+    network_mode: host
+    depends_on:
+      storage-init:
+        condition: service_completed_successfully
+    environment:
+      - TZ=${TZ:-America/Toronto}
+      - WEBUI_HOST=${WEBUI_HOST:-127.0.0.1}
+      - WEBUI_PORT=${WEBUI_PORT:-8080}
+      - WEBUI_MAX_UPLOAD_BYTES=${WEBUI_MAX_UPLOAD_BYTES:-16777216}
+      - WEBUI_XRESOURCES=/host${HOME}/.Xresources
+      - WEBUI_WORKSPACE_LIST_LIMIT=${WEBUI_WORKSPACE_LIST_LIMIT:-250}
+    command:
+      - /bin/sh
+      - -lc
+      - exec python -m uvicorn webui.server:app --host "$${WEBUI_HOST:-127.0.0.1}" --port "$${WEBUI_PORT:-8080}" --proxy-headers
+    volumes:
+      - ./config:/app/config:ro
+      - ./workspace:/app/workspace
+      - ./memory:/app/memory
+      - ./tools:/app/tools:ro
+      - ./agent.py:/app/agent.py:ro
+      - ./webui:/app/webui:ro
+      - ./:/app/source:ro
+      - /:/host:ro
+      - /var/log:/host_log:ro
+      - /run/user/1000/bus:/run/user/1000/bus
+      - ${HOME}/.config/systemd/user:/home/agent/.config/systemd/user
+      - /etc/machine-id:/etc/machine-id:ro
+      - /etc/localtime:/etc/localtime:ro

@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>Al Agent</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div id="appShell" class="app-shell">
+    <aside class="sidebar" aria-label="Navigation">
+      <div class="sidebar-head">
+        <div class="brand" title="Al Agent">
+          <span class="brand-mark">A</span>
+          <span class="brand-name">Al Agent</span>
+        </div>
+        <button id="collapseSidebar" class="ghost-icon desktop-only" title="Collapse sidebar" aria-label="Collapse sidebar" aria-expanded="true">◫</button>
+      </div>
+
+      <button id="newChat" class="sidebar-action">
+        <span class="side-icon">✎</span><span>New chat</span>
+      </button>
+      <button id="searchChat" class="sidebar-action">
+        <span class="side-icon">⌕</span><span>Search</span>
+      </button>
+
+      <nav class="nav" aria-label="Agent views">
+        <button class="nav-item" data-panel="state"><span class="side-icon">◈</span><span>Working state</span></button>
+        <button class="nav-item" data-panel="jobs"><span class="side-icon">◷</span><span>Jobs</span></button>
+        <button class="nav-item" data-panel="reminders"><span class="side-icon">⌁</span><span>Reminders</span></button>
+      </nav>
+
+      <div class="sidebar-section-title">Recent</div>
+      <button class="recent-item active" data-panel="chat" title="Current shared conversation">
+        <span id="recentTitle">Current conversation</span>
+      </button>
+
+      <div class="sidebar-footer">
+        <div class="model-summary">
+          <div class="agent-avatar">A</div>
+          <div class="model-copy">
+            <strong id="mainModel">—</strong>
+            <span><span id="fastModel">—</span> · <span id="contextSize">—</span></span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button id="mobileSidebar" class="ghost-icon mobile-only" title="Menu" aria-label="Menu" aria-expanded="false">☰</button>
+          <button id="sidebarExpand" class="ghost-icon desktop-sidebar-expand hidden" title="Expand sidebar" aria-label="Expand sidebar" aria-expanded="false">☷</button>
+          <button class="model-pill" type="button" title="Current local agent models">
+            <span id="panelTitle">Al Agent</span><span class="chevron">⌄</span>
+          </button>
+          <span id="status" class="status"><span class="status-dot"></span><span class="status-text">Ready</span></span>
+        </div>
+        <div class="topbar-actions">
+          <button id="workspaceToggle" class="top-action" title="Toggle files in workspace" aria-expanded="false" aria-controls="workspaceDrawer">
+            <span>⇧</span><span class="top-action-label">Files in workspace</span>
+          </button>
+          <button id="refresh" class="ghost-icon" title="Refresh" aria-label="Refresh">↻</button>
+        </div>
+      </header>
+
+      <section id="chatPanel" class="panel chat-panel">
+        <div id="chatSearch" class="chat-search hidden">
+          <input id="chatSearchInput" type="search" placeholder="Search this conversation" autocomplete="off" />
+          <span id="chatSearchCount" class="muted"></span>
+          <button id="chatSearchClose" class="ghost-icon" aria-label="Close search">×</button>
+        </div>
+        <div id="messages" class="messages"></div>
+        <div class="composer-wrap">
+          <div class="composer-inner">
+            <div id="attachments" class="attachments"></div>
+            <form id="composer" class="composer" aria-label="Chat composer">
+              <button id="composerAddFile" class="attach circle-button" type="button" title="Add files" aria-label="Add files">＋</button>
+              <input id="fileInput" class="hidden-file-input" type="file" multiple />
+              <textarea id="prompt" rows="1" placeholder="Message Al Agent"></textarea>
+              <label class="think-toggle" title="Ask the main model to reason longer"><input id="thinking" type="checkbox" /><span>Think</span></label>
+              <button id="send" type="submit" class="send circle-button" title="Send" aria-label="Send">↑</button>
+              <button id="stop" type="button" class="stop circle-button hidden" title="Stop" aria-label="Stop">■</button>
+              <div id="composerDropHint" class="composer-drop-hint" aria-hidden="true">Drop files here to attach</div>
+            </form>
+            <div class="hint">Local models can make mistakes. Verify important results.</div>
+          </div>
+        </div>
+      </section>
+
+      <section id="statePanel" class="panel data-panel hidden">
+        <div class="data-wrap"><h2>Working state</h2><pre id="stateView"></pre></div>
+      </section>
+      <section id="jobsPanel" class="panel data-panel hidden">
+        <div class="data-wrap"><h2>Jobs</h2><div id="jobsView"></div></div>
+      </section>
+      <section id="remindersPanel" class="panel data-panel hidden">
+        <div class="data-wrap"><h2>Reminders</h2><div id="remindersView"></div></div>
+      </section>
+    </main>
+
+    <aside id="workspaceDrawer" class="workspace-drawer" aria-label="Files in workspace">
+      <div class="workspace-head">
+        <div>
+          <strong>Files in workspace</strong>
+          <div class="muted small">/app/workspace</div>
+        </div>
+        <button id="workspaceClose" class="ghost-icon" aria-label="Close files in workspace">×</button>
+      </div>
+      <div class="workspace-tools">
+        <button id="workspaceBack" class="ghost-icon" title="Parent folder">←</button>
+        <div id="workspacePath" class="workspace-path">/</div>
+        <button id="workspaceAddFile" class="workspace-add-file" type="button" title="Upload files to this workspace folder">＋ <span>Add file</span></button>
+        <input id="workspaceFileInput" class="hidden-file-input" type="file" multiple />
+        <button id="workspaceRefresh" class="ghost-icon" title="Refresh workspace">↻</button>
+      </div>
+      <div class="workspace-filter-wrap">
+        <input id="workspaceFilter" type="search" placeholder="Filter files" autocomplete="off" />
+      </div>
+      <div id="workspaceList" class="workspace-list"></div>
+      <div id="workspaceFoot" class="workspace-foot muted"></div>
+    </aside>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

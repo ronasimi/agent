@@ -18,7 +18,8 @@ def test_tool_schema_selection():
     names = {schema["function"]["name"] for schema in schemas}
     assert len(schemas) <= 20
     assert "host_snapshot" in names
-    assert "execute_shell" in names
+    assert "execute_shell" not in names
+    assert "pressure_snapshot" in names or "pressure_info" in names
 
 
 def test_small_core_and_file_bundle_are_stable():
@@ -26,7 +27,9 @@ def test_small_core_and_file_bundle_are_stable():
     generic = {schema["function"]["name"] for schema in tools.select_tool_schemas("hello", max_tools=12)}
     file_turn = {schema["function"]["name"] for schema in tools.select_tool_schemas("inspect this repo file", max_tools=12)}
     assert generic == tools._ALWAYS_TOOL_NAMES
-    assert {"read_file", "write_file", "read_observation", "execute_python"} <= file_turn
+    assert {"read_file", "path_stat", "find_paths", "read_text"} <= file_turn
+    assert "write_file" not in file_turn
+    assert "execute_python" not in file_turn
     assert len(file_turn) <= 12
 
 

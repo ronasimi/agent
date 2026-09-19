@@ -87,6 +87,15 @@ agent:
       top_k: 20
       num_predict: 192
 
+  # Reusable Unix-style workflows are persisted separately from conversation
+  # memory. FTS5 provides local semantic-ish lookup without another model call.
+  recipes:
+    enabled: true
+    suggest_after_success: true
+    min_stages: 1
+    semantic_match_threshold: 0.35
+    max_pipeline_stages: 8
+
   # Native tool schemas are selected deterministically per turn to reduce prefill.
   max_tools_per_turn: 12
 

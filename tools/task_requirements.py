@@ -34,6 +34,7 @@ class Requirement:
 
 
 _RULES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
+    ("current_time", "current_time", "current clock time/date", (r"\bwhat time is it\b", r"\bcurrent time\b", r"\bcurrent date\b", r"\bwhat(?:'s| is) (?:today(?:'s)? date|the date)\b", r"\bwhat day is it\b", r"\b(?:local|utc) time\b", r"\bwhat timezone\b", r"\bcurrent timezone\b")),
     ("host_health", "host_snapshot", "host CPU/memory/disk/temperature state", (r"\bhost (?:health|cpu|memory|disk|temperature)", r"\bcpu,? memory,? disk", r"\btemperature\b")),
     ("pressure", "pressure_snapshot", "CPU/memory/I/O pressure", (r"\bpressure (?:state|snapshot)?\b", r"\b(?:cpu|memory|i/o|io) pressure\b")),
     ("processes", "process_snapshot", "top resource-consuming processes", (r"\btop .*process", r"\bresource[- ]consuming process", r"\bprocess snapshot\b")),
@@ -71,6 +72,7 @@ _EXPLICIT_TOOL_NAMES = {
     "dns_diagnose", "network_path", "endpoint_probe", "http_probe", "tool_health",
     "dependency_audit", "web_search", "browse_url", "take_web_screenshot",
     "repo_status", "repo_checks", "page_metadata", "page_links", "extract_document",
+    "current_time", "hostname", "environment_summary",
 }
 
 

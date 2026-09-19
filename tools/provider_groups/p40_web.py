@@ -1,0 +1,18 @@
+"""Builtin tool provider group."""
+TOOL_SPECS = [
+    ('web', 'web_search'),
+    ('web', 'wiki_search'),
+    ('web', 'browse_url'),
+    ('web_research', 'page_metadata'),
+    ('web_research', 'page_links'),
+    ('web_research', 'discover_site'),
+    ('web_research', 'read_feed'),
+    ('web_research', 'extract_document'),
+    ('web_research', 'page_fingerprint'),
+    ('web_research', 'page_diff'),
+    ('web_screenshot', 'take_web_screenshot'),
+    ('media', 'attach_media'),
+    ('pdf_generator', 'generate_pdf_report'),
+    ('packages', 'search_packages'),
+    ('packages', 'install_package'),
+]

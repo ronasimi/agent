@@ -16,3 +16,8 @@ psutil
 pytest
 feedparser
 ruff
+fastapi
+uvicorn
+websockets
+python-multipart
+pillow

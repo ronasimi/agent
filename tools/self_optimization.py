@@ -497,7 +497,7 @@ def run_self_optimization_job(
 
 
 def enqueue_self_optimization(objective: str = "", target_metric: str = "", priority: int = -5) -> str:
-    """Queue one sandboxed self-optimization candidate; only one may run at a time."""
+    """Queue one sandboxed self-optimization candidate; only one candidate may run concurrently."""
     if not OPT_CFG.get("enabled", False):
         return json.dumps({"status": "not_queued", "reason": "Self-optimization is disabled in config/config.yaml."}, indent=2)
     objective = str(objective).strip()[:1000]

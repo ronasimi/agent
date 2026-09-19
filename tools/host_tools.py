@@ -17,6 +17,7 @@ except ImportError:  # pragma: no cover
 
 from .runtime import record_monitor_event, record_monitor_state, get_monitor_state, list_monitor_events
 from .netutil import validate_public_url
+from .primitives import clock_payload
 
 
 def _run(argv: list[str], timeout: float = 5) -> tuple[int, str, str]:
@@ -29,7 +30,11 @@ def _run(argv: list[str], timeout: float = 5) -> tuple[int, str, str]:
 
 def host_snapshot() -> str:
     """Return a bounded JSON snapshot of host CPU, RAM, disk, load, uptime, and optional GPU state."""
+    clock = clock_payload()
     result = {
+        "observed_at": clock["utc"],
+        "observed_at_local": clock["local"],
+        "timezone": clock["timezone"],
         "hostname": socket.gethostname(),
         "platform": platform.platform(),
         "kernel": platform.release(),
