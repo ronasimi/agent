@@ -52,9 +52,9 @@
         <div class="topbar-left">
           <button id="mobileSidebar" class="ghost-icon mobile-only" title="Menu" aria-label="Menu" aria-expanded="false">☰</button>
           <button id="sidebarExpand" class="ghost-icon desktop-sidebar-expand hidden" title="Expand sidebar" aria-label="Expand sidebar" aria-expanded="false">☷</button>
-          <button class="model-pill" type="button" title="Current local agent models">
-            <span id="panelTitle">Al Agent</span><span class="chevron">⌄</span>
-          </button>
+          <div class="panel-heading" aria-label="Current view">
+            <span id="panelTitle">Al Agent</span>
+          </div>
           <span id="status" class="status"><span class="status-dot"></span><span class="status-text">Ready</span></span>
         </div>
         <div class="topbar-actions">
@@ -72,6 +72,7 @@
           <button id="chatSearchClose" class="ghost-icon" aria-label="Close search">×</button>
         </div>
         <div id="messages" class="messages"></div>
+        <button id="scrollLatest" class="scroll-latest hidden" type="button" title="Scroll to latest" aria-label="Scroll to latest">↓</button>
         <div class="composer-wrap">
           <div class="composer-inner">
             <div id="attachments" class="attachments"></div>
@@ -84,7 +85,7 @@
               <button id="stop" type="button" class="stop circle-button hidden" title="Stop" aria-label="Stop">■</button>
               <div id="composerDropHint" class="composer-drop-hint" aria-hidden="true">Drop files here to attach</div>
             </form>
-            <div class="hint">Local models can make mistakes. Verify important results.</div>
+            <div class="hint"><span>Local models can make mistakes. Verify important results.</span><span class="history-hint">↑/↓ history · Shift+Enter newline</span></div>
           </div>
         </div>
       </section>
@@ -122,6 +123,7 @@
       <div id="workspaceFoot" class="workspace-foot muted"></div>
     </aside>
   </div>
+  <script src="/static/command_history.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

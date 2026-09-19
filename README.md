@@ -444,6 +444,7 @@ The UI provides:
 - collapsible tool execution/result cards and fast-validator events
 - image/PDF and bounded text-file uploads
 - a ChatGPT-style **+** button in the composer plus drag-and-drop file/media attachment onto the message box
+- a persistent 100-entry composer history buffer with shell-style **↑/↓** (or **Ctrl+P/Ctrl+N**) navigation and restoration of the unsent draft
 - actual multimodal image attachment through the existing Ollama media path
 - a toggleable `/app/workspace` browser with folder navigation, filtering, open/download, **attach to message**, and **Add file** uploads directly into the current workspace folder
 - current harness working-state inspection

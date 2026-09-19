@@ -54,6 +54,11 @@ async def security_headers(request, call_next):
         "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; "
         "style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
     )
+    # This is a localhost-first development UI.  Avoid stale browser assets after
+    # rebuilding the sidecar; otherwise CSS/JS changes can appear to be missing.
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
     return response
 
 

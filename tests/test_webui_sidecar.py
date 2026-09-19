@@ -16,7 +16,7 @@ def test_web_profile_is_optional_and_localhost_first():
 
 
 def test_webui_static_assets_exist():
-    for name in ("index.html", "style.css", "app.js"):
+    for name in ("index.html", "style.css", "command_history.js", "app.js"):
         assert (Path("webui/static") / name).is_file()
 
 
@@ -232,3 +232,26 @@ def test_recipe_suggestion_ui_contract_exists():
     assert "addRecipeSuggestion" in js
     assert "Save recipe" in js
     assert ".recipe-suggestion" in css
+
+
+def test_chat_pane_has_independent_scroll_container_and_fixed_composer():
+    root = Path(__file__).resolve().parents[1]
+    html = (root / "webui" / "static" / "index.html").read_text(encoding="utf-8")
+    css = (root / "webui" / "static" / "style.css").read_text(encoding="utf-8")
+    js = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="scrollLatest"' in html
+    assert ".main{min-width:0;min-height:0;height:100%;overflow:hidden" in css
+    assert ".chat-panel{display:flex;flex-direction:column;position:relative;overflow:hidden}" in css
+    assert ".messages{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden" in css
+    assert ".composer-wrap{position:relative;flex:0 0 auto" in css
+    assert "isNearBottom" in js
+    assert "followOutput" in js
+    assert "messagesEl.addEventListener('scroll',updateScrollFollow" in js
+
+
+def test_webui_static_assets_are_no_store_to_avoid_stale_rebuilds():
+    root = Path(__file__).resolve().parents[1]
+    server = (root / "webui" / "server.py").read_text(encoding="utf-8")
+    assert 'request.url.path.startswith("/static/")' in server
+    assert 'response.headers["Cache-Control"] = "no-store, max-age=0"' in server
