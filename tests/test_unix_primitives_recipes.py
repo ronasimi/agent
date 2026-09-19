@@ -126,7 +126,7 @@ def test_recipe_selector_bundle():
 
 def test_pipeline_schema_is_bounded():
     from tools.pipeline import execute_pipeline
-    result = execute_pipeline([{"tool": "calculate", "args": {"expression": "1+1"}}] * 9)
+    result = execute_pipeline([{"tool": "calculate", "args": {"expression": "1+1"}}] * 17)
     assert result["ok"] is False
     assert "exceeds" in result["error"]
 
@@ -167,3 +167,72 @@ def test_successful_turn_emits_recipe_suggestion(tmp_path, monkeypatch):
     with agent.frontend_event_context(lambda e: events.append(e)):
         agent.handle_user_turn(messages, "Resolve example.com and test TCP connectivity to port 443", False)
     assert any(e.get("type") == "recipe_suggestion" for e in events)
+
+
+def test_pipeline_extended_bound_and_foreach_condition(monkeypatch):
+    from tools import AVAILABLE_TOOLS_MAP, TOOL_METADATA, load_tools
+    from tools.pipeline import execute_pipeline, MAX_STAGES
+    load_tools()
+    assert MAX_STAGES == 16
+    too_many = execute_pipeline([{"tool": "calculate", "args": {"expression": "1+1"}}] * 17)
+    assert too_many["ok"] is False and "exceeds" in too_many["error"]
+
+    result = execute_pipeline([
+        {"id": "rows", "tool": "calculate", "foreach": [1, 2, 3], "args": {"expression": {"$item": "$"}}},
+        {"id": "skipped", "tool": "calculate", "when": False, "args": {"expression": "99"}},
+        {"id": "result", "tool": "compose_object", "args": {"data": {"rows": {"$ref": "rows"}, "skipped": {"$ref": "skipped"}}}},
+    ])
+    assert result["ok"] is True
+    assert [x["result"] for x in result["result"]["rows"]] == [1.0, 2.0, 3.0]
+    assert result["result"]["skipped"] is None
+
+
+def test_builtin_compatibility_recipes_seed_and_cover_monoliths(tmp_path, monkeypatch):
+    _set_recipe_db(tmp_path, monkeypatch)
+    from tools import load_tools
+    from tools.recipe_compat import seed_builtin_recipes, compatibility_coverage
+    from tools.recipe_store import list_recipes
+    load_tools()
+    seeded = seed_builtin_recipes()
+    assert seeded["errors"] == []
+    rows = list_recipes(100)
+    builtins = [r for r in rows if r.get("origin") == "builtin"]
+    assert len(builtins) >= 20
+    assert any(r["name"] == "compat.host_snapshot" and r["target_tool"] == "host_snapshot" for r in builtins)
+    coverage = compatibility_coverage()
+    assert coverage["complete"] is True
+    assert coverage["unclassified"] == []
+    assert coverage["expected_monolithic_count"] == coverage["classified_count"]
+
+
+def test_builtin_recipe_seeding_is_idempotent(tmp_path, monkeypatch):
+    _set_recipe_db(tmp_path, monkeypatch)
+    from tools.recipe_compat import seed_builtin_recipes
+    from tools.recipe_store import list_recipes
+    seed_builtin_recipes(); first = [r for r in list_recipes(100) if r.get("origin") == "builtin"]
+    seed_builtin_recipes(); second = [r for r in list_recipes(100) if r.get("origin") == "builtin"]
+    assert len(first) == len(second)
+    assert {r["builtin_key"] for r in first} == {r["builtin_key"] for r in second}
+
+
+def test_process_snapshot_compat_recipe_executes(tmp_path, monkeypatch):
+    _set_recipe_db(tmp_path, monkeypatch)
+    from tools import load_tools
+    from tools.recipe_compat import seed_builtin_recipes
+    from tools.pipeline import run_recipe
+    load_tools(); seed_builtin_recipes()
+    payload = json.loads(run_recipe("compat.process_snapshot", {"limit": 2, "sort_by": "memory"}))
+    assert payload["ok"] is True
+    assert payload["recipe"]["origin"] == "builtin"
+    assert payload["result"]["sort_by"] == "memory"
+    assert len(payload["result"]["processes"]) <= 2
+
+
+def test_builtin_recipe_names_are_reserved(tmp_path, monkeypatch):
+    _set_recipe_db(tmp_path, monkeypatch)
+    from tools.recipe_compat import seed_builtin_recipes
+    from tools.recipe_store import save_recipe
+    seed_builtin_recipes()
+    import pytest
+    with pytest.raises(ValueError):
+        save_recipe("compat.host_snapshot", "overwrite builtin", [{"tool": "calculate", "args": {"expression": "1"}}])

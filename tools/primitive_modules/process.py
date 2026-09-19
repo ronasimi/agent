@@ -34,3 +34,27 @@ def process_fds(pid: int, limit: int = 100) -> str:
     try:
         files=psutil.Process(int(pid)).open_files()[:_bounded_int(limit,1,500)]; return _json([{"path":f.path,"fd":f.fd} for f in files])
     except Exception as exc:return f"Error: process_fds failed: {exc}"
+
+def list_processes(limit: int = 100, include_command: bool = False, include_io: bool = False) -> str:
+    """Return bounded process rows with optional command line and aggregate I/O counters."""
+    procs=[]
+    for p in psutil.process_iter():
+        try:
+            p.cpu_percent(None); procs.append(p)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess): pass
+    time.sleep(0.12)
+    rows=[]
+    for p in procs:
+        try:
+            info=p.as_dict(attrs=["pid","name","status","memory_info","cmdline"] if include_command else ["pid","name","status","memory_info"])
+            row={"pid":info["pid"],"name":info.get("name") or "","state":info.get("status") or "","cpu_percent":round(float(p.cpu_percent(None) or 0.0),1),"rss_mb":round((info.get("memory_info").rss if info.get("memory_info") else 0)/1048576,1)}
+            if include_command:
+                command=" ".join(info.get("cmdline") or [])[:1000]
+                row["command"]=re.sub(r"(?i)(password|passwd|token|secret|api[_-]?key)=\S+",r"\1=[REDACTED]",command)
+            if include_io:
+                try:
+                    io=p.io_counters(); row["io_bytes"]=int(getattr(io,"read_bytes",0))+int(getattr(io,"write_bytes",0)); row["read_mb"]=round(int(getattr(io,"read_bytes",0))/1048576,1); row["write_mb"]=round(int(getattr(io,"write_bytes",0))/1048576,1)
+                except (psutil.NoSuchProcess,psutil.AccessDenied,AttributeError): row["io_bytes"]=0; row["read_mb"]=0.0; row["write_mb"]=0.0
+            rows.append(row)
+        except (psutil.NoSuchProcess,psutil.AccessDenied,psutil.ZombieProcess): pass
+    return _json(rows[:_bounded_int(limit,1,500)])

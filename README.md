@@ -487,7 +487,7 @@ documents/media metadata, Git, safe SQLite reads, arithmetic/time, encoding, and
 IP/URL utilities. The main model normally sees only the small subset selected for
 the current request.
 
-`run_pipeline` can execute up to eight **read-only** primitive stages inside the
+`run_pipeline` can execute up to sixteen **read-only** primitive stages inside the
 harness. Later stages can consume earlier structured output without copying the
 intermediate data through model context:
 
@@ -501,7 +501,7 @@ intermediate data through model context:
 Pipeline references use `{"$ref":"stage-id","path":"field.0"}` and recipe
 parameters use `{"$param":"name","default":"optional value"}`. Generic pipelines
 reject mutating tools, shell/Python execution, recursive pipeline/recipe calls,
-and more than eight stages.
+and more than sixteen stages. Pipelines also support bounded `foreach` fan-out, conditional `when` stages, optional stages, and `$item` references so high-level workflows can be expressed without round-tripping intermediate data through the model.
 
 Reusable recipes are stored separately in `/app/memory/recipes.db`. The store has
 an FTS5 semantic index over recipe names, descriptions, tags, and tool names, plus
@@ -514,6 +514,8 @@ and Not now buttons.
 Useful recipe tools are `search_recipes`, `list_recipes`, `run_recipe`, and
 `save_recipe`. A semantically relevant saved recipe is surfaced automatically on
 future turns, but current user constraints and tool policy always take precedence.
+
+Harness-owned compatibility recipes are seeded automatically into the same semantic recipe table. They are versioned with `origin=builtin`, use names such as `compat.host_snapshot`, and reproduce high-level diagnostic/research tools from smaller primitives wherever the semantics can be preserved safely. `recipe_coverage()` reports the full/partial/native-only coverage matrix and documents why a remaining monolithic tool cannot be represented as a read-only recipe. User recipes remain separate (`origin=user`) and builtin recipe names are reserved.
 
 ## Modular extension architecture
 

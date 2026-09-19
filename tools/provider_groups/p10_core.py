@@ -21,6 +21,7 @@ TOOL_SPECS = [
     ('pipeline', 'list_recipes'),
     ('pipeline', 'search_recipes'),
     ('pipeline', 'save_recipe'),
+    ('recipe_compat', 'recipe_coverage'),
     ('workspace', 'read_file'),
     ('workspace', 'write_file'),
     ('system', 'execute_shell'),

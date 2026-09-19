@@ -4,13 +4,15 @@ from .common import *  # noqa: F403
 from .common import _json, _bounded_int, _safe_workspace, _source_text, _load_json, _get_path
 
 def fetch_url(url: str, max_bytes: int = 262144, allow_private: bool = False) -> str:
-    """Fetch one SSRF-safe URL and return bounded raw HTML/text with headers."""
-    from .netutil import validate_public_url
+    """Fetch one SSRF-safe URL with bounded redirect validation and return raw text plus headers."""
+    from ..netutil import fetch_bytes
     try:
-        safe=validate_public_url(url,allow_private=bool(allow_private)); max_bytes=_bounded_int(max_bytes,1024,1048576)
-        r=requests.get(safe,timeout=10,allow_redirects=False,stream=True,headers={"User-Agent":"AlAgent/1.0"})
-        body=next(r.iter_content(chunk_size=max_bytes),b"")[:max_bytes]
-        return _json({"url":safe,"status":r.status_code,"content_type":r.headers.get("content-type",""),"headers":dict(list(r.headers.items())[:50]),"body":body.decode("utf-8",errors="replace"),"truncated":len(body)>=max_bytes})
+        max_bytes=_bounded_int(max_bytes,1024,1048576)
+        final, response, body=fetch_bytes(url,timeout=10,max_bytes=max_bytes,max_redirects=3,allow_private=bool(allow_private))
+        encoding=response.encoding or "utf-8"
+        try:text=body.decode(encoding,errors="replace")
+        except LookupError:text=body.decode("utf-8",errors="replace")
+        return _json({"url":final,"status":response.status_code,"content_type":response.headers.get("content-type",""),"headers":dict(list(response.headers.items())[:50]),"body":text,"truncated":False})
     except Exception as exc:return f"Error: fetch_url failed: {exc}"
 
 def extract_readable_text(html: str, max_chars: int = 50000) -> str:
@@ -71,3 +73,44 @@ def extract_jsonld(html: str, limit: int = 20) -> str:
             if len(out)>=_bounded_int(limit,1,50):break
         return _json(out)
     except Exception as exc:return f"Error: extract_jsonld failed: {exc}"
+
+def filter_links(links: list, base_url: str = "", same_domain: bool = True, limit: int = 50) -> str:
+    """Filter/deduplicate extracted HTTP(S) link objects and optionally restrict them to the base URL hostname."""
+    origin=(urlparse(base_url).hostname or "").lower(); out=[]; seen=set()
+    for item in links or []:
+        if not isinstance(item,dict):continue
+        raw=str(item.get("url") or ""); parsed=urlparse(raw)
+        if parsed.scheme not in {"http","https"} or not parsed.hostname:continue
+        same=(parsed.hostname or "").lower()==origin if origin else True
+        if same_domain and not same:continue
+        clean=parsed._replace(fragment="").geturl()
+        if clean in seen:continue
+        seen.add(clean); out.append({"url":clean,"text":str(item.get("text") or "")[:300],"same_domain":same})
+        if len(out)>=_bounded_int(limit,1,200):break
+    return _json({"source":base_url,"links":out})
+
+
+def parse_feed(xml_text: str, url: str = "", limit: int = 20) -> str:
+    """Parse bounded RSS/Atom XML already fetched by another pipeline stage."""
+    try:
+        import feedparser
+        feed=feedparser.parse(str(xml_text)[:2097152]); entries=[]
+        try:
+            from bs4 import BeautifulSoup
+        except Exception:
+            BeautifulSoup=None
+        for item in feed.entries[:_bounded_int(limit,1,50)]:
+            summary=str(item.get("summary") or item.get("description") or "")
+            if BeautifulSoup is not None:summary=BeautifulSoup(summary,"html.parser").get_text(" ",strip=True)
+            entries.append({"title":str(item.get("title") or "")[:500],"url":str(item.get("link") or "")[:2000],"published":str(item.get("published") or item.get("updated") or "")[:200],"author":str(item.get("author") or "")[:300],"summary":summary[:1500]})
+        return _json({"url":url,"feed_title":str(feed.feed.get("title") or "")[:500],"entries":entries})
+    except Exception as exc:return f"Error: parse_feed failed: {exc}"
+
+def fetch_json(url: str, max_bytes: int = 262144, allow_private: bool = False) -> str:
+    """Fetch one SSRF-validated JSON URL with bounded redirects and decode the JSON body."""
+    from ..netutil import fetch_bytes
+    try:
+        max_bytes=_bounded_int(max_bytes,1024,1048576)
+        final, response, body=fetch_bytes(url,timeout=10,max_bytes=max_bytes,max_redirects=3,allow_private=bool(allow_private))
+        return _json(json.loads(body.decode(response.encoding or "utf-8",errors="replace")))
+    except Exception as exc:return f"Error: fetch_json failed: {exc}"

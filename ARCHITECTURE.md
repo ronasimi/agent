@@ -74,7 +74,9 @@ Keep HTTP route composition in `webui/server.py`, but put domain behavior in a s
 
 ## Pipelines and recipes
 
-`run_pipeline` is the preferred composition mechanism for deterministic read-only chains.  Intermediate stage values remain in the harness and can be referenced using `$ref`.  Successful reusable workflows may be saved to the semantic recipe database without changing Python code.
+`run_pipeline` is the preferred composition mechanism for deterministic read-only chains. Intermediate stage values remain in the harness and can be referenced using `$ref`; bounded `foreach`, `$item`, conditional `when`, and optional stages cover common Unix-style map/filter/branch patterns without another model turn. Successful reusable workflows may be saved to the semantic recipe database without changing Python code.
+
+Harness-owned compatibility recipes live in auto-discovered `tools/recipe_provider_groups/` manifests. They are seeded idempotently into the semantic recipe database with `origin=builtin`, a stable key/version, and a target monolithic tool. Every high-level tool in the diagnostic/web/repository compatibility surface must either have a full/partial recipe or an explicit `NATIVE_ONLY` reason; `recipe_coverage()` exposes that matrix. Add new compatibility recipes as provider manifests rather than hard-coding them into the recipe store.
 
 ## Dependency direction
 

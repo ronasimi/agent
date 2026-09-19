@@ -90,3 +90,12 @@ def format_datetime(timestamp: str, timezone_name: str = "UTC", format: str = "%
         from zoneinfo import ZoneInfo
         dt=datetime.fromisoformat(timestamp.replace("Z","+00:00")); return dt.astimezone(ZoneInfo(timezone_name)).strftime(format)
     except Exception as exc:return f"Error: format_datetime failed: {exc}"
+
+def url_endpoint(url: str) -> str:
+    """Parse an HTTP(S) URL into host, effective port, scheme, and TLS boolean."""
+    try:
+        parsed=urlparse(str(url));
+        if parsed.scheme not in {"http","https"} or not parsed.hostname:return "Error: URL must use http or https and include a host."
+        port=parsed.port or (443 if parsed.scheme=="https" else 80)
+        return _json({"url":str(url),"scheme":parsed.scheme,"host":parsed.hostname,"port":port,"tls":parsed.scheme=="https"})
+    except Exception as exc:return f"Error: url_endpoint failed: {exc}"

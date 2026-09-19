@@ -75,3 +75,53 @@ def command_available(name: str) -> str:
                 if text: result["version"]=text[0][:300]; break
             except Exception: pass
     return _json(result)
+
+def filesystem_usage(path: str = "/", host: bool = True) -> str:
+    """Return capacity and inode usage for one host/container filesystem path."""
+    raw = str(path or "/")
+    actual = raw
+    if host and Path("/host").is_dir():
+        actual = "/host" if raw == "/" else str(Path("/host") / raw.lstrip("/"))
+    try:
+        usage = psutil.disk_usage(actual)
+        result={"path":raw,"actual_path":actual,"total_gb":round(usage.total/1073741824,2),"free_gb":round(usage.free/1073741824,2),"used_percent":usage.percent}
+        try:
+            st=os.statvfs(actual); total=st.f_files; free=st.f_ffree
+            result["inode_used_percent"] = round(((total-free)/total)*100,1) if total else None
+        except OSError: result["inode_used_percent"] = None
+        return _json(result)
+    except Exception as exc:return f"Error: filesystem_usage failed: {exc}"
+
+
+def gpu_info() -> str:
+    """Return optional NVIDIA/AMD GPU telemetry without failing on unsupported hosts."""
+    try:
+        p=subprocess.run(["nvidia-smi","--query-gpu=name,memory.total,memory.used,utilization.gpu","--format=csv,noheader,nounits"],capture_output=True,text=True,timeout=3,stdin=subprocess.DEVNULL)
+        if p.returncode==0 and p.stdout.strip():
+            rows=[]
+            for line in p.stdout.strip().splitlines():
+                parts=[x.strip() for x in line.split(",")]
+                if len(parts)>=4:
+                    try: rows.append({"vendor":"nvidia","name":parts[0],"vram_total_mb":float(parts[1]),"vram_used_mb":float(parts[2]),"utilization_percent":float(parts[3])})
+                    except ValueError: pass
+            if rows:return _json({"gpus":rows})
+    except Exception: pass
+    try:
+        p=subprocess.run(["rocm-smi","--showmeminfo","vram","--showuse","--json"],capture_output=True,text=True,timeout=5,stdin=subprocess.DEVNULL)
+        if p.returncode==0 and p.stdout.strip():
+            try:return _json({"vendor":"amd","raw":json.loads(p.stdout)})
+            except json.JSONDecodeError:return _json({"vendor":"amd","raw_text":p.stdout[:4000]})
+    except Exception: pass
+    return _json({"available":False})
+
+
+def host_read_text(path: str = "/etc/resolv.conf", max_chars: int = 20000) -> str:
+    """Read bounded text from the read-only /host mount without allowing path traversal."""
+    raw=str(path or "/etc/resolv.conf")
+    target=Path("/host")/raw.lstrip("/")
+    try:
+        safe=target.resolve(); root=Path("/host").resolve()
+        if os.path.commonpath([str(root),str(safe)])!=str(root):return "Error: path escapes /host."
+        text=safe.read_text(errors="replace"); limit=_bounded_int(max_chars,100,100000)
+        return text[:limit] + ("\n[truncated]" if len(text)>limit else "")
+    except Exception as exc:return f"Error: host_read_text failed: {exc}"

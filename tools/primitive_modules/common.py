@@ -43,9 +43,12 @@ def _source_text(text: str = "", path: str = "", limit: int = MAX_TEXT) -> str:
         return p.read_text(encoding="utf-8",errors="replace")[:limit]
     return str(text)[:limit]
 
-def _load_json(data: str = "", path: str = "") -> Any:
-    raw=_source_text(data,path)
-    return json.loads(raw)
+def _load_json(data: Any = "", path: str = "") -> Any:
+    if path:
+        return json.loads(_source_text("", path))
+    if isinstance(data, (dict, list, int, float, bool)) or data is None:
+        return data
+    return json.loads(str(data))
 
 def _get_path(obj: Any, path: str) -> Any:
     if path in {"", ".", "$"}: return obj

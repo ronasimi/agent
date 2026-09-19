@@ -55,7 +55,7 @@ TOOL_BUNDLES = (
     ({'dns', 'mdns', 'network', 'wifi', 'lan', 'route', 'port'},
      ('network_snapshot', 'neighbor_snapshot', 'connection_snapshot', 'network_reachability', 'dns_diagnose', 'network_path', 'endpoint_probe', 'http_probe', 'map_network', 'scan_mdns', 'resolve_host', 'route_lookup', 'tcp_connect', 'tls_handshake', 'http_request', 'interface_list', 'interface_info', 'neighbor_list', 'socket_list')),
     ({'recipes', 'reuse', 'pipeline', 'workflow', 'recipe', 'reusable'},
-     ('search_recipes', 'list_recipes', 'run_recipe', 'run_pipeline', 'save_recipe')),
+     ('search_recipes', 'list_recipes', 'run_recipe', 'run_pipeline', 'save_recipe', 'recipe_coverage')),
     ({'path', 'hash', 'mime', 'folder', 'directory', 'find', 'json', 'tail', 'diff', 'regex', 'grep'},
      ('find_paths', 'list_directory', 'path_stat', 'read_text', 'tail_file', 'file_hash', 'mime_type', 'text_search', 'regex_extract', 'text_head', 'text_tail', 'text_count', 'text_sort', 'text_unique', 'json_query', 'json_filter', 'json_sort', 'json_head', 'json_count', 'json_diff', 'yaml_query', 'csv_query', 'text_diff', 'run_pipeline')),
     ({'remember', 'preference', 'recall'},

@@ -7,6 +7,7 @@ from ollama import Client
 from tools.config import load_config
 from tools.memory import init_db
 from tools.recipe_store import init_recipe_store
+from tools.recipe_compat import seed_builtin_recipes
 from tools.working_state import WorkingStateStore
 
 CONFIG_PATH = os.environ.get("AGENT_CONFIG", "/app/config/config.yaml")
@@ -69,6 +70,8 @@ LOOP_VALIDATOR_CLIENT = Client(host=OLLAMA_HOST, timeout=float(LOOP_VALIDATOR_CF
 init_db()
 if RECIPES_ENABLED:
     init_recipe_store()
+    if bool(RECIPE_CFG.get("seed_builtin_compatibility", True)):
+        seed_builtin_recipes()
 WORKING_STATE = WorkingStateStore(limits={
     key: value for key, value in WORKING_STATE_CFG.items()
     if key not in {"enabled", "main_history_turns"}
