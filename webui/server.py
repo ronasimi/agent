@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 import agent as agent_runtime
+from al_agent.slash_commands import list_slash_commands
 from tools import (
     _load_chat_history_from_db, clear_chat_history, conversation_context,
     create_conversation, delete_conversation, ensure_conversation, list_conversations,
@@ -144,6 +145,12 @@ def _read_xresources_theme(path: Path | None = None) -> dict[str, str]:
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(STATIC / "index.html")
+
+
+@app.get("/api/commands")
+def commands() -> list[dict[str, Any]]:
+    """Return the shared slash-command catalog for Web UI autocomplete."""
+    return list_slash_commands()
 
 
 @app.get("/api/health")

@@ -80,10 +80,11 @@
         <div class="composer-wrap">
           <div class="composer-inner">
             <div id="attachments" class="attachments"></div>
+            <div id="slashMenu" class="slash-menu hidden" role="listbox" aria-label="Slash commands"></div>
             <form id="composer" class="composer" aria-label="Chat composer">
               <button id="composerAddFile" class="attach circle-button" type="button" title="Add files" aria-label="Add files">＋</button>
               <input id="fileInput" class="hidden-file-input" type="file" multiple />
-              <textarea id="prompt" rows="1" placeholder="Message Al Agent"></textarea>
+              <textarea id="prompt" rows="1" placeholder="Message Al Agent" aria-controls="slashMenu" aria-autocomplete="list" aria-expanded="false"></textarea>
               <label class="think-toggle" title="Ask the main model to reason longer"><input id="thinking" type="checkbox" /><span>Think</span></label>
               <button id="send" type="submit" class="send circle-button" title="Send" aria-label="Send">↑</button>
               <button id="stop" type="button" class="stop circle-button hidden" title="Stop" aria-label="Stop">■</button>

@@ -1,7 +1,7 @@
 const $=(s)=>document.querySelector(s);
 const messagesEl=$('#messages'),promptEl=$('#prompt'),appShell=$('#appShell');
 let socket=null,activeTurn=null,assistantNode=null,activeUserMessageEl=null,attachments=[],workspacePath='',workspaceRows=[];
-let followOutput=true;
+let followOutput=true,slashCommands=[],slashMenuIndex=0;
 const artifactCards=new Map();
 const UI_STATE_KEYS={left:'agent.webui.leftSidebarCollapsed',right:'agent.webui.workspaceOpen',commandHistory:'agent.webui.commandHistory.v1',conversation:'agent.webui.activeConversation.v1'};
 let activeConversationId=localStorage.getItem(UI_STATE_KEYS.conversation)||'default';
@@ -10,7 +10,7 @@ const commandHistory=new CommandHistoryBuffer({storage:localStorage,key:UI_STATE
 function setPromptValue(value,{history=false}={}){
   promptEl.value=String(value??'');promptEl.style.height='auto';promptEl.style.height=Math.min(promptEl.scrollHeight,190)+'px';
   promptEl.selectionStart=promptEl.selectionEnd=promptEl.value.length;
-  $('#composer').classList.toggle('history-active',history);
+  $('#composer').classList.toggle('history-active',history);renderSlashMenu();
 }
 function resetHistoryNavigation(){commandHistory.reset();$('#composer').classList.remove('history-active');}
 function caretOnFirstLine(){const start=promptEl.selectionStart??0,end=promptEl.selectionEnd??start;if(start!==end)return false;return !promptEl.value.slice(0,start).includes('\n');}
@@ -18,6 +18,39 @@ function caretOnLastLine(){const start=promptEl.selectionStart??0,end=promptEl.s
 function navigateCommandHistory(direction){
   const value=commandHistory.move(direction,promptEl.value);if(value===null)return false;
   setPromptValue(value,{history:commandHistory.isBrowsing()});return true;
+}
+
+function slashMenuEl(){return $('#slashMenu');}
+function slashToken(value=promptEl.value){
+  const raw=String(value||'').trimStart();
+  if(!raw.startsWith('/')||raw.includes('\n')||/\s/.test(raw))return null;
+  return raw.toLowerCase();
+}
+function matchingSlashCommands(){
+  const token=slashToken();if(token===null)return [];
+  if(token==='/')return slashCommands.slice();
+  return slashCommands.filter(c=>String(c.name||'').toLowerCase().startsWith(token));
+}
+function closeSlashMenu(){slashMenuEl()?.classList.add('hidden');slashMenuIndex=0;promptEl.removeAttribute('aria-activedescendant');promptEl.setAttribute('aria-expanded','false');}
+function renderSlashMenu(){
+  const menu=slashMenuEl();if(!menu)return;const matches=matchingSlashCommands();
+  if(slashToken()===null){closeSlashMenu();return;}
+  if(!matches.length){menu.innerHTML='<div class="slash-empty">No matching slash commands</div>';menu.classList.remove('hidden');promptEl.setAttribute('aria-expanded','true');slashMenuIndex=0;return;}
+  slashMenuIndex=Math.max(0,Math.min(slashMenuIndex,matches.length-1));
+  menu.innerHTML=matches.map((c,i)=>`<button type="button" class="slash-command${i===slashMenuIndex?' active':''}" role="option" aria-selected="${i===slashMenuIndex}" data-slash-index="${i}" id="slash-command-${i}"><span class="slash-command-main"><strong>${esc(c.name)}</strong><span>${esc(c.description)}</span></span><code>${esc(c.usage||c.name)}</code></button>`).join('');
+  menu.classList.remove('hidden');promptEl.setAttribute('aria-expanded','true');promptEl.setAttribute('aria-activedescendant',`slash-command-${slashMenuIndex}`);
+  menu.querySelectorAll('.slash-command').forEach(btn=>{
+    btn.addEventListener('mousedown',e=>e.preventDefault());
+    btn.addEventListener('click',()=>selectSlashCommand(Number(btn.dataset.slashIndex||0)));
+  });
+  menu.querySelector('.slash-command.active')?.scrollIntoView({block:'nearest'});
+}
+function selectSlashCommand(index=slashMenuIndex){
+  const matches=matchingSlashCommands();const item=matches[index];if(!item)return false;
+  setPromptValue(item.name+(item.accepts_arguments?' ':''));closeSlashMenu();promptEl.focus();return true;
+}
+async function loadSlashCommands(){
+  try{const rows=await api('/api/commands');slashCommands=Array.isArray(rows)?rows:[];}catch(e){slashCommands=[];console.warn('Slash command catalog load failed',e);}
 }
 
 function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
@@ -143,7 +176,7 @@ function restoreSidebarState(){
 }
 
 function showPanel(name){document.querySelectorAll('.panel').forEach(x=>x.classList.add('hidden'));$(`#${name}Panel`).classList.remove('hidden');document.querySelectorAll('.nav-item,.recent-item').forEach(b=>b.classList.toggle('active',b.dataset.panel===name));$('#panelTitle').textContent={chat:'Al Agent',state:'Working state',jobs:'Jobs',reminders:'Reminders'}[name]||'Al Agent';if(name==='state')loadState();if(name==='jobs')loadJobs();if(name==='reminders')loadReminders();}
-function connect(){socket=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws/chat`);socket.onopen=()=>{};socket.onclose=()=>{setStatus('Disconnected','error');setTimeout(connect,1200)};socket.onmessage=(ev)=>{const e=JSON.parse(ev.data);if(e.type==='accepted'){activeTurn=e.turn_id;setStatus('Working…','busy');$('#send').classList.add('hidden');$('#stop').classList.remove('hidden');assistantNode=null;}else if(e.type==='queue_wait'){setStatus('Queued for inference…','busy');}else if(e.type==='queue_acquired'){setStatus('Thinking…','busy');}else if(e.type==='recipe_check'){setStatus(e.best_match?`Recipe checked: ${e.best_match}`:'Recipes checked','busy');}else if(e.type==='assistant_delta'){appendAssistant(e.content||'');}else if(e.type==='tool_start'){assistantNode=null;setStatus(`Running ${e.name}…`,'busy');}else if(e.type==='tool_result'){addTool(e.name,e.status,e.content);addMedia(e.media);if(e.name==='set_profile_image'&&e.status==='ok')refreshProfileImage();setStatus('Thinking…','busy');if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}else if(e.type==='artifact_created'){assistantNode=null;void addArtifact(e.artifact||{});setStatus(`Created ${(e.artifact&&e.artifact.name)||'file'}`,'busy');if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}else if(e.type==='validator'){assistantNode=null;addValidator(e);}else if(e.type==='recipe_suggestion'){assistantNode=null;addRecipeSuggestion(e);}else if(e.type==='requirements'){setStatus('Completing requested checks…','busy');}else if(e.type==='media_attached'){setStatus('Inspecting media…','busy');}else if(e.type==='assistant_final'){if(!assistantNode&&e.content)assistantNode=addMessage('assistant',e.content);setStatus('Ready');}else if(e.type==='turn_cancelled'){setStatus('Cancelled');finishTurn();}else if(e.type==='turn_end'){finishTurn();}else if(e.type==='history_refresh'){loadState();loadConversations();loadJobs();if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}else if(e.type==='error'){addMessage('assistant',`Error: ${e.message}`);setStatus('Error','error');finishTurn();}};}
+function connect(){socket=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws/chat`);socket.onopen=()=>{};socket.onclose=()=>{setStatus('Disconnected','error');setTimeout(connect,1200)};socket.onmessage=(ev)=>{const e=JSON.parse(ev.data);if(e.type==='accepted'){activeTurn=e.turn_id;setStatus(e.command?'Running command…':'Working…','busy');$('#send').classList.add('hidden');$('#stop').classList.remove('hidden');assistantNode=null;}else if(e.type==='command_result'){assistantNode=null;if(e.action==='clear_conversation'){messagesEl.innerHTML='';artifactCards.clear();activeUserMessageEl=null;followOutput=true;}if(e.action==='set_thinking')$('#thinking').checked=!!e.data?.thinking;if(e.action==='open_profile')void openOnboarding({reset:true});if(['jobs_changed','show_jobs'].includes(e.action))void loadJobs();if(e.action==='show_reminders')void loadReminders();if(e.message)addMessage('assistant',e.message,{forceScroll:true});if(e.ok===false)setStatus('Command failed','error');else setStatus('Ready');finishTurn();}else if(e.type==='queue_wait'){setStatus('Queued for inference…','busy');}else if(e.type==='queue_acquired'){setStatus('Thinking…','busy');}else if(e.type==='recipe_check'){setStatus(e.best_match?`Recipe checked: ${e.best_match}`:'Recipes checked','busy');}else if(e.type==='assistant_delta'){appendAssistant(e.content||'');}else if(e.type==='tool_start'){assistantNode=null;setStatus(`Running ${e.name}…`,'busy');}else if(e.type==='tool_result'){addTool(e.name,e.status,e.content);addMedia(e.media);if(e.name==='set_profile_image'&&e.status==='ok')refreshProfileImage();setStatus('Thinking…','busy');if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}else if(e.type==='artifact_created'){assistantNode=null;void addArtifact(e.artifact||{});setStatus(`Created ${(e.artifact&&e.artifact.name)||'file'}`,'busy');if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}else if(e.type==='validator'){assistantNode=null;addValidator(e);}else if(e.type==='recipe_suggestion'){assistantNode=null;addRecipeSuggestion(e);}else if(e.type==='requirements'){setStatus('Completing requested checks…','busy');}else if(e.type==='media_attached'){setStatus('Inspecting media…','busy');}else if(e.type==='assistant_final'){if(!assistantNode&&e.content)assistantNode=addMessage('assistant',e.content);setStatus('Ready');}else if(e.type==='turn_cancelled'){setStatus('Cancelled');finishTurn();}else if(e.type==='turn_end'){finishTurn();}else if(e.type==='history_refresh'){loadState();loadConversations();loadJobs();if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}else if(e.type==='error'){addMessage('assistant',`Error: ${e.message}`);setStatus('Error','error');finishTurn();}};}
 function finishTurn(){clearTurnStatus();activeTurn=null;assistantNode=null;activeUserMessageEl=null;$('#send').classList.remove('hidden');$('#stop').classList.add('hidden');}
 
 async function uploadChatFiles(files){
@@ -169,7 +202,7 @@ async function uploadWorkspaceFiles(files){
 }
 function renderAttachments(){$('#attachments').innerHTML=attachments.map((a,i)=>`<span class="attachment-chip">${esc(a.name)} <button data-i="${i}" aria-label="Remove">×</button></span>`).join('');$('#attachments').querySelectorAll('button').forEach(b=>b.onclick=()=>{attachments.splice(Number(b.dataset.i),1);renderAttachments();});}
 
-$('#composer').addEventListener('submit',(ev)=>{ev.preventDefault();const text=promptEl.value.trim();if((!text&&!attachments.length)||activeTurn)return;commandHistory.push(text);const bubble=addMessage('user',text||attachments.map(a=>a.name).join(', '),{forceScroll:true});activeUserMessageEl=bubble.closest('.message');setStatus('Sending…','busy');const turn_id=crypto.randomUUID();socket.send(JSON.stringify({type:'message',turn_id,conversation_id:activeConversationId,content:text,attachments:attachments.map(a=>a.path),thinking:$('#thinking').checked}));setPromptValue('');resetHistoryNavigation();attachments=[];renderAttachments();});
+$('#composer').addEventListener('submit',(ev)=>{ev.preventDefault();const text=promptEl.value.trim();if((!text&&!attachments.length)||activeTurn)return;closeSlashMenu();commandHistory.push(text);const bubble=addMessage('user',text||attachments.map(a=>a.name).join(', '),{forceScroll:true});activeUserMessageEl=bubble.closest('.message');setStatus('Sending…','busy');const turn_id=crypto.randomUUID();socket.send(JSON.stringify({type:'message',turn_id,conversation_id:activeConversationId,content:text,attachments:attachments.map(a=>a.path),thinking:$('#thinking').checked}));setPromptValue('');resetHistoryNavigation();attachments=[];renderAttachments();});
 $('#stop').addEventListener('click',()=>{if(activeTurn)socket.send(JSON.stringify({type:'cancel',turn_id:activeTurn}));});
 $('#composerAddFile').addEventListener('click',()=>$('#fileInput').click());
 $('#fileInput').addEventListener('change',async(ev)=>{await uploadChatFiles(ev.target.files);ev.target.value='';});
@@ -205,8 +238,12 @@ $('#workspaceToggle').onclick=()=>toggleWorkspace();$('#workspaceClose').onclick
 $('#collapseSidebar').onclick=()=>toggleLeftSidebar(false);$('#sidebarExpand').onclick=()=>toggleLeftSidebar(true);$('#mobileSidebar').onclick=()=>toggleLeftSidebar();
 $('#searchChat').onclick=()=>{$('#chatSearch').classList.remove('hidden');$('#chatSearchInput').focus();};$('#chatSearchClose').onclick=()=>{$('#chatSearch').classList.add('hidden');$('#chatSearchInput').value='';applyChatSearch();};$('#chatSearchInput').oninput=applyChatSearch;
 function applyChatSearch(){const q=($('#chatSearchInput')?.value||'').trim().toLowerCase();let n=0;messagesEl.querySelectorAll('.message').forEach(el=>{const hit=!q||el.textContent.toLowerCase().includes(q);el.classList.toggle('hidden',!hit);if(q&&hit)n++;});if($('#chatSearchCount'))$('#chatSearchCount').textContent=q?`${n} match${n===1?'':'es'}`:'';}
-promptEl.addEventListener('input',()=>{promptEl.style.height='auto';promptEl.style.height=Math.min(promptEl.scrollHeight,190)+'px';if(commandHistory.isBrowsing()){commandHistory.reset();$('#composer').classList.remove('history-active');}});
+promptEl.addEventListener('input',()=>{promptEl.style.height='auto';promptEl.style.height=Math.min(promptEl.scrollHeight,190)+'px';if(commandHistory.isBrowsing()){commandHistory.reset();$('#composer').classList.remove('history-active');}slashMenuIndex=0;renderSlashMenu();});
 promptEl.addEventListener('keydown',e=>{
+  const slashOpen=!slashMenuEl()?.classList.contains('hidden');
+  if(slashOpen&&!e.altKey&&!e.metaKey&&!e.ctrlKey&&(e.key==='ArrowDown'||e.key==='ArrowUp')){const matches=matchingSlashCommands();if(matches.length){e.preventDefault();slashMenuIndex=(slashMenuIndex+(e.key==='ArrowDown'?1:-1)+matches.length)%matches.length;renderSlashMenu();}return;}
+  if(slashOpen&&(e.key==='Tab'||(e.key==='Enter'&&!e.shiftKey))){const matches=matchingSlashCommands(),item=matches[slashMenuIndex];if(item){e.preventDefault();const exact=promptEl.value.trim()===item.name;if(e.key==='Enter'&&exact&&!item.accepts_arguments){closeSlashMenu();$('#composer').requestSubmit();}else selectSlashCommand(slashMenuIndex);return;}}
+  if(slashOpen&&e.key==='Escape'){closeSlashMenu();e.preventDefault();return;}
   if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();$('#composer').requestSubmit();return;}
   if(!e.altKey&&!e.metaKey&&!e.ctrlKey&&e.key==='ArrowUp'&&caretOnFirstLine()){if(navigateCommandHistory(-1))e.preventDefault();return;}
   if(!e.altKey&&!e.metaKey&&!e.ctrlKey&&e.key==='ArrowDown'&&caretOnLastLine()){if(navigateCommandHistory(1))e.preventDefault();return;}
@@ -214,11 +251,12 @@ promptEl.addEventListener('keydown',e=>{
   if(e.ctrlKey&&!e.altKey&&!e.metaKey&&(e.key==='n'||e.key==='N')){if(navigateCommandHistory(1))e.preventDefault();return;}
   if(e.key==='Escape'&&commandHistory.isBrowsing()){const draft=commandHistory.restoreDraft();setPromptValue(draft??'');resetHistoryNavigation();e.preventDefault();}
 });
+document.addEventListener('pointerdown',e=>{if(!$('#composer').contains(e.target)&&!slashMenuEl()?.contains(e.target))closeSlashMenu();});
 
 let onboardingRequired=false,onboardingReset=false;
 async function openOnboarding({reset=false}={}){
   onboardingReset=reset;const state=await api('/api/onboarding');onboardingRequired=!state.completed;const id=state.identity||{},prefs=state.preferences||{};
-  $('#oobeName').value=id.name||'';$('#oobeRole').value=id.role||'';$('#oobeTimezone').value=id.timezone||Intl.DateTimeFormat().resolvedOptions().timeZone||'';$('#oobeEmail').value=id.email||'';$('#oobeInterests').value=Array.isArray(id.interests)?id.interests.join(', '):'';$('#oobeStyle').value=prefs.response?.style||'concise';$('#oobeResearch').value=prefs.search_depth?.depth||'balanced';$('#oobeError').textContent='';
+  $('#oobeName').value=id.name||'';$('#oobeRole').value=id.role||'';$('#oobeTimezone').value=id.timezone||Intl.DateTimeFormat().resolvedOptions().timeZone||'';$('#oobeLocation').value=id.location||'';$('#oobeEmail').value=id.email||'';$('#oobeInterests').value=Array.isArray(id.interests)?id.interests.join(', '):'';$('#oobeStyle').value=prefs.response?.style||'concise';$('#oobeResearch').value=prefs.search_depth?.depth||'balanced';$('#oobeError').textContent='';
   const dialog=$('#onboardingDialog');if(!dialog.open)dialog.showModal();
 }
 async function checkOnboarding(){try{const state=await api('/api/onboarding');if(!state.completed)await openOnboarding();}catch(e){console.error('Onboarding check failed',e);}}
@@ -237,4 +275,4 @@ window.addEventListener('resize',()=>{
   }
 });
 refreshProfileImage();
-Promise.all([loadTheme(),loadHealth(),loadConversations(),loadHistory(),loadState(),loadJobs(),loadReminders(),loadWorkspace('')]).finally(()=>{connect();checkOnboarding();});
+Promise.all([loadTheme(),loadHealth(),loadSlashCommands(),loadConversations(),loadHistory(),loadState(),loadJobs(),loadReminders(),loadWorkspace('')]).finally(()=>{connect();checkOnboarding();});

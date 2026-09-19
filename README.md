@@ -67,6 +67,8 @@ The Web UI provides a ChatGPT-style local interface with:
 - streaming responses and inline tool activity
 - a status message directly below the active user prompt
 - persistent command history with Up/Down navigation
+- slash-command autocomplete: type `/` to see every command, usage, and description
+- deterministic slash-command routing before the LLM (commands never become model prompts)
 - durable per-conversation history in the Recent sidebar
 - non-destructive New Chat creation with isolated working state/observations
 - a complete-chat copy button
@@ -190,7 +192,9 @@ Research jobs can survive process restarts because state and checkpoints are sto
 
 The harness supports durable reminders and background jobs. The Web UI exposes them in dedicated views.
 
-Useful CLI commands include:
+The CLI and Web UI share the same slash-command registry. In the Web UI, type `/` to open the searchable command menu.
+
+Useful slash commands include:
 
 ```text
 /jobs                  list durable jobs

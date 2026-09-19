@@ -67,7 +67,7 @@ Create `al_agent/background/job_providers/pNN_name.py` and export exactly one `J
 
 ## Adding a CLI command
 
-Add a `CliCommand` to `al_agent/cli_commands.py`.  Command behavior stays outside the prompt loop.
+Add slash commands to `al_agent/slash_commands.py`. The shared registry is consumed by both CLI and Web UI frontends, and command execution stays outside the model prompt loop.
 
 ## Adding a Web UI capability
 

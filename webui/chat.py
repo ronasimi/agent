@@ -4,6 +4,7 @@ import asyncio, inspect, threading, uuid
 from typing import Any
 from fastapi import WebSocket, WebSocketDisconnect
 import agent as agent_runtime
+from al_agent.slash_commands import execute_slash_command
 from tools import _load_chat_history_from_db, conversation_context, ensure_conversation, normalize_conversation_id
 from .config import ARTIFACT_MAX_PER_TURN
 from .workspace_ops import _build_user_content, _new_artifacts, _workspace_file_snapshot
@@ -15,11 +16,36 @@ async def _run_turn(websocket: WebSocket, payload: dict[str, Any]) -> None:
     turn_id = str(payload.get("turn_id") or uuid.uuid4().hex)
     conversation_id = normalize_conversation_id(payload.get("conversation_id"))
     ensure_conversation(conversation_id)
-    text = _build_user_content(payload.get("content", ""), list(payload.get("attachments") or []))
+    raw_content = str(payload.get("content") or "").strip()
+    text = _build_user_content(raw_content, list(payload.get("attachments") or []))
     if not text:
         await websocket.send_json({"type": "error", "turn_id": turn_id, "message": "Message is empty"})
         return
     thinking = bool(payload.get("thinking", agent_runtime.THINKING_DEFAULT))
+
+    # Slash commands are harness/frontend control operations, never model input.
+    # Route them before allocating a cancellation slot, inference lock, history
+    # snapshot, or Ollama request. Unknown slash commands are also consumed here
+    # so malformed control input cannot leak into the model prompt.
+    if raw_content.startswith("/"):
+        result = await asyncio.to_thread(
+            execute_slash_command,
+            raw_content,
+            conversation_id=conversation_id,
+            thinking_enabled=thinking,
+        )
+        await websocket.send_json({
+            "type": "accepted", "turn_id": turn_id,
+            "conversation_id": conversation_id, "content": raw_content,
+            "command": True,
+        })
+        event = result.event()
+        event["turn_id"] = turn_id
+        await websocket.send_json(event)
+        await websocket.send_json({"type": "history_refresh", "turn_id": turn_id})
+        await websocket.send_json({"type": "turn_end", "turn_id": turn_id})
+        return
+
     cancel_event = threading.Event()
     with RUNS_LOCK:
         RUNS[turn_id] = cancel_event
