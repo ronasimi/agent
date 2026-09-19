@@ -13,6 +13,7 @@ agent.py / worker.py                    compatibility entry points
         │   ├── prompts.py              stable policy, memory, media encoding
         │   ├── turn_support.py         deterministic loop helpers
         │   ├── turn_engine.py          one responsibility: model/tool state machine
+        │   ├── model_protocol.py       Ollama wire normalization + safe stream transport behavior
         │   ├── cli.py                  terminal frontend
         │   ├── cli_commands.py         registered slash-command handlers
         │   └── background/             durable worker subsystem

@@ -15,6 +15,15 @@ agent:
   # Keep normal turns fast; /think on enables explicit reasoning when needed.
   thinking_default: false
   show_perf_stats: true
+
+  # Transport failures before the first streamed chunk are safe to retry and
+  # should not consume a semantic/tool-loop iteration. Once streaming begins,
+  # the request is never replayed because that could duplicate output/actions.
+  model_transport:
+    preflight_retries: 1
+    base_delay_seconds: 0.15
+    max_delay_seconds: 0.75
+
   max_iterations: 12
   # Broad explicit multi-check requests get an adaptive budget up to this cap.
   max_iterations_hard: 32
@@ -255,4 +264,4 @@ self_optimization:
     - ["python", "-m", "compileall", "-q", "."]
     - ["python", "-m", "pytest", "-q"]
   benchmark_commands:
-    - ["python", "scripts/benchmark_harness.py", "--max-source-tokens", "160000"]
+    - ["python", "scripts/benchmark_harness.py", "--max-source-tokens", "250000"]

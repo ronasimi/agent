@@ -214,6 +214,12 @@ Conversation compaction runs in the background after a turn rather than before t
 
 The Web UI's **copy entire chat** function is different: it can export the complete stored conversation, including rows that have already been compacted out of model context.
 
+## Model protocol reliability
+
+The Ollama boundary is deliberately isolated from the semantic/tool loop. Streamed `tool_calls` are accumulated across chunks, tool results use Ollama-native `tool_name`, and local bookkeeping fields are stripped before messages are sent on the wire. A transient model transport failure may be retried only **before** the first streamed chunk; after any output or tool call arrives, the request is never replayed because doing so could duplicate output or side effects. These settings live under `agent.model_transport`.
+
+See `HARNESS_BEST_PRACTICES_REVIEW.md` for the 2026 small-local-model architecture review and comparison with smolagents, LangGraph/Deep Agents, PocketFlow, Ollama, and llama.cpp patterns.
+
 ## Failure recovery and validator
 
 Repeated identical tool failures are tracked by the harness. After the configured threshold, the fast model acts as a bounded validator and returns a structured control decision such as:

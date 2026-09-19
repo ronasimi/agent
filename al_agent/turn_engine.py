@@ -37,6 +37,7 @@ from .events import (
     emit_event, release_inference_lock as _release_inference_lock,
 )
 from .prompts import IMAGE_REGEX, append_and_save, build_memory_context, build_system_prompt, encode_image
+from .model_protocol import merge_stream_tool_calls, ollama_wire_messages, stream_with_preflight_retry, tool_result_message
 from .state import *  # stable runtime configuration/service aliases
 from .turn_support import (
     _adaptive_iteration_limit, _add_recovery_schema, _bounded_tool_result_with_ref,
@@ -657,14 +658,33 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
 
             try:
                 emit_event("model_start", model=MODEL, tools=[str(schema.get("function", {}).get("name") or "") for schema in tool_schemas])
-                stream = OLLAMA.chat(
-                    model=MODEL,
-                    messages=active,
-                    tools=tool_schemas,
-                    options=MAIN_OPTIONS,
-                    think=thinking_enabled,
-                    stream=True,
-                    keep_alive=-1,
+                def _model_stream():
+                    return OLLAMA.chat(
+                        model=MODEL,
+                        messages=ollama_wire_messages(active),
+                        tools=tool_schemas,
+                        options=MAIN_OPTIONS,
+                        think=thinking_enabled,
+                        stream=True,
+                        keep_alive=-1,
+                    )
+
+                def _on_transport_retry(attempt: int, exc: Exception, delay: float) -> None:
+                    emit_event(
+                        "model_retry", model=MODEL, attempt=attempt, delay_seconds=delay,
+                        reason=str(exc)[:240],
+                    )
+                    print(
+                        f"  \033[93m[System]: Ollama request failed before the first chunk; "
+                        f"retrying transport ({attempt}/{MODEL_PREFLIGHT_RETRIES})...\033[0m"
+                    )
+
+                stream = stream_with_preflight_retry(
+                    _model_stream,
+                    retries=MODEL_PREFLIGHT_RETRIES,
+                    base_delay=MODEL_RETRY_BASE_DELAY,
+                    max_delay=MODEL_RETRY_MAX_DELAY,
+                    on_retry=_on_transport_retry,
                 )
                 for chunk in stream:
                     if _cancel_requested():
@@ -689,7 +709,7 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
                     if first_token_at is None and (thinking or content or calls):
                         first_token_at = time.monotonic()
                     if calls:
-                        raw_tool_calls = calls
+                        raw_tool_calls = merge_stream_tool_calls(raw_tool_calls, calls)
                     if thinking:
                         if not in_thinking:
                             print("\n\033[90m[Thinking Trace]:")
@@ -980,12 +1000,9 @@ def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bo
                 print(f"  \033[90m{result_text[:300].replace(chr(10), ' ')}{'...' if len(result_text) > 300 else ''}\033[0m")
                 emit_event("tool_result", name=name, status=outcome_status, reason=reason, content=result_text, observation_id=observation_id, media=media_refs)
 
-                tool_message = {
-                    "role": "tool",
-                    "name": name,
-                    "content": result_text,
-                    "tool_call_id": call["id"],
-                }
+                tool_message = tool_result_message(
+                    name, result_text, tool_call_id=str(call.get("id") or "")
+                )
                 append_and_save(messages, tool_message)
                 turn_tail.append(model_message(tool_message))
 

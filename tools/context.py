@@ -5,7 +5,7 @@ import json
 import re
 from typing import Any, Iterable
 
-_MESSAGE_FIELDS = {"role", "content", "name", "tool_calls", "tool_call_id", "images"}
+_MESSAGE_FIELDS = {"role", "content", "name", "tool_name", "tool_calls", "tool_call_id", "images"}
 IMAGE_TOKEN_ESTIMATE = 1200
 
 
@@ -32,8 +32,18 @@ def estimate_messages_tokens(messages: Iterable[dict[str, Any]]) -> int:
 
 
 def model_message(message: dict[str, Any]) -> dict[str, Any]:
-    """Strip local bookkeeping fields before sending a message to Ollama."""
-    return {key: value for key, value in message.items() if key in _MESSAGE_FIELDS}
+    """Strip local bookkeeping fields and normalize Ollama message fields.
+
+    Older harness history stored tool identity in ``name`` (OpenAI-style).
+    Ollama's native chat schema uses ``tool_name`` for tool-result messages, so
+    transparently upgrade legacy rows when rebuilding model context.
+    """
+    result = {key: value for key, value in message.items() if key in _MESSAGE_FIELDS}
+    if result.get("role") == "tool" and not result.get("tool_name") and result.get("name"):
+        result["tool_name"] = result["name"]
+    if result.get("role") == "tool":
+        result.pop("name", None)
+    return result
 
 
 def split_turns(history: Iterable[dict[str, Any]]) -> list[list[dict[str, Any]]]:

@@ -8,7 +8,7 @@ zeroconf
 playwright
 graphviz
 pdf2image
-ollama
+ollama>=0.5.2
 markdown
 weasyprint
 pygments
