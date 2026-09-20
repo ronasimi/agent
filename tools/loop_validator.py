@@ -127,6 +127,11 @@ def classify_tool_outcome(
     if lowered.startswith("error: reminder backend unavailable:"):
         return {"success": False, "status": "error", "reason": "tool_unavailable", "fingerprint": result_fingerprint(text)}
     if lowered.startswith(_PARTIAL_PREFIXES):
+        # Execution tools reporting a non-zero exit code may contain useful
+        # diagnostic stdout, but the requested action did not succeed. Do not
+        # let that output satisfy a mutating/completion requirement.
+        if name in {"execute_shell", "execute_python", "install_package"}:
+            return {"success": False, "status": "error", "reason": "nonzero_exit", "fingerprint": result_fingerprint(text)}
         return {"success": True, "status": "partial", "reason": "nonzero_with_output", "fingerprint": result_fingerprint(text)}
     if lowered.startswith(_ERROR_PREFIXES):
         return {"success": False, "status": "error", "reason": "tool_reported_error", "fingerprint": result_fingerprint(text)}

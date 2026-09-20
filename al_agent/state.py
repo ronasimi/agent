@@ -9,6 +9,7 @@ from tools.memory import init_db
 from tools.recipe_store import init_recipe_store
 from tools.recipe_compat import seed_builtin_recipes
 from tools.working_state import WorkingStateStore
+from .decision_engine import DecisionEngineClient
 
 CONFIG_PATH = os.environ.get("AGENT_CONFIG", "/app/config/config.yaml")
 CONFIG = load_config()
@@ -40,6 +41,8 @@ MAX_ITERATIONS_HARD = max(MAX_ITERATIONS, int(AGENT_CFG.get("max_iterations_hard
 SEMANTIC_MEMORY = bool(AGENT_CFG.get("semantic_memory_enabled", False))
 THINKING_DEFAULT = bool(AGENT_CFG.get("thinking_default", False))
 SHOW_PERF_STATS = bool(AGENT_CFG.get("show_perf_stats", True))
+DECISION_ENGINE_CFG = dict(AGENT_CFG.get("decision_engine") or {})
+DECISION_ENGINE = DecisionEngineClient(DECISION_ENGINE_CFG)
 MODEL_TRANSPORT_CFG = AGENT_CFG.get("model_transport", {})
 MODEL_PREFLIGHT_RETRIES = max(0, min(int(MODEL_TRANSPORT_CFG.get("preflight_retries", 1)), 4))
 MODEL_RETRY_BASE_DELAY = max(0.0, float(MODEL_TRANSPORT_CFG.get("base_delay_seconds", 0.15)))
@@ -54,6 +57,7 @@ STALL_VALIDATOR_MAX_INTERVENTIONS = max(1, int(LOOP_VALIDATOR_CFG.get("max_inter
 LOOP_VALIDATOR_MAX_TOOLS = max(MAX_TOOLS_PER_TURN, int(LOOP_VALIDATOR_CFG.get("max_candidate_tools", 24)))
 MAX_TOOL_CALLS_PER_ITERATION = max(1, int(AGENT_CFG.get("max_tool_calls_per_iteration", 3)))
 MAX_MUTATING_CALLS_PER_ITERATION = max(1, int(AGENT_CFG.get("max_mutating_calls_per_iteration", 1)))
+MAX_PARALLEL_READONLY_TOOLS = max(1, min(int(AGENT_CFG.get("max_parallel_readonly_tools", 3)), MAX_TOOL_CALLS_PER_ITERATION))
 VISION_CFG = AGENT_CFG.get("vision", {})
 AUTO_ATTACH_TOOL_MEDIA = bool(VISION_CFG.get("auto_attach_tool_media", True))
 MAX_TOOL_MEDIA_PER_TURN = max(1, int(VISION_CFG.get("max_images_per_turn", 4)))

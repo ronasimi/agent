@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .common import *  # noqa: F403
 from .common import _json, _bounded_int, _safe_workspace, _source_text, _load_json, _get_path
+from ..subprocess_utils import run_argv
 
 def interface_list() -> str:
     """Return network interfaces and addresses."""
@@ -32,7 +33,7 @@ def resolve_host(host: str, record_type: str = "any") -> str:
 def route_lookup(target: str) -> str:
     """Return the kernel route selected for a target using ip route get."""
     try:
-        proc=subprocess.run(["ip","-j","route","get",target],capture_output=True,text=True,timeout=5,stdin=subprocess.DEVNULL)
+        proc=run_argv(["ip","-j","route","get",target], timeout=5)
         if proc.returncode:return f"Error: route lookup failed: {(proc.stderr or proc.stdout).strip()}"
         return _json(json.loads(proc.stdout))
     except Exception as exc:return f"Error: route_lookup failed: {exc}"
@@ -83,7 +84,7 @@ def trace_route(target: str, max_hops: int = 20, probes: int = 3) -> str:
 def route_list(limit: int = 200) -> str:
     """Return the bounded kernel route table as structured JSON."""
     try:
-        proc = subprocess.run(["ip", "-j", "route", "show"], capture_output=True, text=True, timeout=5, stdin=subprocess.DEVNULL)
+        proc = run_argv(["ip", "-j", "route", "show"], timeout=5)
         if proc.returncode:
             return f"Error: route list failed: {(proc.stderr or proc.stdout).strip()}"
         rows = json.loads(proc.stdout or "[]")
@@ -112,7 +113,7 @@ def dns_servers() -> str:
 def neighbor_list(limit: int = 100) -> str:
     """Return the ARP/NDP neighbor table as bounded structured JSON."""
     try:
-        proc = subprocess.run(["ip", "-j", "neigh", "show"], capture_output=True, text=True, timeout=5, stdin=subprocess.DEVNULL)
+        proc = run_argv(["ip", "-j", "neigh", "show"], timeout=5)
         if proc.returncode:
             return f"Error: ip neigh failed: {(proc.stderr or proc.stdout).strip()}"
         data = json.loads(proc.stdout or "[]")
@@ -132,7 +133,7 @@ def socket_list(limit: int = 150, state: str = "") -> str:
     if state:
         argv += ["state", "listening" if state == "listen" else state]
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=8, stdin=subprocess.DEVNULL)
+        proc = run_argv(argv, timeout=8)
         if proc.returncode and not proc.stdout.strip():
             return f"Error: ss failed: {proc.stderr.strip()}"
         rows = []
@@ -167,7 +168,7 @@ def dns_query(name: str, record_type: str = "A", resolver: str = "") -> str:
         argv.insert(1, "@" + str(resolver))
     started = time.monotonic()
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=5, stdin=subprocess.DEVNULL)
+        proc = run_argv(argv, timeout=5)
     except Exception as exc:
         return f"Error: dns_query failed: {exc}"
     elapsed = round((time.monotonic() - started) * 1000, 1)
@@ -254,7 +255,7 @@ def trace_route(target: str, max_hops: int = 20, probes: int = 3) -> str:
     max_hops = _bounded_int(max_hops, 1, 30); probes = _bounded_int(probes, 1, 5)
     if not shutil.which("mtr"): return "Error: mtr is not installed."
     try:
-        proc = subprocess.run(["mtr", "--json", "--report", "--report-cycles", str(probes), "--max-ttl", str(max_hops), str(target)], capture_output=True, text=True, timeout=max(10, probes*8), stdin=subprocess.DEVNULL)
+        proc = run_argv(["mtr", "--json", "--report", "--report-cycles", str(probes), "--max-ttl", str(max_hops), str(target)], timeout=max(10, probes*8))
     except Exception as exc: return f"Error: trace_route failed: {exc}"
     if proc.returncode and not proc.stdout.strip(): return f"Error: mtr failed: {proc.stderr.strip()}"
     try: return _json(json.loads(proc.stdout))
@@ -277,9 +278,9 @@ def ping_host(host: str, count: int = 3, timeout: float = 2.0) -> str:
     count = _bounded_int(count, 1, 8); timeout = max(0.2, min(float(timeout), 10.0))
     started = time.monotonic()
     try:
-        proc = subprocess.run(
+        proc = run_argv(
             [binary, "-n", "-c", str(count), "-W", str(max(1, int(timeout))), target],
-            capture_output=True, text=True, timeout=(count * timeout) + 3, stdin=subprocess.DEVNULL,
+            timeout=(count * timeout) + 3,
         )
         output = (proc.stdout or proc.stderr).strip()[:8000]
         loss = re.search(r"([0-9.]+)%\s*packet loss", output)

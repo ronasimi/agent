@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+
+from .subprocess_utils import run_argv
 from typing import Any
 
 try:
@@ -18,7 +20,9 @@ except ImportError:  # pragma: no cover
 
 def _run(argv: list[str], timeout: float = 8) -> tuple[int, str, str]:
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        proc = run_argv(argv, timeout=timeout)
+        if proc.timed_out:
+            return 124, proc.stdout, (proc.stderr + f"\nTimed out after {timeout}s").strip()
         return proc.returncode, proc.stdout, proc.stderr
     except Exception as exc:
         return 1, "", str(exc)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .common import *  # noqa: F403
 from .common import _json, _bounded_int, _safe_workspace, _source_text, _load_json, _get_path
+from ..subprocess_utils import run_argv
 
 def kernel_info() -> str:
     """Return kernel/platform identity."""
@@ -53,7 +54,7 @@ def mounts() -> str:
 def block_devices() -> str:
     """Return lsblk JSON for host-visible block devices."""
     try:
-        p=subprocess.run(["lsblk","-J","-b","-o","NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS,MODEL,ROTA"],capture_output=True,text=True,timeout=8)
+        p=run_argv(["lsblk","-J","-b","-o","NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS,MODEL,ROTA"], timeout=8)
         return p.stdout if p.returncode==0 else f"Error: lsblk failed: {p.stderr.strip()}"
     except Exception as exc:return f"Error: block_devices failed: {exc}"
 
@@ -71,7 +72,7 @@ def command_available(name: str) -> str:
     if path:
         for flag in ("--version","-V","-v"):
             try:
-                p=subprocess.run([path,flag],capture_output=True,text=True,timeout=2,stdin=subprocess.DEVNULL); text=(p.stdout or p.stderr).strip().splitlines()
+                p=run_argv([path,flag], timeout=2, max_output_bytes=65536); text=(p.stdout or p.stderr).strip().splitlines()
                 if text: result["version"]=text[0][:300]; break
             except Exception: pass
     return _json(result)
@@ -96,7 +97,7 @@ def filesystem_usage(path: str = "/", host: bool = True) -> str:
 def gpu_info() -> str:
     """Return optional NVIDIA/AMD GPU telemetry without failing on unsupported hosts."""
     try:
-        p=subprocess.run(["nvidia-smi","--query-gpu=name,memory.total,memory.used,utilization.gpu","--format=csv,noheader,nounits"],capture_output=True,text=True,timeout=3,stdin=subprocess.DEVNULL)
+        p=run_argv(["nvidia-smi","--query-gpu=name,memory.total,memory.used,utilization.gpu","--format=csv,noheader,nounits"], timeout=3)
         if p.returncode==0 and p.stdout.strip():
             rows=[]
             for line in p.stdout.strip().splitlines():
@@ -107,7 +108,7 @@ def gpu_info() -> str:
             if rows:return _json({"gpus":rows})
     except Exception: pass
     try:
-        p=subprocess.run(["rocm-smi","--showmeminfo","vram","--showuse","--json"],capture_output=True,text=True,timeout=5,stdin=subprocess.DEVNULL)
+        p=run_argv(["rocm-smi","--showmeminfo","vram","--showuse","--json"], timeout=5)
         if p.returncode==0 and p.stdout.strip():
             try:return _json({"vendor":"amd","raw":json.loads(p.stdout)})
             except json.JSONDecodeError:return _json({"vendor":"amd","raw_text":p.stdout[:4000]})

@@ -10,6 +10,8 @@ import subprocess
 import time
 from pathlib import Path
 
+from .subprocess_utils import run_argv
+
 try:
     import psutil
 except ImportError:  # pragma: no cover
@@ -22,7 +24,9 @@ from .primitives import clock_payload
 
 def _run(argv: list[str], timeout: float = 5) -> tuple[int, str, str]:
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        proc = run_argv(argv, timeout=timeout)
+        if proc.timed_out:
+            return 124, proc.stdout, (proc.stderr + f"\nTimed out after {timeout}s").strip()
         return proc.returncode, proc.stdout, proc.stderr
     except Exception as exc:
         return 1, "", str(exc)
@@ -195,11 +199,15 @@ def read_host_file(filepath: str = "/host/etc/resolv.conf") -> str:
     path = str(filepath)
     if not path.startswith("/host"):
         path = os.path.join("/host", path.lstrip("/"))
-    safe = os.path.abspath(path)
-    if os.path.commonpath(["/host", safe]) != "/host":
-        return "Error: Path traversal outside /host is forbidden."
+    root = Path("/host").resolve()
     try:
-        text = Path(safe).read_text(errors="ignore")[:20000]
+        safe = Path(path).resolve(strict=True)
+    except OSError as exc:
+        return f"Error: reading host file failed: {exc}"
+    if os.path.commonpath([str(root), str(safe)]) != str(root):
+        return "Error: Path traversal/symlink escape outside /host is forbidden."
+    try:
+        text = safe.read_text(errors="ignore")[:20000]
         return text + ("\n[truncated]" if len(text) >= 20000 else "")
     except Exception as exc:
         return f"Error: reading host file failed: {exc}"
@@ -229,11 +237,15 @@ def tail_host_log(log_path: str = "syslog", lines: int = 50) -> str:
         raw = raw.replace("/var/log/", "/host_log/", 1)
     if not raw.startswith("/host_log"):
         raw = os.path.join("/host_log", raw.lstrip("/"))
-    safe = os.path.abspath(raw)
-    if os.path.commonpath(["/host_log", safe]) != "/host_log":
-        return "Error: Path traversal outside /host_log is forbidden."
+    root = Path("/host_log").resolve()
     try:
-        data = Path(safe).read_text(errors="ignore").splitlines()
+        safe = Path(raw).resolve(strict=True)
+    except OSError:
+        return read_host_journal(lines=lines)
+    if os.path.commonpath([str(root), str(safe)]) != str(root):
+        return "Error: Path traversal/symlink escape outside /host_log is forbidden."
+    try:
+        data = safe.read_text(errors="ignore").splitlines()
         return "\n".join(data[-lines:])
     except Exception:
         return read_host_journal(lines=lines)

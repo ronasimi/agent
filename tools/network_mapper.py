@@ -11,6 +11,8 @@ import subprocess
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+from .subprocess_utils import run_argv
 from typing import Any
 
 from .media import media_result
@@ -20,7 +22,9 @@ _VIRTUAL_PREFIXES = ("docker", "br-", "veth", "virbr", "vmnet", "tailscale", "zt
 
 def _run(argv: list[str], timeout: float = 10) -> tuple[int, str, str]:
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        proc = run_argv(argv, timeout=timeout)
+        if proc.timed_out:
+            return 124, proc.stdout, (proc.stderr + f"\nTimed out after {timeout}s").strip()
         return proc.returncode, proc.stdout, proc.stderr
     except Exception as exc:
         return 1, "", str(exc)
@@ -83,8 +87,8 @@ def local_subnets(include_virtual: bool = False) -> str:
 
 def _ping_host(ip: str):
     try:
-        result = subprocess.run(["ping", "-c", "1", "-W", "1", ip], capture_output=True, text=True, timeout=2)
-        if "bytes from" in result.stdout or "ttl=" in result.stdout.lower():
+        result = run_argv(["ping", "-c", "1", "-W", "1", ip], timeout=2, max_output_bytes=65536)
+        if result.returncode == 0 and ("bytes from" in result.stdout or "ttl=" in result.stdout.lower()):
             return ip
     except Exception:
         pass
@@ -347,7 +351,9 @@ def map_network(
         dot_file = Path(output_path).with_suffix(".dot")
         dot_file.write_text(dot_code, encoding="utf-8")
         try:
-            subprocess.run(["dot", "-Tpng", str(dot_file), "-o", output_path], check=True, capture_output=True, timeout=15)
+            result = run_argv(["dot", "-Tpng", str(dot_file), "-o", output_path], timeout=15, max_output_bytes=262144)
+            if result.timed_out or result.returncode != 0:
+                return f"Error: generating graph map failed: {result.stderr.strip() or 'dot failed'}"
         except Exception as exc:
             return f"Error: generating graph map failed: {exc}"
 

@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import fcntl
 import os
+import time
 from contextlib import contextmanager
 from typing import Any, Iterator
 
 from ollama import Client
 
 from tools.runtime import get_monitor_state, record_monitor_state, utc_now
+from .decision_engine import DecisionEngineClient
 
 from .background.config import (
     FAST_MODEL,
@@ -29,6 +31,7 @@ from .background.config import (
     REPORT_OPTIONS,
     REPORT_RESTORE_FAST_MODEL,
     REPORT_RESTORE_MODELS,
+    AGENT_CFG,
 )
 
 INFERENCE_LOCK_PATH = os.environ.get("AGENT_INFERENCE_LOCK", "/app/workspace/.agent_inference.lock")
@@ -93,24 +96,42 @@ def background_inference_slot() -> Iterator[None]:
 
 
 def enter_report_model_stage(job_id: str = "") -> dict[str, Any]:
-    """Evict smaller models and preload the configured report model."""
+    """Evict smaller models and Laya, then preload the report model."""
     client = _client()
+    decision = DecisionEngineClient(dict(AGENT_CFG.get("decision_engine") or {}))
+    # The Laya sidecar is a single shared process, so this HTTP unload actually
+    # releases its encoder RAM for every frontend before the 9B writer loads.
+    decision_cfg = dict(AGENT_CFG.get("decision_engine") or {})
+    if bool(decision_cfg.get("suspend_during_report", True)):
+        decision.unload(timeout=2.0)
+        # An encoder cold-load may have been in flight when /research asked it
+        # to unload. Wait briefly for that cancelled loader to drop its temporary
+        # weights before admitting the 9B writer. If it is still winding down,
+        # defer the background job rather than creating a transient RAM spike.
+        deadline = time.monotonic() + max(0.5, float(decision_cfg.get("report_unload_wait_seconds", 5.0)))
+        while time.monotonic() < deadline:
+            health = decision.health()
+            if not bool(health.get("loaded")) and not bool(health.get("loading")):
+                break
+            time.sleep(0.1)
+        else:
+            from .background.resources import InferenceDeferred
+            raise InferenceDeferred("Decision engine is still releasing memory; report synthesis deferred.")
     with background_inference_slot():
         for model in dict.fromkeys([MODEL, FAST_MODEL]):
             if model and model != REPORT_MODEL:
                 _unload(client, model)
         loaded = _warm(client, REPORT_MODEL, REPORT_OPTIONS, REPORT_MODEL_KEEP_ALIVE)
         if not loaded:
+            # Restore the decision service best-effort if report load fails.
+            decision.preload(timeout=0.5)
             raise RuntimeError(f"Unable to load report model '{REPORT_MODEL}'.")
-        # Validate the *resident* footprint after normal models have been
-        # evicted. If the 9B runner/context still exceeds the configured worker
-        # budget, fail explicitly instead of allowing Ollama to thrash models or
-        # push the host into memory pressure.
         from .background.resources import resources_available
         ok, reason = resources_available()
         if not ok:
             _unload(client, REPORT_MODEL)
             record_monitor_state(_REPORT_STATE_KEY, False)
+            decision.preload(timeout=0.5)
             raise RuntimeError(f"Report model exceeds the configured memory budget: {reason}")
         state = {
             "job_id": str(job_id or ""),
@@ -123,9 +144,10 @@ def enter_report_model_stage(job_id: str = "") -> dict[str, Any]:
 
 
 def exit_report_model_stage(job_id: str = "", *, restore: bool = True) -> dict[str, Any]:
-    """Unload the report model and optionally restore normal model residency."""
+    """Unload report model, restore normal models, and asynchronously warm Laya."""
     client = _client()
-    result = {"report_unloaded": False, "main_restored": False, "fast_restored": False}
+    decision = DecisionEngineClient(dict(AGENT_CFG.get("decision_engine") or {}))
+    result = {"report_unloaded": False, "main_restored": False, "fast_restored": False, "decision_preload_requested": False}
     with background_inference_slot():
         result["report_unloaded"] = _unload(client, REPORT_MODEL)
         record_monitor_state(_REPORT_STATE_KEY, False)
@@ -133,6 +155,7 @@ def exit_report_model_stage(job_id: str = "", *, restore: bool = True) -> dict[s
             result["main_restored"] = _warm(client, MODEL, MAIN_OPTIONS, -1)
             if REPORT_RESTORE_FAST_MODEL and FAST_MODEL and FAST_MODEL != MODEL:
                 result["fast_restored"] = _warm(client, FAST_MODEL, FAST_OPTIONS, FAST_MODEL_KEEP_ALIVE)
+    result["decision_preload_requested"] = decision.preload(timeout=0.5)
     return result
 
 
@@ -149,4 +172,5 @@ def evict_report_model_for_interactive() -> bool:
     client = _client()
     unloaded = _unload(client, str((active or {}).get("model") or REPORT_MODEL) if isinstance(active, dict) else REPORT_MODEL)
     record_monitor_state(_REPORT_STATE_KEY, False)
+    DecisionEngineClient(dict(AGENT_CFG.get("decision_engine") or {})).preload(timeout=0.5)
     return unloaded

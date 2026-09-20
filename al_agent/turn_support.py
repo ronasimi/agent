@@ -25,6 +25,37 @@ from .state import (
     WORKING_STATE_EVIDENCE_CHARS, WORKING_STATE_ENABLED, WORKING_STATE_HISTORY_TURNS,
 )
 
+
+def _decode_tool_arguments(value: Any) -> dict[str, Any]:
+    """Decode the bounded JSON-object forms emitted by local model backends.
+
+    Accept ordinary JSON, one layer of JSON-string wrapping, or a fenced JSON
+    object. Deliberately do not accept Python literals/single-quoted pseudo-JSON.
+    """
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        raise TypeError("arguments must be a JSON object")
+    raw = value.strip()
+    fence = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", raw, flags=re.I | re.S)
+    if fence:
+        raw = fence.group(1).strip()
+    decoded: Any = raw
+    for _ in range(2):
+        if isinstance(decoded, dict):
+            return decoded
+        if not isinstance(decoded, str):
+            break
+        try:
+            decoded = json.loads(decoded)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"arguments are not valid JSON: {exc.msg}") from exc
+    if not isinstance(decoded, dict):
+        raise TypeError("arguments must decode to a JSON object")
+    return decoded
+
 def _parse_tool_calls(raw_calls: Any, allowed_names: set[str] | None = None) -> tuple[list[dict], list[str]]:
     """Normalize native calls and retain actionable parse errors for the model."""
     result: list[dict] = []
@@ -48,14 +79,10 @@ def _parse_tool_calls(raw_calls: Any, allowed_names: set[str] | None = None) -> 
             if not canonical:
                 errors.append(f"call {index}: tool '{name or '[missing]'}' was not supplied in this turn")
                 continue
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except json.JSONDecodeError as exc:
-                    errors.append(f"call {index} ({canonical}): arguments are not valid JSON: {exc.msg}")
-                    continue
-            if not isinstance(args, dict):
-                errors.append(f"call {index} ({canonical}): arguments must be a JSON object")
+            try:
+                args = _decode_tool_arguments(args)
+            except (TypeError, ValueError) as exc:
+                errors.append(f"call {index} ({canonical}): {exc}")
                 continue
             try:
                 args = normalize_arguments(AVAILABLE_TOOLS_MAP[canonical], args)
@@ -158,32 +185,38 @@ def _prune_mismatched_fact_tools(
     return changed
 
 def _recover_textual_readonly_tool_call(content: str, allowed_names: set[str]) -> tuple[list[dict], str]:
-    """Recover a narrowly formatted read-only pseudo tool call emitted as prose.
+    """Recover explicitly-labelled read-only tool JSON emitted as prose.
 
-    Small local models occasionally print a ``Tool call:`` JSON envelope instead
-    of using Ollama's native tool channel.  Only repair this when the text
-    explicitly labels itself as a tool call, the JSON names a supplied read-only
-    tool, and its arguments validate against the real callable schema. Mutating
-    tools are never recovered from prose.
+    Supports the common local-model envelopes ``tool_name``/``params``,
+    OpenAI-like ``name``/``arguments``, and ``function`` wrappers.  Recovery is
+    intentionally limited to supplied read-only tools and explicit Tool call or
+    <tool_call> markup; arbitrary JSON in normal prose is never executable.
     """
     text = str(content or "")
-    if not re.search(r"\btool\s*call\s*:", text, re.I):
+    labelled = bool(re.search(r"\btool\s*call\s*:", text, re.I) or re.search(r"<tool_call>", text, re.I))
+    if not labelled:
         return [], ""
     blocks = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.I | re.S)
+    blocks.extend(re.findall(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", text, flags=re.I | re.S))
     if not blocks:
-        return [], ""
+        # Last-resort bounded object after an explicit Tool call label.
+        match = re.search(r"\btool\s*call\s*:\s*(\{[^\n]{1,12000}\})", text, re.I | re.S)
+        if match:
+            blocks.append(match.group(1))
     payload = None
     for raw in reversed(blocks):
         try:
             candidate = json.loads(raw)
         except json.JSONDecodeError:
             continue
-        if isinstance(candidate, dict) and candidate.get("tool_name"):
+        if isinstance(candidate, dict):
             payload = candidate
             break
     if not isinstance(payload, dict):
         return [], ""
-    requested = str(payload.get("tool_name") or "").strip()
+
+    function = payload.get("function") if isinstance(payload.get("function"), dict) else {}
+    requested = str(payload.get("tool_name") or payload.get("name") or function.get("name") or "").strip()
     canonical = next((name for name in allowed_names if name.lower() == requested.lower()), "")
     if not canonical or canonical not in AVAILABLE_TOOLS_MAP:
         return [], ""
@@ -196,10 +229,16 @@ def _recover_textual_readonly_tool_call(content: str, allowed_names: set[str]) -
     ), {}) or {}
     properties = set((schema.get("properties") or {}).keys())
     args: dict[str, Any] = {}
+    raw_args = payload.get("arguments", function.get("arguments", {}))
+    try:
+        args.update({k: v for k, v in _decode_tool_arguments(raw_args).items() if k in properties})
+    except (TypeError, ValueError):
+        if raw_args not in ({}, "", None):
+            return [], ""
     nested = payload.get("params")
     if isinstance(nested, dict):
         args.update({k: v for k, v in nested.items() if k in properties})
-    args.update({k: v for k, v in payload.items() if k not in {"tool_name", "params"} and k in properties})
+    args.update({k: v for k, v in payload.items() if k not in {"tool_name", "name", "params", "arguments", "function"} and k in properties})
     try:
         normalized = normalize_arguments(AVAILABLE_TOOLS_MAP[canonical], args)
     except Exception:
@@ -209,7 +248,6 @@ def _recover_textual_readonly_tool_call(content: str, allowed_names: set[str]) -
         "type": "function",
         "function": {"name": canonical, "arguments": normalized},
     }], canonical
-
 
 def _extract_tool_calls(raw_calls: Any) -> list[dict]:
     """Compatibility wrapper used by tests/integrations that need valid calls only."""

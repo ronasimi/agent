@@ -10,6 +10,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from .subprocess_utils import run_argv
+
 import yaml
 
 from .repo_map import source_root, iter_source_files
@@ -17,10 +19,11 @@ from .repo_map import source_root, iter_source_files
 
 def _run(argv: list[str], cwd: Path, timeout: int = 60, env: dict | None = None) -> dict:
     try:
-        proc = subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL, env=env)
-        return {"command": argv, "returncode": proc.returncode, "stdout": proc.stdout[-8000:], "stderr": proc.stderr[-4000:], "ok": proc.returncode == 0}
-    except subprocess.TimeoutExpired:
-        return {"command": argv, "returncode": None, "ok": False, "error": f"timeout after {timeout}s"}
+        proc = run_argv(argv, cwd=str(cwd), timeout=timeout, env=env)
+        result = {"command": argv, "returncode": proc.returncode, "stdout": proc.stdout[-8000:], "stderr": proc.stderr[-4000:], "ok": proc.returncode == 0 and not proc.timed_out}
+        if proc.timed_out:
+            result["error"] = f"timeout after {timeout}s"
+        return result
     except Exception as exc:
         return {"command": argv, "returncode": None, "ok": False, "error": str(exc)}
 

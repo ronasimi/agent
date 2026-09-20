@@ -52,6 +52,25 @@ _SCHEMA_OVERRIDES: dict[tuple[str, str], dict[str, Any]] = {
     ("repo_checks", "checks"): {"items": {"type": "string", "enum": ["compile", "config", "ruff", "pytest"]}},
 }
 
+_SCHEMA_LIMITS_BY_NAME: dict[str, dict[str, Any]] = {
+    "command": {"maxLength": 100000},
+    "code": {"maxLength": 100000},
+    "query": {"maxLength": 4000},
+    "url": {"maxLength": 8192},
+    "filename": {"maxLength": 4096},
+    "filepath": {"maxLength": 4096},
+    "path": {"maxLength": 4096},
+    "content": {"maxLength": 1000000},
+    "timeout": {"minimum": 1, "maximum": 300},
+    "port": {"minimum": 1, "maximum": 65535},
+    "limit": {"minimum": 1, "maximum": 10000},
+    "lines": {"minimum": 1, "maximum": 5000},
+    "max_lines": {"minimum": 1, "maximum": 5000},
+    "max_files": {"minimum": 1, "maximum": 5000},
+    "max_hops": {"minimum": 1, "maximum": 64},
+    "probes": {"minimum": 1, "maximum": 20},
+}
+
 _PARAMETER_HINTS = {
     "query": "Search query text.",
     "instruments": "List of market instruments or explicit ticker/futures symbols to quote.",
@@ -227,6 +246,7 @@ def function_schema(func: Callable, description: str | None = None) -> dict:
         elif param.default is not None and isinstance(param.default, (str, int, float, bool, list, dict)):
             entry["default"] = param.default
         entry.update(_SCHEMA_OVERRIDES.get((public_name, param.name), {}))
+        entry.update(_SCHEMA_LIMITS_BY_NAME.get(param.name, {}))
         properties[param.name] = entry
     raw_doc = inspect.getdoc(func) or ""
     first_doc_line = raw_doc.splitlines()[0] if raw_doc.splitlines() else ""
@@ -336,51 +356,80 @@ def _coerce_value(value: Any, annotation: Any, name: str) -> Any:
 
 
 def _coerce_schema_value(value: Any, spec: dict[str, Any], name: str) -> Any:
-    allowed = spec.get("enum")
-    if isinstance(allowed, list) and value not in allowed:
-        raise TypeError(f"Argument '{name}' must be one of: {', '.join(map(str, allowed))}.")
+    """Coerce and recursively validate the JSON-schema subset sent to Ollama."""
     kind = str(spec.get("type") or "")
     if kind == "string":
-        if isinstance(value, str): return value
-        if isinstance(value, (int, float, bool)): return str(value)
-        # Several structured primitives intentionally accept ``Any`` and their
-        # public schema represents that transport as JSON text.  Pipelines pass
-        # parsed intermediate objects, so serialize those deterministically.
-        if isinstance(value, (dict, list)):
-            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-        raise TypeError(f"Argument '{name}' must be a string.")
-    if kind == "boolean":
-        if isinstance(value, bool): return value
-        if isinstance(value, str) and value.strip().lower() in {"true", "false"}: return value.strip().lower() == "true"
-        raise TypeError(f"Argument '{name}' must be a boolean.")
-    if kind == "integer":
-        if isinstance(value, bool): raise TypeError(f"Argument '{name}' must be an integer.")
-        if isinstance(value, int): return value
-        if isinstance(value, float) and value.is_integer(): return int(value)
-        if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()): return int(value.strip())
-        raise TypeError(f"Argument '{name}' must be an integer.")
-    if kind == "number":
-        if isinstance(value, bool): raise TypeError(f"Argument '{name}' must be a number.")
-        if isinstance(value, (int, float)): return float(value)
         if isinstance(value, str):
-            try: return float(value.strip())
-            except ValueError: pass
-        raise TypeError(f"Argument '{name}' must be a number.")
-    if kind == "array":
+            result = value
+        elif isinstance(value, (int, float, bool)):
+            result = str(value)
+        elif isinstance(value, (dict, list)):
+            result = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        else:
+            raise TypeError(f"Argument '{name}' must be a string.")
+        minimum = spec.get("minLength")
+        maximum = spec.get("maxLength")
+        if minimum is not None and len(result) < int(minimum):
+            raise TypeError(f"Argument '{name}' must contain at least {int(minimum)} characters.")
+        if maximum is not None and len(result) > int(maximum):
+            raise TypeError(f"Argument '{name}' exceeds the {int(maximum)} character limit.")
+        coerced = result
+    elif kind == "boolean":
+        if isinstance(value, bool): coerced = value
+        elif isinstance(value, str) and value.strip().lower() in {"true", "false"}: coerced = value.strip().lower() == "true"
+        else: raise TypeError(f"Argument '{name}' must be a boolean.")
+    elif kind == "integer":
+        if isinstance(value, bool): raise TypeError(f"Argument '{name}' must be an integer.")
+        if isinstance(value, int): coerced = value
+        elif isinstance(value, float) and value.is_integer(): coerced = int(value)
+        elif isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()): coerced = int(value.strip())
+        else: raise TypeError(f"Argument '{name}' must be an integer.")
+    elif kind == "number":
+        if isinstance(value, bool): raise TypeError(f"Argument '{name}' must be a number.")
+        if isinstance(value, (int, float)): coerced = float(value)
+        elif isinstance(value, str):
+            try: coerced = float(value.strip())
+            except ValueError as exc: raise TypeError(f"Argument '{name}' must be a number.") from exc
+        else: raise TypeError(f"Argument '{name}' must be a number.")
+    elif kind == "array":
         if isinstance(value, str) and value.lstrip().startswith("["):
             try: value = json.loads(value)
             except json.JSONDecodeError as exc: raise TypeError(f"Argument '{name}' must be a JSON array.") from exc
         if not isinstance(value, list): raise TypeError(f"Argument '{name}' must be an array.")
+        if spec.get("minItems") is not None and len(value) < int(spec["minItems"]):
+            raise TypeError(f"Argument '{name}' requires at least {int(spec['minItems'])} item(s).")
+        if spec.get("maxItems") is not None and len(value) > int(spec["maxItems"]):
+            raise TypeError(f"Argument '{name}' exceeds the {int(spec['maxItems'])} item limit.")
         item_spec = spec.get("items") if isinstance(spec.get("items"), dict) else {}
-        return [_coerce_schema_value(item, item_spec, f"{name}[]") for item in value] if item_spec else value
-    if kind == "object":
+        coerced = [_coerce_schema_value(item, item_spec, f"{name}[]") for item in value] if item_spec else value
+    elif kind == "object":
         if isinstance(value, str) and value.lstrip().startswith("{"):
             try: value = json.loads(value)
             except json.JSONDecodeError as exc: raise TypeError(f"Argument '{name}' must be a JSON object.") from exc
         if not isinstance(value, dict): raise TypeError(f"Argument '{name}' must be an object.")
-        return value
-    return value
+        props = spec.get("properties") if isinstance(spec.get("properties"), dict) else {}
+        if props:
+            unknown = set(value) - set(props)
+            if unknown and spec.get("additionalProperties") is False:
+                raise TypeError(f"Argument '{name}' has unknown field(s): {', '.join(sorted(unknown))}.")
+            missing = [str(key) for key in spec.get("required", []) if key not in value]
+            if missing:
+                raise TypeError(f"Argument '{name}' is missing required field(s): {', '.join(missing)}.")
+            coerced = {key: _coerce_schema_value(item, props.get(key, {}), f"{name}.{key}") for key, item in value.items()}
+        else:
+            coerced = value
+    else:
+        coerced = value
 
+    allowed = spec.get("enum")
+    if isinstance(allowed, list) and coerced not in allowed:
+        raise TypeError(f"Argument '{name}' must be one of: {', '.join(map(str, allowed))}.")
+    if isinstance(coerced, (int, float)) and not isinstance(coerced, bool):
+        if spec.get("minimum") is not None and coerced < float(spec["minimum"]):
+            raise TypeError(f"Argument '{name}' must be >= {spec['minimum']}.")
+        if spec.get("maximum") is not None and coerced > float(spec["maximum"]):
+            raise TypeError(f"Argument '{name}' must be <= {spec['maximum']}.")
+    return coerced
 
 def _normalize_schema_arguments(schema: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
     fn = schema.get("function", {}) if isinstance(schema, dict) else {}

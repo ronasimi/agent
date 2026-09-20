@@ -21,3 +21,4 @@ uvicorn
 websockets
 python-multipart
 pillow
+laya==0.3.3

@@ -478,6 +478,23 @@ Some especially useful modules:
 - `webui/server.py` — Web UI API
 - `webui/static/app.js` — browser interaction and streaming UI
 
+## Optional Laya decision engine
+
+The harness includes an experimental localhost Laya sidecar that can remove
+autoregressive 2B micro-decisions from common routing/validation paths. Exact
+harness rules still run first; high-confidence Laya decisions may narrow
+read-only tool schemas or terminate a completed/blocked validator loop, while
+low-confidence decisions fall back to the existing 2B model.
+
+The sidecar is shared by CLI/Web/worker processes so only one encoder copy is
+resident. `/research` unloads it before admitting the 9B report writer and
+requests a reload when normal model residency is restored. Turn outcomes are
+captured for eventual harness-specific fine-tuning and local confidence
+calibration.
+
+See [`LAYA_DECISION_ENGINE.md`](LAYA_DECISION_ENGINE.md) for architecture,
+security boundaries, benchmarking, and training-data commands.
+
 ## Testing
 
 Run the unit suite with:
