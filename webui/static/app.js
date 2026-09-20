@@ -110,7 +110,7 @@ function cssVar(name,value){document.documentElement.style.setProperty(name,valu
 async function loadTheme(){try{const t=await api('/api/theme');const c=t.colors||{};const map={foreground:'--xr-foreground',background:'--xr-background',cursorColor:'--xr-cursor'};for(const[k,v]of Object.entries(map))if(c[k])cssVar(v,c[k]);for(let i=0;i<16;i++)if(c[`color${i}`])cssVar(`--xr-color${i}`,c[`color${i}`]);}catch(e){console.warn('Theme load failed',e);}}
 async function loadHealth(){const h=await api('/api/health');$('#mainModel').textContent=h.main_model;$('#fastModel').textContent=h.fast_model;$('#contextSize').textContent=(h.context/1024).toFixed(0)+'K';}
 function refreshProfileImage(){const avatar=document.querySelector('.agent-avatar'),img=$('#userProfileImage');if(!avatar||!img)return;img.onload=()=>avatar.classList.add('has-image');img.onerror=()=>avatar.classList.remove('has-image');img.src=`/api/profile-image?v=${Date.now()}`;}
-function conversationQuery(){return `conversation_id=${encodeURIComponent(activeConversationId)}`;}
+function conversationQuery(conversationId=activeConversationId){return `conversation_id=${encodeURIComponent(conversationId)}`;}
 async function createFreshConversation(){
   const created=await api('/api/conversations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
   activeConversationId=created.id;
@@ -118,8 +118,13 @@ async function createFreshConversation(){
 }
 async function activateConversation(conversationId){
   if(activeTurn)return false;
-  activeConversationId=String(conversationId||'');
-  await Promise.all([loadHistory(),loadState()]);
+  const target=String(conversationId||'');
+  if(!target)return false;
+  activeConversationId=target;
+  // Load the clicked thread explicitly. Both loaders guard against a later
+  // selection winning the race, so rapid sidebar clicks cannot render stale data.
+  await Promise.all([loadHistory(target),loadState(target)]);
+  if(activeConversationId!==target)return false;
   showPanel('chat');
   await loadConversations();
   promptEl.focus();
@@ -149,8 +154,8 @@ async function loadConversations(){
     wrap.append(btn,del);host.appendChild(wrap);
   }
 }
-async function loadHistory(){const rows=await api(`/api/history?${conversationQuery()}`);messagesEl.innerHTML='';artifactCards.clear();activeUserMessageEl=null;for(const m of rows){if(m.role==='user'||m.role==='assistant')addMessage(m.role,m.content);else if(m.role==='tool')addTool(m.name||'tool','history',m.content);}applyChatSearch();scrollBottom(true);}
-async function loadState(){$('#stateView').textContent=JSON.stringify(await api(`/api/state?${conversationQuery()}`),null,2);}
+async function loadHistory(conversationId=activeConversationId){const cid=String(conversationId||'');const rows=await api(`/api/history?${conversationQuery(cid)}`);if(cid!==activeConversationId)return false;messagesEl.innerHTML='';artifactCards.clear();activeUserMessageEl=null;assistantNode=null;for(const m of rows){if(m.role==='user'||m.role==='assistant')addMessage(m.role,m.content);else if(m.role==='tool')addTool(m.name||'tool','history',m.content);}applyChatSearch();scrollBottom(true);return true;}
+async function loadState(conversationId=activeConversationId){const cid=String(conversationId||'');const state=await api(`/api/state?${conversationQuery(cid)}`);if(cid!==activeConversationId)return false;$('#stateView').textContent=JSON.stringify(state,null,2);return true;}
 async function loadJobs(){const rows=await api('/api/jobs');$('#jobsView').innerHTML=rows.length?rows.map(j=>`<div class="data-card"><strong>${esc(j.title)}</strong><div class="muted">${esc(j.job_type)} · ${esc(j.status)} · ${esc(j.id).slice(0,8)}</div>${j.error?`<pre>${esc(j.error)}</pre>`:''}</div>`).join(''):'<div class="muted">No jobs.</div>';}
 async function loadReminders(){const rows=await api('/api/reminders');$('#remindersView').innerHTML=rows.length?rows.map(r=>`<div class="data-card"><strong>${esc(r.title)}</strong><div class="muted">${esc(r.when_iso)} · ${esc(r.repeat_mode)} · ${esc(r.status)}</div><div>${esc(r.message||'')}</div></div>`).join(''):'<div class="muted">No reminders.</div>';}
 
@@ -208,7 +213,7 @@ function restoreSidebarState(){
   toggleWorkspace(readUiState(UI_STATE_KEYS.right,false),{persist:false});
 }
 
-function showPanel(name){document.querySelectorAll('.panel').forEach(x=>x.classList.add('hidden'));$(`#${name}Panel`).classList.remove('hidden');document.querySelectorAll('.nav-item,.recent-item').forEach(b=>b.classList.toggle('active',b.dataset.panel===name));$('#panelTitle').textContent={chat:'Al Agent',state:'Working state',jobs:'Jobs',reminders:'Reminders'}[name]||'Al Agent';if(name==='state')loadState();if(name==='jobs')loadJobs();if(name==='reminders')loadReminders();}
+function showPanel(name){document.querySelectorAll('.panel').forEach(x=>x.classList.add('hidden'));$(`#${name}Panel`).classList.remove('hidden');document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.panel===name));document.querySelectorAll('.recent-item').forEach(b=>b.classList.toggle('active',name==='chat'&&b.dataset.conversationId===activeConversationId));$('#panelTitle').textContent={chat:'Al Agent',state:'Working state',jobs:'Jobs',reminders:'Reminders'}[name]||'Al Agent';if(name==='state')loadState();if(name==='jobs')loadJobs();if(name==='reminders')loadReminders();}
 function connect(){socket=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws/chat`);socket.onopen=()=>{};socket.onclose=()=>{setStatus('Disconnected','error');setTimeout(connect,1200)};socket.onmessage=(ev)=>{const e=JSON.parse(ev.data);if(e.type==='accepted'){activeTurn=e.turn_id;setStatus(e.command?'Running command…':'Working…','busy');$('#send').classList.add('hidden');$('#stop').classList.remove('hidden');assistantNode=null;}else if(e.type==='command_result'){assistantNode=null;if(e.action==='clear_conversation'){messagesEl.innerHTML='';artifactCards.clear();activeUserMessageEl=null;followOutput=true;}if(e.action==='set_thinking')$('#thinking').checked=!!e.data?.thinking;if(e.action==='open_profile')void openOnboarding({reset:true});if(['jobs_changed','show_jobs'].includes(e.action))void loadJobs();if(e.action==='show_reminders')void loadReminders();if(e.message)addMessage('assistant',e.message,{forceScroll:true});if(e.ok===false)setStatus('Command failed','error');else setStatus('Ready');finishTurn();}else if(e.type==='queue_wait'){setStatus('Queued for inference…','busy');}else if(e.type==='queue_acquired'){setStatus('Thinking…','busy');}else if(e.type==='recipe_check'){setStatus(e.best_match?`Recipe checked: ${e.best_match}`:'Recipes checked','busy');}else if(e.type==='assistant_delta'){appendAssistant(e.content||'');}else if(e.type==='tool_start'){assistantNode=null;setStatus(`Running ${e.name}…`,'busy');}else if(e.type==='tool_result'){addTool(e.name,e.status,e.content);addMedia(e.media);if(e.name==='set_profile_image'&&e.status==='ok')refreshProfileImage();setStatus('Thinking…','busy');if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}else if(e.type==='artifact_created'){assistantNode=null;void addArtifact(e.artifact||{});setStatus(`Created ${(e.artifact&&e.artifact.name)||'file'}`,'busy');if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}else if(e.type==='validator'){assistantNode=null;addValidator(e);}else if(e.type==='recipe_suggestion'){assistantNode=null;addRecipeSuggestion(e);}else if(e.type==='requirements'){setStatus('Completing requested checks…','busy');}else if(e.type==='media_attached'){setStatus('Inspecting media…','busy');}else if(e.type==='assistant_final'){if(!assistantNode&&e.content)assistantNode=addMessage('assistant',e.content);setStatus('Ready');}else if(e.type==='turn_cancelled'){setStatus('Cancelled');finishTurn();}else if(e.type==='turn_end'){finishTurn();}else if(e.type==='history_refresh'){loadState();loadConversations();loadJobs();if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}else if(e.type==='error'){addMessage('assistant',`Error: ${e.message}`);setStatus('Error','error');finishTurn();}};}
 function finishTurn(){clearTurnStatus();activeTurn=null;assistantNode=null;activeUserMessageEl=null;$('#send').classList.remove('hidden');$('#stop').classList.add('hidden');}
 

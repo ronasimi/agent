@@ -5,7 +5,10 @@ from typing import Any
 from tools import _load_chat_history_from_db
 
 def _history(limit: int = 200, conversation_id: str | None = None) -> list[dict[str, Any]]:
-    kwargs = {"limit": max(1, min(int(limit), 200))}
+    # Browser history is a durable transcript view, not model context.
+    # Include compacted rows so reopening a saved conversation reproduces the
+    # visible conversation even after the model-context compactor has advanced.
+    kwargs = {"limit": max(1, min(int(limit), 200)), "include_compacted": True}
     if conversation_id is not None:
         kwargs["conversation_id"] = conversation_id
     rows = _load_chat_history_from_db(**kwargs)

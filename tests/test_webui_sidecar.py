@@ -321,3 +321,35 @@ def test_empty_placeholder_conversations_are_not_listed(tmp_path, monkeypatch):
 
     assert memory.delete_conversation("default") is True
     assert all(row["id"] != "default" for row in memory.list_conversations())
+
+
+def test_browser_history_reopens_compacted_conversation(tmp_path, monkeypatch):
+    from tools import memory
+    from webui import history as web_history
+
+    db = str(tmp_path / "conversation-reopen.db")
+    monkeypatch.setattr(memory, "DB_PATH", db)
+    memory.init_db()
+    cid = memory.create_conversation("Saved thread")["id"]
+    first = memory._save_message_to_db({"role": "user", "content": "old question"}, conversation_id=cid)
+    second = memory._save_message_to_db({"role": "assistant", "content": "old answer"}, conversation_id=cid)
+    memory._save_message_to_db({"role": "user", "content": "new question"}, conversation_id=cid)
+    assert memory.apply_conversation_compaction("summary", second, conversation_id=cid)
+
+    # Model context still excludes compacted rows.
+    model_history = memory._load_chat_history_from_db(limit=20, conversation_id=cid)
+    assert [row["content"] for row in model_history] == ["new question"]
+
+    # The browser transcript must remain durable and show the whole saved chat.
+    browser_history = web_history._history(limit=200, conversation_id=cid)
+    assert [row["content"] for row in browser_history] == ["old question", "old answer", "new question"]
+
+
+def test_sidebar_reopen_targets_clicked_conversation_and_highlights_only_it():
+    root = Path(__file__).resolve().parents[1]
+    js = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "loadHistory(target),loadState(target)" in js
+    assert "cid!==activeConversationId" in js
+    assert "b.dataset.conversationId===activeConversationId" in js
+    assert "document.querySelectorAll('.nav-item,.recent-item')" not in js
