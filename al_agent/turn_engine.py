@@ -35,7 +35,7 @@ from tools.pipeline import execute_pipeline
 from tools.recipe_store import check_recipes_for_task, render_recipe_preflight
 from tools.runtime import record_monitor_state, utc_now
 from tools.task_requirements import (
-    TaskRequirementLedger, build_news_query, classify_request_intent, derive_task_frame, effective_request_for_frame,
+    TaskRequirementLedger, build_news_query, derive_task_frame, effective_request_for_frame,
     is_evidence_reuse_request, is_task_continuation, news_region_for_frame,
 )
 from tools.turn_policy import derive_turn_tool_policy
@@ -47,7 +47,6 @@ from tools.web import (
 )
 
 from .console import Spinner, print_perf_stats as _print_perf_stats
-from .decision_engine import recommended_tools_for_family, route_with_fast_model
 from .events import (
     acquire_inference_lock as _acquire_inference_lock, cancel_requested as _cancel_requested,
     emit_event, release_inference_lock as _release_inference_lock,
@@ -71,15 +70,8 @@ def handle_user_turn(
     turn_started = time.monotonic()
     answer_first_visible_at: float | None = None
     last_model_metrics: dict[str, Any] = {}
-    laya_route_ms = 0.0
-    laya_route_source = "deterministic"
-    laya_schema_before = 0
-    laya_schema_after = 0
-    laya_validator_ms = 0.0
-    laya_validator_bypasses = 0
-    decision_trace_id = ""
-    continuation = False
-    successful_execution_trace: list[dict[str, Any]] = []
+    micro_validator_ms = 0.0
+    micro_validator_bypasses = 0
     # Advertise foreground demand before blocking on the cross-process lock so
     # a background report worker cannot repeatedly reacquire it between long
     # 9B synthesis calls and starve an interactive turn.
@@ -138,54 +130,7 @@ def handle_user_turn(
         system_prompt = build_system_prompt()
         previous_working_state = WORKING_STATE.load() if WORKING_STATE_ENABLED else {}
         previous_frame = dict(previous_working_state.get("task_frame") or {})
-        deterministic_intent = classify_request_intent(user_input)
-        previous_user = next((
-            str(item.get("content") or "") for item in reversed(messages[:-1])
-            if item.get("role") == "user" and item.get("content")
-        ), "")
-        route_decision = None
-        # Deterministic routes are faster and authoritative. Laya only sees turns
-        # that remain ambiguous after those rules, and any low-confidence result
-        # simply leaves the existing harness behavior unchanged.
-        if DECISION_ENGINE.routing_enabled and not deterministic_intent:
-            laya_decision = DECISION_ENGINE.route_turn(
-                user_input, previous_user=previous_user, previous_frame=previous_frame,
-            )
-            route_decision = laya_decision
-            laya_route_ms = float(laya_decision.latency_ms or 0.0)
-            laya_route_source = "laya" if laya_decision.ok else "unavailable"
-            # Keep the Laya trace even if the 2B fallback supplies the active
-            # route: the actual turn outcome becomes supervision for that Laya
-            # prediction and can later be exported for fine-tuning/calibration.
-            decision_trace_id = str(laya_decision.trace_id or "") if laya_decision.ok else ""
-            family_ok = bool(laya_decision.accepted(
-                "route_family", DECISION_ENGINE.threshold("route_family", 0.92)
-            )) if laya_decision.ok else False
-            tools_ok = bool(laya_decision.accepted(
-                "tool_requirement", DECISION_ENGINE.threshold("tool_requirement", 0.97)
-            )) if laya_decision.ok else False
-            continuation_ok = bool(laya_decision.accepted(
-                "continuation", DECISION_ENGINE.threshold("continuation", 0.95)
-            )) if (laya_decision.ok and previous_frame and previous_user) else True
-            if (
-                bool(DECISION_ENGINE.route_cfg.get("fallback_to_fast_model", True))
-                and not (family_ok and tools_ok and continuation_ok)
-            ):
-                fallback_route = route_with_fast_model(
-                    LOOP_VALIDATOR_CLIENT, FAST_MODEL, user_input,
-                    previous_user=previous_user, previous_frame=previous_frame,
-                    options=FAST_OPTIONS, keep_alive=FAST_MODEL_KEEP_ALIVE,
-                )
-                laya_route_ms += float(fallback_route.latency_ms or 0.0)
-                if fallback_route.ok:
-                    route_decision = fallback_route
-                    laya_route_source = "fast_model_fallback"
         continuation = is_task_continuation(user_input, previous_frame)
-        if not continuation and previous_frame and previous_user and route_decision and route_decision.ok:
-            laya_continuation = route_decision.accepted(
-                "continuation", DECISION_ENGINE.threshold("continuation", 0.95)
-            )
-            continuation = bool(laya_continuation and laya_continuation.value == "continuation")
         try:
             default_location = get_user_location()
         except Exception:
@@ -240,55 +185,6 @@ def handle_user_turn(
             max_tools=selection_limit,
             context_text=recent_selection_context,
         )
-        laya_schema_before = len(selected_tool_schemas)
-        if route_decision and route_decision.ok:
-            route_family = route_decision.accepted(
-                "route_family", DECISION_ENGINE.threshold("route_family", 0.92)
-            )
-            tool_requirement = route_decision.accepted(
-                "tool_requirement", DECISION_ENGINE.threshold("tool_requirement", 0.97)
-            )
-            explicit_names = {
-                name for name in AVAILABLE_TOOLS_MAP
-                if re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", user_input, re.I)
-            }
-            # A high-confidence no-tool decision may remove schemas only when no
-            # deterministic requirement/fact/recipe says otherwise. It never
-            # overrides grounding or an explicitly named tool.
-            if (
-                tool_requirement and tool_requirement.value == "none"
-                and not required_tools and not required_fact_types and not relevant_recipe and not explicit_names
-            ):
-                selected_tool_schemas = []
-            elif route_family and route_family.value not in {"other", "conversation"}:
-                family_names = set(recommended_tools_for_family(route_family.value))
-                preserve = set(required_tools) | explicit_names
-                narrowed = [
-                    schema for schema in selected_tool_schemas
-                    if str(schema.get("function", {}).get("name") or "") in family_names | preserve
-                ]
-                # If Laya says a tool is required but lexical selection produced
-                # no useful member of the family, expose only a small read-only
-                # starter set. Classifiers never add mutating authority.
-                if (
-                    tool_requirement and tool_requirement.value == "required"
-                    and bool(DECISION_ENGINE.route_cfg.get("add_readonly_family_tools_when_required", True))
-                ):
-                    max_family = max(1, min(
-                        int(DECISION_ENGINE.route_cfg.get("max_family_tools", 6)), selection_limit
-                    ))
-                    existing = {str(x.get("function", {}).get("name") or "") for x in narrowed}
-                    for name in recommended_tools_for_family(route_family.value):
-                        if len(narrowed) >= max_family or name in existing:
-                            continue
-                        if not bool(TOOL_METADATA.get(name, {}).get("readonly", True)):
-                            continue
-                        schema = get_tool_schema(name)
-                        if schema:
-                            narrowed.append(schema)
-                            existing.add(name)
-                if narrowed or preserve:
-                    selected_tool_schemas = narrowed
         _prune_mismatched_fact_tools(selected_tool_schemas, task_frame, user_input)
         turn_tool_policy = derive_turn_tool_policy(user_input, set(AVAILABLE_TOOLS_MAP), TOOL_METADATA)
         turn_tool_policy.allow_explicit_requirements(set(required_tools), TOOL_METADATA)
@@ -299,7 +195,6 @@ def handle_user_turn(
                     schema = get_tool_schema(recipe_tool)
                     if schema and turn_tool_policy.allowed(recipe_tool, TOOL_METADATA.get(recipe_tool, {})):
                         tool_schemas.append(schema)
-        laya_schema_after = len(tool_schemas)
         blocked_required = _ensure_tool_schemas(tool_schemas, required_tools, turn_tool_policy)
         for blocked_name in blocked_required:
             requirement_ledger.mark_blocked(blocked_name, "blocked or unavailable under harness policy")
@@ -462,7 +357,7 @@ def handle_user_turn(
         active_stall_recovery: dict[str, Any] | None = None
         validator_interventions = 0
         tracker = StepFailureTracker(STALL_VALIDATOR_AFTER)
-        successful_execution_trace.clear()
+        successful_execution_trace: list[dict[str, Any]] = []
         iteration_limit = _adaptive_iteration_limit(len(requirement_ledger.requirements))
         recipe_fallback_attempted = False
         fallback_recipe_candidate: dict[str, Any] | None = None
@@ -795,10 +690,6 @@ def handle_user_turn(
                 signature = tool_call_signature({"function": {"name": name, "arguments": normalized}})
                 seen_tool_calls.add(signature)
                 successful_readonly_signatures.add(signature)
-                successful_execution_trace.append({
-                    "tool": name, "args": normalized, "success": True,
-                    "readonly": True, "status": status, "harness_recovery": True,
-                })
                 if name == "news_search":
                     last_news_search_content = result_content
                 elif name == "wiki_search":
@@ -1079,17 +970,19 @@ def handle_user_turn(
                         and turn_tool_policy.allowed(name, TOOL_METADATA.get(name, {}))
                         and (name in selected_names or bool(TOOL_METADATA.get(name, {}).get("readonly", True)))
                     )[:LOOP_VALIDATOR_MAX_TOOLS]
-                    laya_validation = DECISION_ENGINE.validate_loop(
-                        user_input,
-                        json.dumps(turn_tail[-8:], ensure_ascii=False, default=str),
-                        signal=pending_stall_signal,
-                        candidate_tools=validator_tool_names,
-                        stage="stall",
-                    ) if DECISION_ENGINE.validator_enabled else None
-                    if laya_validation is not None:
-                        stall_validation = laya_validation
-                        laya_validator_ms += float(laya_validation.get("laya_latency_ms") or 0.0)
-                        laya_validator_bypasses += 1
+                    micro_validation = None
+                    if MICRO_VALIDATOR.enabled and not requirement_ledger.pending():
+                        micro_validation = MICRO_VALIDATOR.validate_loop(
+                            user_input,
+                            json.dumps(turn_tail[-8:], ensure_ascii=False, default=str),
+                            signal=pending_stall_signal,
+                            candidate_tools=validator_tool_names,
+                            stage="stall",
+                        )
+                    if micro_validation is not None:
+                        stall_validation = micro_validation
+                        micro_validator_ms += float(micro_validation.get("micro_model_latency_ms") or 0.0)
+                        micro_validator_bypasses += 1
                     else:
                         with Spinner("Fast-model stalled-step validation"):
                             stall_validation = validate_stalled_step(
@@ -1162,17 +1055,17 @@ def handle_user_turn(
             # chance if the loop reaches its absolute iteration cap.
             if iteration == iteration_limit and tool_iterations and LOOP_VALIDATOR_ENABLED and not stall_enforce_once and not requirement_ledger.pending():
                 tool_names = [str(schema.get("function", {}).get("name", "")) for schema in tool_schemas]
-                laya_validation = DECISION_ENGINE.validate_loop(
+                micro_validation = MICRO_VALIDATOR.validate_loop(
                     user_input,
                     json.dumps(turn_tail[-8:], ensure_ascii=False, default=str),
                     signal={"kind": "iteration_limit", "attempts": iteration},
                     candidate_tools=[name for name in tool_names if name],
                     stage="final",
-                ) if DECISION_ENGINE.validator_enabled else None
-                if laya_validation is not None:
-                    recovery_validation = laya_validation
-                    laya_validator_ms += float(laya_validation.get("laya_latency_ms") or 0.0)
-                    laya_validator_bypasses += 1
+                ) if MICRO_VALIDATOR.enabled else None
+                if micro_validation is not None:
+                    recovery_validation = micro_validation
+                    micro_validator_ms += float(micro_validation.get("micro_model_latency_ms") or 0.0)
+                    micro_validator_bypasses += 1
                 else:
                     with Spinner("Fast-model tool-loop validation"):
                         recovery_validation = validate_tool_loop(
@@ -1870,29 +1763,13 @@ def handle_user_turn(
         turn_metrics = {
             "total_turn_ms": total_turn_ms,
             "queue_wait_ms": (lock_acquired - turn_started) * 1000.0,
-            "decision_engine_route_ms": laya_route_ms,
-            "decision_engine_route_source": laya_route_source,
-            "decision_engine_schema_before": laya_schema_before,
-            "decision_engine_schema_after": laya_schema_after,
-            "decision_engine_schema_reduction": max(0, laya_schema_before - laya_schema_after),
-            "decision_engine_validator_ms": laya_validator_ms,
-            "decision_engine_validator_bypasses": laya_validator_bypasses,
+            "micro_model_validator_ms": micro_validator_ms,
+            "micro_model_validator_bypasses": micro_validator_bypasses,
             **last_model_metrics,
         }
         if answer_first_visible_at is not None:
             turn_metrics["answer_first_visible_ms"] = (answer_first_visible_at - turn_started) * 1000.0
         record_monitor_state("agent.last_turn_metrics", turn_metrics)
-        try:
-            DECISION_ENGINE.record_outcome(
-                trace_id=decision_trace_id,
-                request=user_input,
-                continuation=continuation,
-                successful_tools=successful_execution_trace,
-                completed=answer_first_visible_at is not None,
-                blocked=False,
-            )
-        except Exception:
-            pass
         try:
             _queue_compaction_if_needed(messages)
         except Exception as exc:

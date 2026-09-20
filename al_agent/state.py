@@ -9,7 +9,7 @@ from tools.memory import init_db
 from tools.recipe_store import init_recipe_store
 from tools.recipe_compat import seed_builtin_recipes
 from tools.working_state import WorkingStateStore
-from .decision_engine import DecisionEngineClient
+from .micro_model import MicroValidator
 
 CONFIG_PATH = os.environ.get("AGENT_CONFIG", "/app/config/config.yaml")
 CONFIG = load_config()
@@ -17,6 +17,9 @@ AGENT_CFG = CONFIG.get("agent", {})
 MODEL = AGENT_CFG.get("model", "agent-main:4b")
 FAST_MODEL = AGENT_CFG.get("fast_model", "agent-fast:2b")
 FAST_MODEL_KEEP_ALIVE = AGENT_CFG.get("fast_model_keep_alive", 0)
+MICRO_MODEL = AGENT_CFG.get("micro_model", "agent-micro:0.8b")
+MICRO_MODEL_KEEP_ALIVE = AGENT_CFG.get("micro_model_keep_alive", "2m")
+MICRO_OPTIONS = AGENT_CFG.get("micro_options") or {"num_ctx": 2048, "temperature": 0.6, "top_p": 0.95, "top_k": 20, "num_predict": 32}
 MAIN_OPTIONS = AGENT_CFG.get("main_options") or {"num_ctx": 16384, "temperature": 0.6, "top_p": 0.95, "top_k": 20}
 FAST_OPTIONS = AGENT_CFG.get("fast_options") or {"num_ctx": 8192, "temperature": 0.6, "top_p": 0.95, "top_k": 20}
 MAX_TOOLS_PER_TURN = max(8, int(AGENT_CFG.get("max_tools_per_turn", 12)))
@@ -41,8 +44,6 @@ MAX_ITERATIONS_HARD = max(MAX_ITERATIONS, int(AGENT_CFG.get("max_iterations_hard
 SEMANTIC_MEMORY = bool(AGENT_CFG.get("semantic_memory_enabled", False))
 THINKING_DEFAULT = bool(AGENT_CFG.get("thinking_default", False))
 SHOW_PERF_STATS = bool(AGENT_CFG.get("show_perf_stats", True))
-DECISION_ENGINE_CFG = dict(AGENT_CFG.get("decision_engine") or {})
-DECISION_ENGINE = DecisionEngineClient(DECISION_ENGINE_CFG)
 MODEL_TRANSPORT_CFG = AGENT_CFG.get("model_transport", {})
 MODEL_PREFLIGHT_RETRIES = max(0, min(int(MODEL_TRANSPORT_CFG.get("preflight_retries", 1)), 4))
 MODEL_RETRY_BASE_DELAY = max(0.0, float(MODEL_TRANSPORT_CFG.get("base_delay_seconds", 0.15)))
@@ -97,6 +98,11 @@ INFERENCE_LOCK_PATH = os.environ.get("AGENT_INFERENCE_LOCK", "/app/workspace/.ag
 
 OLLAMA = Client(host=OLLAMA_HOST)
 LOOP_VALIDATOR_CLIENT = Client(host=OLLAMA_HOST, timeout=float(LOOP_VALIDATOR_CFG.get("timeout_seconds", 45)))
+MICRO_VALIDATOR_CFG = dict(AGENT_CFG.get("micro_validator") or {})
+MICRO_VALIDATOR_CFG.setdefault("model", MICRO_MODEL)
+MICRO_VALIDATOR_CFG.setdefault("keep_alive", MICRO_MODEL_KEEP_ALIVE)
+MICRO_VALIDATOR_CFG.setdefault("options", MICRO_OPTIONS)
+MICRO_VALIDATOR = MicroValidator(LOOP_VALIDATOR_CLIENT, MICRO_VALIDATOR_CFG)
 
 init_db()
 if RECIPES_ENABLED:

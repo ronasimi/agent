@@ -27,31 +27,6 @@ services:
       - ./workspace:/state/workspace
       - ./memory:/state/memory
 
-  decision-engine:
-    build: .
-    image: agent
-    container_name: agent-decision-engine
-    restart: unless-stopped
-    init: true
-    stop_grace_period: 10s
-    pids_limit: 128
-    mem_limit: 3072m
-    cpus: 2.0
-    security_opt:
-      - no-new-privileges:true
-    user: "1000:1000"
-    network_mode: host
-    depends_on:
-      storage-init:
-        condition: service_completed_successfully
-    environment:
-      - TZ=${TZ:-America/Toronto}
-      - HF_HOME=/cache/huggingface
-    command: ["python", "-m", "uvicorn", "al_agent.decision_server:app", "--host", "127.0.0.1", "--port", "8091"]
-    volumes:
-      - ./config:/app/config:ro
-      - ./memory/huggingface:/cache/huggingface
-
   agent:
     build: .
     image: agent
@@ -70,8 +45,6 @@ services:
     depends_on:
       storage-init:
         condition: service_completed_successfully
-      decision-engine:
-        condition: service_started
     environment:
       - XDG_RUNTIME_DIR=/run/user/1000
       - DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
@@ -116,8 +89,6 @@ services:
     depends_on:
       storage-init:
         condition: service_completed_successfully
-      decision-engine:
-        condition: service_started
       optimizer-validator:
         condition: service_started
     volumes:
@@ -186,8 +157,6 @@ services:
     depends_on:
       storage-init:
         condition: service_completed_successfully
-      decision-engine:
-        condition: service_started
     environment:
       - TZ=${TZ:-America/Toronto}
       - WEBUI_HOST=${WEBUI_HOST:-127.0.0.1}

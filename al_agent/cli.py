@@ -21,7 +21,7 @@ from .slash_commands import SLASH_COMMANDS
 from .console import get_bottom_toolbar
 from .prompts import build_system_prompt
 from .model_protocol import warm_model_async
-from .state import FAST_MODEL, MAIN_OPTIONS, MAX_CTX, MODEL, OLLAMA, THINKING_DEFAULT, WARMUP_PRIME_PREFIX
+from .state import FAST_MODEL, MICRO_MODEL, MAIN_OPTIONS, MAX_CTX, MODEL, OLLAMA, THINKING_DEFAULT, WARMUP_PRIME_PREFIX
 from .turn_engine import handle_user_turn
 
 
@@ -61,7 +61,7 @@ def main() -> None:
     session=PromptSession(history=FileHistory(history_file),auto_suggest=AUTO_SUGGEST,style=style,bottom_toolbar=get_bottom_toolbar,completer=SlashCommandCompleter(),complete_while_typing=True)
     messages=[{'role':'system','content':build_system_prompt()}]+_load_chat_history_from_db(limit=100)
     context=CliContext(messages=messages,thinking_enabled=THINKING_DEFAULT)
-    print(f'Agent initialized with Main: {MODEL} | Fast: {FAST_MODEL} | Context: {MAX_CTX}')
+    print(f'Agent initialized with Main: {MODEL} | Micro: {MICRO_MODEL} | Fast: {FAST_MODEL} | Context: {MAX_CTX}')
     print(f'[System]: Preloading main model ({MODEL}) into VRAM in the background...')
     # Non-blocking: the prompt is usable immediately. Weight preloading is
     # reliable; optional prefix priming is disabled by default and should only

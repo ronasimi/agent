@@ -159,17 +159,9 @@ def health() -> dict[str, Any]:
         "ok": True,
         "main_model": agent_runtime.MODEL,
         "fast_model": agent_runtime.FAST_MODEL,
+        "micro_model": agent_runtime.MICRO_MODEL,
         "context": agent_runtime.MAX_CTX,
         "working_state": agent_runtime.WORKING_STATE_ENABLED,
-        "decision_engine": (
-            {
-                "enabled": bool(agent_runtime.DECISION_ENGINE.enabled),
-                "model": agent_runtime.DECISION_ENGINE.model_id,
-                **agent_runtime.DECISION_ENGINE.health(),
-            }
-            if getattr(agent_runtime, "DECISION_ENGINE", None)
-            else {"enabled": False}
-        ),
     }
 
 

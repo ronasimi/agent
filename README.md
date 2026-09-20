@@ -6,14 +6,16 @@
 
 **Al Agent** is a local, Ollama-powered assistant harness designed for long-running work without making the interactive chat feel sluggish. It combines a responsive foreground agent with typed tools, reusable recipes, durable memory, background research, system/network diagnostics, reminders, and an optional browser-based UI.
 
-The default configuration is tuned for a small local model pair:
+The default configuration uses four base Qwen3.5 roles plus an embedding model:
 
-- **Main model:** `agent-main:4b` (Empero Qwen3.8 4B Distill, Q8_0)
-- **Fast model:** `agent-fast:2b` (Empero Qwen3.8 2B Distill, Q4_K_M)
-- **Report model:** `agent-report:9b` (Empero Qwen3.8 9B Distill, Q4_K_M)
+- **Main model:** `agent-main:4b` → `qwen3.5:4b`
+- **Micro model:** `agent-micro:0.8b` → `qwen3.5:0.8b`
+- **Fast model:** `agent-fast:2b` → `qwen3.5:2b`
+- **Report model:** `agent-report:9b` → `qwen3.5:9b`
+- **Embedding model:** `nomic-embed-text`
 - **Context window:** 16K for the main agent
 
-The main model handles the conversation and final synthesis. The fast model handles bounded validation, research planning, source distillation, and other work that can be offloaded without blocking the main loop.
+The main model handles conversation and interactive reasoning. The 0.8B micro model is only a one-bit completion gate inside the tool-loop validator; false, malformed, or failed classifications fall through to the 2B fast model. The 2B model remains responsible for recovery validation, research planning, source distillation, and other lightweight reasoning. The 9B model is loaded only for long-form report synthesis.
 
 ## Quick start
 
@@ -25,20 +27,21 @@ You need:
 - a running Ollama server reachable from the host network
 - the models configured in `config/config.yaml`
 
-Create the stable role aliases after pulling the three Hugging Face GGUF models:
+Create the stable role aliases after pulling the base Qwen3.5 models:
 
 ```bash
-# Create the role aliases from already-pulled Hugging Face GGUF models:
+# Create the role aliases from already-pulled base Qwen3.5 models:
 ./scripts/create_ollama_aliases.sh
 ```
 
 The aliases map to:
 
-- `agent-main:4b` → `hf.co/empero-ai/Qwen3.8-4B-Distill-GGUF:Q8_0`
-- `agent-fast:2b` → `hf.co/empero-ai/Qwen3.8-2B-Distill-GGUF:Q4_K_M`
-- `agent-report:9b` → `hf.co/empero-ai/Qwen3.8-9B-Distill-GGUF:Q4_K_M`
+- `agent-main:4b` → `qwen3.5:4b`
+- `agent-micro:0.8b` → `qwen3.5:0.8b`
+- `agent-fast:2b` → `qwen3.5:2b`
+- `agent-report:9b` → `qwen3.5:9b`
 
-All three aliases use the distill release's recommended sampling defaults: `temperature=0.6`, `top_p=0.95`, and `top_k=20`. The harness also passes those values explicitly so behavior is unchanged if an alias is recreated without a Modelfile.
+The harness passes explicit sampling/context settings per role, so behavior does not depend on alias-local Modelfile parameters.
 
 ### 2. Start the agent
 
@@ -327,8 +330,10 @@ Important defaults:
 ```yaml
 agent:
   model: "agent-main:4b"
+  micro_model: "agent-micro:0.8b"
   fast_model: "agent-fast:2b"
   report_model: "agent-report:9b"
+  micro_model_keep_alive: "2m"
   fast_model_keep_alive: "2m"
   report_model_keep_alive: "10m"
   report_restore_models_after_stage: true
@@ -366,6 +371,13 @@ agent:
     top_p: 0.95
     top_k: 20
 
+  micro_options:
+    num_ctx: 2048
+    temperature: 0.6
+    top_p: 0.95
+    top_k: 20
+    num_predict: 32
+
   fast_options:
     num_ctx: 8192
     temperature: 0.6
@@ -378,7 +390,7 @@ agent:
     validator_fallback_max_tools: 12
 ```
 
-`fast_model_keep_alive: "2m"` keeps the fast validator/research model resident briefly so clustered recovery calls avoid repeated cold loads. If the main and fast models cannot coexist comfortably, reduce the TTL or set it to `0`; use the emitted `load_ms` metric to decide on the target machine.
+`micro_model_keep_alive: "2m"` keeps the ~1 GB terminal classifier warm briefly after it is actually needed; it is not loaded on every turn. `fast_model_keep_alive: "2m"` keeps the 2B recovery/research model warm for clustered work. With `OLLAMA_MAX_LOADED_MODELS=2`, the 4B main model remains the primary resident model and either auxiliary model can be loaded transiently as required.
 
 ### Ollama server settings
 
@@ -478,22 +490,17 @@ Some especially useful modules:
 - `webui/server.py` — Web UI API
 - `webui/static/app.js` — browser interaction and streaming UI
 
-## Optional Laya decision engine
+## 0.8B micro-model validator
 
-The harness includes an experimental localhost Laya sidecar that can remove
-autoregressive 2B micro-decisions from common routing/validation paths. Exact
-harness rules still run first; high-confidence Laya decisions may narrow
-read-only tool schemas or terminate a completed/blocked validator loop, while
-low-confidence decisions fall back to the existing 2B model.
+The harness uses `agent-micro:0.8b` only for a one-bit completion check inside
+the existing tool-loop validator path. Normal intent/tool routing remains fully
+deterministic and does not pay an extra model call. The micro model can only
+return `complete=true` to bypass the 2B validator; `false`, malformed output,
+and model errors fall through to `agent-fast:2b`.
 
-The sidecar is shared by CLI/Web/worker processes so only one encoder copy is
-resident. `/research` unloads it before admitting the 9B report writer and
-requests a reload when normal model residency is restored. Turn outcomes are
-captured for eventual harness-specific fine-tuning and local confidence
-calibration.
-
-See [`LAYA_DECISION_ENGINE.md`](LAYA_DECISION_ENGINE.md) for architecture,
-security boundaries, benchmarking, and training-data commands.
+The micro model never selects tools, declares a task blocked, grants mutating
+authority, or satisfies factual grounding. See [`MICRO_MODEL_VALIDATOR.md`](MICRO_MODEL_VALIDATOR.md)
+for the exact role, safety boundaries, aliases, and benchmark command.
 
 ## Testing
 

@@ -30,53 +30,19 @@ agent:
   thinking_default: false
   show_perf_stats: true
 
-  # Optional non-autoregressive decision engine. Deterministic harness rules
-  # remain authoritative; Laya only handles ambiguous routing and high-confidence
-  # validator finish/blocked decisions. Low-confidence decisions fall back to
-  # the existing 2B fast model. The encoder runs on CPU by default so it does
-  # not compete with Ollama's Vulkan/iGPU allocation.
-  decision_engine:
+  # Tiny Ollama terminal classifier. It is consulted only after deterministic
+  # requirements/grounding say no required work is pending. A recover/invalid
+  # result falls through to the 2B validator for full recovery reasoning.
+  micro_model: "agent-micro:0.8b"
+  micro_model_keep_alive: "2m"
+  micro_options:
+    num_ctx: 2048
+    temperature: 0.6
+    top_p: 0.95
+    top_k: 20
+    num_predict: 32
+  micro_validator:
     enabled: true
-    provider: "laya"
-    model: "convaiinnovations/laya"
-    # The upstream typed-decisions checkpoint is a better starting point for
-    # categorical harness control decisions than the generic English root.
-    # Local captured labels should still be used for eventual harness-specific
-    # fine-tuning/calibration before thresholds are relaxed.
-    subfolder: "typed-decisions"
-    device: "cpu"
-    endpoint: "http://127.0.0.1:8091"
-    request_timeout_seconds: 1.5
-    preload_async: true
-    max_state_chars: 1800
-    suspend_during_report: true
-    report_unload_wait_seconds: 5.0
-    routing:
-      enabled: true
-      # Preserve the full decision hierarchy: deterministic rules -> Laya ->
-      # constrained 2B classifier when Laya is unavailable or not confident.
-      fallback_to_fast_model: true
-      # Conservative because the stock checkpoint is only a prototype here;
-      # collect local labels and fine-tune/calibrate before lowering these.
-      thresholds:
-        route_family: 0.92
-        tool_requirement: 0.97
-        continuation: 0.95
-        freshness: 0.95
-        renderer: 0.95
-        risk: 0.98
-      add_readonly_family_tools_when_required: true
-      max_family_tools: 6
-    validator:
-      enabled: true
-      min_confidence: 0.95
-      # Only terminal decisions bypass the 2B model. Corrective/recovery
-      # decisions still use the fast model so exact tool selection remains robust.
-      accept_terminal_only: true
-    training_capture:
-      enabled: true
-      path: "/app/memory/laya_training.jsonl"
-      include_request_text: true
 
   # Load the main model (and pre-fill its byte-stable system prefix) in the
   # background at frontend startup so the first turn pays neither the model
