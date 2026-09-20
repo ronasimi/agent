@@ -21,7 +21,6 @@ from .background.config import (
     FAST_MODEL,
     FAST_MODEL_KEEP_ALIVE,
     FAST_OPTIONS,
-    MICRO_MODEL,
     MAIN_OPTIONS,
     MODEL,
     OLLAMA_HOST,
@@ -97,7 +96,7 @@ def enter_report_model_stage(job_id: str = "") -> dict[str, Any]:
     """Evict smaller models and preload the configured report model."""
     client = _client()
     with background_inference_slot():
-        for model in dict.fromkeys([MODEL, FAST_MODEL, MICRO_MODEL]):
+        for model in dict.fromkeys([MODEL, FAST_MODEL]):
             if model and model != REPORT_MODEL:
                 _unload(client, model)
         loaded = _warm(client, REPORT_MODEL, REPORT_OPTIONS, REPORT_MODEL_KEEP_ALIVE)

@@ -92,3 +92,14 @@ Harness-owned compatibility recipes live in auto-discovered `tools/recipe_provid
 - generic loops (`turn_engine`, worker `runner`) should not contain domain-specific tool/job implementations.
 
 `tests/test_modular_architecture.py` and `scripts/check_architecture.py` enforce the main structural invariants.
+
+## Model roles
+
+The runtime deliberately uses three generative Ollama roles plus one embedding model:
+
+- `agent-main:4b` (`qwen3.5:4b`) is the foreground reasoning, coding, conversation, and tool-orchestration model.
+- `agent-fast:2b` (`qwen3.5:2b`) is the bounded auxiliary model for loop validation, recovery planning, research planning, source distillation, and related lightweight reasoning.
+- `agent-report:9b` (`qwen3.5:9b`) is admitted only for long-form research synthesis and factuality repair; the worker evicts the normal interactive roles before loading it and restores them afterward.
+- `nomic-embed-text` creates semantic vectors for memory, knowledge, and recipe retrieval and does not generate user-facing text.
+
+Deterministic routing, requirements, grounding, safety policy, and exact fast-path renderers remain authoritative and bypass model inference whenever possible. `scripts/benchmark_model_roles.py` measures the live deployment cost of each role so additional model tiers are added only when they demonstrate a net benefit on the target host.

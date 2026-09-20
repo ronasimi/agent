@@ -30,20 +30,6 @@ agent:
   thinking_default: false
   show_perf_stats: true
 
-  # Tiny Ollama terminal classifier. It is consulted only after deterministic
-  # requirements/grounding say no required work is pending. A recover/invalid
-  # result falls through to the 2B validator for full recovery reasoning.
-  micro_model: "agent-micro:0.8b"
-  micro_model_keep_alive: "2m"
-  micro_options:
-    num_ctx: 2048
-    temperature: 0.6
-    top_p: 0.95
-    top_k: 20
-    num_predict: 32
-  micro_validator:
-    enabled: true
-
   # Load the main model (and pre-fill its byte-stable system prefix) in the
   # background at frontend startup so the first turn pays neither the model
   # load nor the system-prompt prefill. The warm-up deliberately uses

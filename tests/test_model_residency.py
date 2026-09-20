@@ -17,7 +17,6 @@ def test_report_stage_swaps_models_and_restores_normal_residency(monkeypatch):
     monkeypatch.setattr(residency, "record_monitor_state", lambda key, value: state_updates.append((key, value)))
     monkeypatch.setattr(residency, "MODEL", "main:4b")
     monkeypatch.setattr(residency, "FAST_MODEL", "fast:2b")
-    monkeypatch.setattr(residency, "MICRO_MODEL", "micro:0.8b")
     monkeypatch.setattr(residency, "REPORT_MODEL", "report:9b")
     monkeypatch.setattr(residency, "REPORT_MODEL_KEEP_ALIVE", -1)
     monkeypatch.setattr(residency, "FAST_MODEL_KEEP_ALIVE", "2m")
@@ -27,13 +26,12 @@ def test_report_stage_swaps_models_and_restores_normal_residency(monkeypatch):
     residency.enter_report_model_stage("job-1")
     residency.exit_report_model_stage("job-1", restore=True)
 
-    assert calls[:4] == [
+    assert calls[:3] == [
         ("main:4b", 0, False),
         ("fast:2b", 0, False),
-        ("micro:0.8b", 0, False),
         ("report:9b", -1, True),
     ]
-    assert calls[4:] == [
+    assert calls[3:] == [
         ("report:9b", 0, False),
         ("main:4b", -1, True),
         ("fast:2b", "2m", True),

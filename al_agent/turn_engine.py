@@ -70,8 +70,6 @@ def handle_user_turn(
     turn_started = time.monotonic()
     answer_first_visible_at: float | None = None
     last_model_metrics: dict[str, Any] = {}
-    micro_validator_ms = 0.0
-    micro_validator_bypasses = 0
     # Advertise foreground demand before blocking on the cross-process lock so
     # a background report worker cannot repeatedly reacquire it between long
     # 9B synthesis calls and starve an interactive turn.
@@ -970,33 +968,19 @@ def handle_user_turn(
                         and turn_tool_policy.allowed(name, TOOL_METADATA.get(name, {}))
                         and (name in selected_names or bool(TOOL_METADATA.get(name, {}).get("readonly", True)))
                     )[:LOOP_VALIDATOR_MAX_TOOLS]
-                    micro_validation = None
-                    if MICRO_VALIDATOR.enabled and not requirement_ledger.pending():
-                        micro_validation = MICRO_VALIDATOR.validate_loop(
+                    with Spinner("Fast-model stalled-step validation"):
+                        stall_validation = validate_stalled_step(
+                            LOOP_VALIDATOR_CLIENT,
+                            FAST_MODEL,
                             user_input,
-                            json.dumps(turn_tail[-8:], ensure_ascii=False, default=str),
-                            signal=pending_stall_signal,
-                            candidate_tools=validator_tool_names,
-                            stage="stall",
+                            turn_tail,
+                            pending_stall_signal,
+                            validator_tool_names,
+                            LOOP_VALIDATOR_OPTIONS,
+                            max_chars=LOOP_VALIDATOR_MAX_CHARS,
+                            keep_alive=LOOP_VALIDATOR_KEEP_ALIVE,
+                            shared_context=current_shared_context(),
                         )
-                    if micro_validation is not None:
-                        stall_validation = micro_validation
-                        micro_validator_ms += float(micro_validation.get("micro_model_latency_ms") or 0.0)
-                        micro_validator_bypasses += 1
-                    else:
-                        with Spinner("Fast-model stalled-step validation"):
-                            stall_validation = validate_stalled_step(
-                                LOOP_VALIDATOR_CLIENT,
-                                FAST_MODEL,
-                                user_input,
-                                turn_tail,
-                                pending_stall_signal,
-                                validator_tool_names,
-                                LOOP_VALIDATOR_OPTIONS,
-                                max_chars=LOOP_VALIDATOR_MAX_CHARS,
-                                keep_alive=LOOP_VALIDATOR_KEEP_ALIVE,
-                                shared_context=current_shared_context(),
-                            )
                     validator_interventions += 1
                     if WORKING_STATE_ENABLED:
                         WORKING_STATE.record_validator(stall_validation, pending_stall_signal)
@@ -1055,30 +1039,18 @@ def handle_user_turn(
             # chance if the loop reaches its absolute iteration cap.
             if iteration == iteration_limit and tool_iterations and LOOP_VALIDATOR_ENABLED and not stall_enforce_once and not requirement_ledger.pending():
                 tool_names = [str(schema.get("function", {}).get("name", "")) for schema in tool_schemas]
-                micro_validation = MICRO_VALIDATOR.validate_loop(
-                    user_input,
-                    json.dumps(turn_tail[-8:], ensure_ascii=False, default=str),
-                    signal={"kind": "iteration_limit", "attempts": iteration},
-                    candidate_tools=[name for name in tool_names if name],
-                    stage="final",
-                ) if MICRO_VALIDATOR.enabled else None
-                if micro_validation is not None:
-                    recovery_validation = micro_validation
-                    micro_validator_ms += float(micro_validation.get("micro_model_latency_ms") or 0.0)
-                    micro_validator_bypasses += 1
-                else:
-                    with Spinner("Fast-model tool-loop validation"):
-                        recovery_validation = validate_tool_loop(
-                            LOOP_VALIDATOR_CLIENT,
-                            FAST_MODEL,
-                            user_input,
-                            turn_tail,
-                            [name for name in tool_names if name],
-                            LOOP_VALIDATOR_OPTIONS,
-                            max_chars=LOOP_VALIDATOR_MAX_CHARS,
-                            keep_alive=LOOP_VALIDATOR_KEEP_ALIVE,
-                            shared_context=current_shared_context(),
-                        )
+                with Spinner("Fast-model tool-loop validation"):
+                    recovery_validation = validate_tool_loop(
+                        LOOP_VALIDATOR_CLIENT,
+                        FAST_MODEL,
+                        user_input,
+                        turn_tail,
+                        [name for name in tool_names if name],
+                        LOOP_VALIDATOR_OPTIONS,
+                        max_chars=LOOP_VALIDATOR_MAX_CHARS,
+                        keep_alive=LOOP_VALIDATOR_KEEP_ALIVE,
+                        shared_context=current_shared_context(),
+                    )
                 if WORKING_STATE_ENABLED:
                     WORKING_STATE.record_validator(recovery_validation)
                 else:
@@ -1763,8 +1735,6 @@ def handle_user_turn(
         turn_metrics = {
             "total_turn_ms": total_turn_ms,
             "queue_wait_ms": (lock_acquired - turn_started) * 1000.0,
-            "micro_model_validator_ms": micro_validator_ms,
-            "micro_model_validator_bypasses": micro_validator_bypasses,
             **last_model_metrics,
         }
         if answer_first_visible_at is not None:

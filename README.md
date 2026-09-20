@@ -6,16 +6,15 @@
 
 **Al Agent** is a local, Ollama-powered assistant harness designed for long-running work without making the interactive chat feel sluggish. It combines a responsive foreground agent with typed tools, reusable recipes, durable memory, background research, system/network diagnostics, reminders, and an optional browser-based UI.
 
-The default configuration uses four base Qwen3.5 roles plus an embedding model:
+The default configuration uses three base Qwen3.5 roles plus an embedding model:
 
 - **Main model:** `agent-main:4b` → `qwen3.5:4b`
-- **Micro model:** `agent-micro:0.8b` → `qwen3.5:0.8b`
 - **Fast model:** `agent-fast:2b` → `qwen3.5:2b`
 - **Report model:** `agent-report:9b` → `qwen3.5:9b`
 - **Embedding model:** `nomic-embed-text`
 - **Context window:** 16K for the main agent
 
-The main model handles conversation and interactive reasoning. The 0.8B micro model is only a one-bit completion gate inside the tool-loop validator; false, malformed, or failed classifications fall through to the 2B fast model. The 2B model remains responsible for recovery validation, research planning, source distillation, and other lightweight reasoning. The 9B model is loaded only for long-form report synthesis.
+The main model handles conversation and interactive reasoning. The 2B fast model handles recovery validation, lightweight planning, source distillation, and other bounded reasoning. The 9B model is loaded only for long-form report synthesis. `nomic-embed-text` provides semantic retrieval for memory, knowledge, and recipes.
 
 ## Quick start
 
@@ -37,7 +36,6 @@ Create the stable role aliases after pulling the base Qwen3.5 models:
 The aliases map to:
 
 - `agent-main:4b` → `qwen3.5:4b`
-- `agent-micro:0.8b` → `qwen3.5:0.8b`
 - `agent-fast:2b` → `qwen3.5:2b`
 - `agent-report:9b` → `qwen3.5:9b`
 
@@ -330,10 +328,8 @@ Important defaults:
 ```yaml
 agent:
   model: "agent-main:4b"
-  micro_model: "agent-micro:0.8b"
   fast_model: "agent-fast:2b"
   report_model: "agent-report:9b"
-  micro_model_keep_alive: "2m"
   fast_model_keep_alive: "2m"
   report_model_keep_alive: "10m"
   report_restore_models_after_stage: true
@@ -371,13 +367,6 @@ agent:
     top_p: 0.95
     top_k: 20
 
-  micro_options:
-    num_ctx: 2048
-    temperature: 0.6
-    top_p: 0.95
-    top_k: 20
-    num_predict: 32
-
   fast_options:
     num_ctx: 8192
     temperature: 0.6
@@ -390,7 +379,7 @@ agent:
     validator_fallback_max_tools: 12
 ```
 
-`micro_model_keep_alive: "2m"` keeps the ~1 GB terminal classifier warm briefly after it is actually needed; it is not loaded on every turn. `fast_model_keep_alive: "2m"` keeps the 2B recovery/research model warm for clustered work. With `OLLAMA_MAX_LOADED_MODELS=2`, the 4B main model remains the primary resident model and either auxiliary model can be loaded transiently as required.
+`fast_model_keep_alive: "2m"` keeps the 2B recovery/research model warm for clustered work. With `OLLAMA_MAX_LOADED_MODELS=2`, the 4B main and 2B fast roles can normally coexist; the worker explicitly evicts them before loading the 9B report writer and restores the interactive roles afterward.
 
 ### Ollama server settings
 
@@ -490,17 +479,24 @@ Some especially useful modules:
 - `webui/server.py` — Web UI API
 - `webui/static/app.js` — browser interaction and streaming UI
 
-## 0.8B micro-model validator
+## Model roles and performance benchmarking
 
-The harness uses `agent-micro:0.8b` only for a one-bit completion check inside
-the existing tool-loop validator path. Normal intent/tool routing remains fully
-deterministic and does not pay an extra model call. The micro model can only
-return `complete=true` to bypass the 2B validator; `false`, malformed output,
-and model errors fall through to `agent-fast:2b`.
+The runtime deliberately keeps the model hierarchy small:
 
-The micro model never selects tools, declares a task blocked, grants mutating
-authority, or satisfies factual grounding. See [`MICRO_MODEL_VALIDATOR.md`](MICRO_MODEL_VALIDATOR.md)
-for the exact role, safety boundaries, aliases, and benchmark command.
+- `agent-main:4b` handles interactive reasoning, coding, conversation, and tool orchestration.
+- `agent-fast:2b` handles tool-loop validation, recovery reasoning, research planning, source distillation, and other bounded auxiliary work.
+- `agent-report:9b` is admitted only for long-form research synthesis and factuality repair.
+- `nomic-embed-text` supplies semantic vectors for memory, knowledge, and recipe retrieval.
+
+Deterministic fast paths remain preferred for exact requests such as current time, structured weather, and market quotes; those paths avoid an unnecessary model call entirely.
+
+Use the deployment-host benchmark to measure whether model-role changes actually improve the target machine:
+
+```bash
+python scripts/benchmark_model_roles.py --runs 5 --report-runs 1
+```
+
+It records 4B time-to-first-visible-token, 2B validator latency, 9B report throughput, embedding latency, and optional model load/swap costs. Use `--skip-load-swap` when you do not want the benchmark to disturb current Ollama residency.
 
 ## Testing
 
@@ -520,6 +516,12 @@ Run the fixed harness benchmark with:
 
 ```bash
 python scripts/benchmark_harness.py
+```
+
+Benchmark live Ollama model roles on the deployment host with:
+
+```bash
+python scripts/benchmark_model_roles.py --runs 5 --report-runs 1
 ```
 
 Simulate turns without an Ollama server. A scripted client replaces the model
