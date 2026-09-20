@@ -9,15 +9,51 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import statistics
+import sys
 import time
 from typing import Any, Callable
 
-import yaml
-from ollama import Client
-
 ROOT = Path(__file__).resolve().parents[1]
+VENV_PYTHON = ROOT / ".venv" / "bin" / "python"
+
+
+def _maybe_reexec_in_repo_venv() -> None:
+    """Use the repo-local venv automatically when it has been bootstrapped."""
+    if os.environ.get("AGENT_VENV_REEXEC") == "1" or not VENV_PYTHON.is_file():
+        return
+    try:
+        current = Path(sys.executable).resolve()
+        venv_python = VENV_PYTHON.resolve()
+    except OSError:
+        return
+    if current == venv_python:
+        return
+
+    env = dict(os.environ)
+    env["AGENT_VENV_REEXEC"] = "1"
+    os.execve(
+        str(venv_python),
+        [str(venv_python), str(Path(__file__).resolve()), *sys.argv[1:]],
+        env,
+    )
+
+
+_maybe_reexec_in_repo_venv()
+
+try:
+    import yaml
+    from ollama import Client
+except ModuleNotFoundError as exc:
+    missing = exc.name or "required Python dependency"
+    raise SystemExit(
+        f"Missing Python dependency: {missing}\n"
+        f"Bootstrap the repository environment first:\n"
+        f"  {ROOT / 'scripts' / 'bootstrap_venv.sh'}\n"
+        f"Then rerun this command. The script will automatically use {VENV_PYTHON}."
+    ) from None
 
 
 def _value(obj: Any, key: str, default: Any = None) -> Any:

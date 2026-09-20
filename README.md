@@ -490,6 +490,14 @@ The runtime deliberately keeps the model hierarchy small:
 
 Deterministic fast paths remain preferred for exact requests such as current time, structured weather, and market quotes; those paths avoid an unnecessary model call entirely.
 
+For a fresh clone or extracted ZIP, bootstrap the repo-local Python environment once:
+
+```bash
+./scripts/bootstrap_venv.sh
+```
+
+The `.venv/` directory is intentionally not committed or packaged because Python virtual environments are platform-specific and may contain absolute interpreter paths. The bootstrap script recreates it from `requirements.txt`/`pyproject.toml`. Host-side scripts such as the model-role benchmark automatically re-exec under `.venv/bin/python` once it exists.
+
 Use the deployment-host benchmark to measure whether model-role changes actually improve the target machine:
 
 ```bash
@@ -538,7 +546,7 @@ python scripts/simulate_turns.py --prompts  # include rendered prompts
 
 It writes to a temporary database and never touches durable storage.
 
-The local test environment must have packages from `requirements.txt` installed. In particular, registry/Web UI imports require the Ollama Python package even when no live Ollama server is contacted.
+The local test environment must have packages from `requirements.txt` installed. On a fresh checkout/ZIP, run `./scripts/bootstrap_venv.sh`; this creates `.venv/` and installs the project in editable mode with its declared dependencies. In particular, registry/Web UI imports require the Ollama Python package even when no live Ollama server is contacted.
 
 ## Troubleshooting
 
