@@ -26,11 +26,15 @@ You need:
 - a running Ollama server reachable from the host network
 - the models configured in `config/config.yaml`
 
-Create the stable role aliases after pulling the base Qwen3.5 models:
+Create the stable role aliases after pulling the base Qwen3.5 models. If you
+enable semantic memory, also install the configured embedding model:
 
 ```bash
 # Create the role aliases from already-pulled base Qwen3.5 models:
 ./scripts/create_ollama_aliases.sh
+
+# Needed when agent.semantic_memory_enabled is true:
+ollama pull nomic-embed-text
 ```
 
 The aliases map to:
@@ -504,7 +508,7 @@ Use the deployment-host benchmark to measure whether model-role changes actually
 python scripts/benchmark_model_roles.py --runs 5 --report-runs 1
 ```
 
-It records 4B time-to-first-visible-token, 2B validator latency, 9B report throughput, embedding latency, and optional model load/swap costs. Use `--skip-load-swap` when you do not want the benchmark to disturb current Ollama residency.
+It records 4B time-to-first-visible-token (plus first model-token latency), 2B validator latency using the validator's effective context/options, 9B report throughput with thinking disabled exactly as in report synthesis, embedding availability/latency, and optional model residency transitions. Disabled semantic memory is reported without treating its embedding latency as a benchmark failure. Use `--skip-load-swap` when you do not want the benchmark to disturb current Ollama residency.
 
 ## Testing
 

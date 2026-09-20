@@ -62,9 +62,22 @@ def _value(obj: Any, key: str, default: Any = None) -> Any:
     return getattr(obj, key, default)
 
 
-def _message_content(obj: Any) -> str:
+def _message_field(obj: Any, key: str) -> Any:
     message = _value(obj, "message", {}) or {}
-    return str(_value(message, "content", "") or "")
+    return _value(message, key, None)
+
+
+def _message_content(obj: Any) -> str:
+    return str(_message_field(obj, "content") or "")
+
+
+def _message_thinking(obj: Any) -> str:
+    return str(_message_field(obj, "thinking") or "")
+
+
+def _message_tool_calls(obj: Any) -> list[Any]:
+    value = _message_field(obj, "tool_calls") or []
+    return list(value) if isinstance(value, (list, tuple)) else []
 
 
 def _p95(values: list[float]) -> float | None:
@@ -109,8 +122,23 @@ def _warm_chat(client: Client, model: str, options: dict[str, Any], keep_alive: 
     return elapsed
 
 
-def _main_ttft(client: Client, model: str, options: dict[str, Any], runs: int) -> dict[str, Any]:
-    values: list[float] = []
+def _main_ttft(
+    client: Client,
+    model: str,
+    options: dict[str, Any],
+    runs: int,
+    *,
+    thinking_enabled: bool = False,
+) -> dict[str, Any]:
+    """Measure first model activity and first user-visible content.
+
+    The harness passes ``think=thinking_enabled`` explicitly.  The benchmark
+    must do the same: Qwen3.5 may otherwise spend the entire small token budget
+    in a hidden thinking field, which looks like a failed TTFT probe even though
+    the model is actively streaming.
+    """
+    first_token_values: list[float] = []
+    first_visible_values: list[float] = []
     failures: list[str] = []
     run_options = {**options, "num_predict": min(64, int(options.get("num_predict", 64) or 64))}
     for _ in range(runs):
@@ -121,19 +149,37 @@ def _main_ttft(client: Client, model: str, options: dict[str, Any], runs: int) -
                 messages=[{"role": "user", "content": "In one sentence, explain what a TCP socket is."}],
                 options=run_options,
                 keep_alive=-1,
+                think=thinking_enabled,
                 stream=True,
             )
-            got_visible = False
+            first_token: float | None = None
+            first_visible: float | None = None
             for chunk in stream:
-                if _message_content(chunk).strip():
-                    values.append((time.monotonic() - started) * 1000.0)
-                    got_visible = True
+                now = time.monotonic()
+                content = _message_content(chunk)
+                thinking = _message_thinking(chunk)
+                calls = _message_tool_calls(chunk)
+                if first_token is None and (content or thinking or calls):
+                    first_token = (now - started) * 1000.0
+                if first_visible is None and content.strip():
+                    first_visible = (now - started) * 1000.0
                     break
-            if not got_visible:
+            if first_token is not None:
+                first_token_values.append(first_token)
+            if first_visible is not None:
+                first_visible_values.append(first_visible)
+            else:
                 failures.append("stream ended before visible content")
         except Exception as exc:
             failures.append(f"{type(exc).__name__}: {exc}")
-    return {**_summary(values), "failures": len(failures), "errors": sorted(set(failures))[:5]}
+    out = _summary(first_visible_values)
+    out.update({
+        "first_model_token_ms": _summary(first_token_values),
+        "thinking_enabled": bool(thinking_enabled),
+        "failures": len(failures),
+        "errors": sorted(set(failures))[:5],
+    })
+    return out
 
 
 def _fast_validator(client: Client, model: str, options: dict[str, Any], keep_alive: Any, runs: int) -> dict[str, Any]:
@@ -162,6 +208,7 @@ def _fast_validator(client: Client, model: str, options: dict[str, Any], keep_al
                 options=run_options,
                 keep_alive=keep_alive,
                 format=fmt,
+                think=False,
                 stream=False,
             )
             values.append((time.monotonic() - started) * 1000.0)
@@ -187,6 +234,7 @@ def _report_throughput(client: Client, model: str, options: dict[str, Any], keep
                 messages=[{"role": "user", "content": prompt}],
                 options=run_options,
                 keep_alive=keep_alive,
+                think=False,
                 stream=False,
             )
             latencies.append((time.monotonic() - started) * 1000.0)
@@ -205,7 +253,33 @@ def _report_throughput(client: Client, model: str, options: dict[str, Any], keep
     return out
 
 
-def _embedding_latency(client: Client, model: str, runs: int) -> dict[str, Any]:
+def _embedding_latency(client: Client, model: str, runs: int, *, enabled: bool = True) -> dict[str, Any]:
+    try:
+        client.show(model)
+        installed = True
+    except Exception as exc:
+        message = f"{type(exc).__name__}: {exc}"
+        missing = "not found" in str(exc).lower() or "404" in str(exc)
+        return {
+            **_summary([]),
+            "enabled": bool(enabled),
+            "installed": False if missing else None,
+            "failures": 1 if enabled else 0,
+            "errors": [message] if enabled else [],
+            "note": "embedding model is not installed" if missing else "embedding model availability check failed",
+            **({"remediation": f"ollama pull {model}"} if missing else {}),
+        }
+
+    if not enabled:
+        return {
+            **_summary([]),
+            "enabled": False,
+            "installed": installed,
+            "failures": 0,
+            "errors": [],
+            "note": "semantic_memory_enabled is false; latency benchmark skipped",
+        }
+
     values: list[float] = []
     failures: list[str] = []
     for _ in range(runs):
@@ -218,27 +292,84 @@ def _embedding_latency(client: Client, model: str, runs: int) -> dict[str, Any]:
             )
             values.append((time.monotonic() - started) * 1000.0)
         except Exception as exc:
-            failures.append(f"{type(exc).__name__}: {exc}")
-    return {**_summary(values), "failures": len(failures), "errors": sorted(set(failures))[:5]}
+            message = f"{type(exc).__name__}: {exc}"
+            failures.append(message)
+            # A missing model will fail identically on every repetition. Avoid
+            # wasting four more calls and return an actionable diagnostic.
+            if "not found" in str(exc).lower() or "404" in str(exc):
+                break
+    out = {
+        **_summary(values),
+        "enabled": True,
+        "installed": installed,
+        "failures": len(failures),
+        "errors": sorted(set(failures))[:5],
+    }
+    if failures and any("not found" in item.lower() or "404" in item for item in failures):
+        out["remediation"] = f"ollama pull {model}"
+    return out
 
 
 def _load_and_swap(client: Client, roles: list[tuple[str, str, dict[str, Any], Any]]) -> dict[str, Any]:
+    """Measure cold loads and the residency transitions the harness actually uses."""
     cold_loads: dict[str, Any] = {}
+    role_map = {role: (model, options, keep_alive) for role, model, options, keep_alive in roles}
+    all_models = list(dict.fromkeys(model for _, model, _, _ in roles if model))
+
+    def unload_all() -> None:
+        for model in all_models:
+            _unload(client, model)
+
+    # Pure cold-load timing: start each role from an empty role-model set so
+    # another benchmarked role cannot silently change memory pressure.
     for role, model, options, keep_alive in roles:
-        _unload(client, model)
+        unload_all()
         try:
             cold_loads[role] = round(_warm_chat(client, model, options, keep_alive), 2)
         except Exception as exc:
             cold_loads[role] = {"error": f"{type(exc).__name__}: {exc}"}
 
-    swaps: dict[str, Any] = {}
-    for (from_role, from_model, _, _), (to_role, to_model, to_options, to_keep_alive) in zip(roles, roles[1:]):
-        _unload(client, from_model)
+    transitions: dict[str, Any] = {}
+    if "main" in role_map and "fast" in role_map:
+        main_model, main_options, main_keep_alive = role_map["main"]
+        fast_model, fast_options, fast_keep_alive = role_map["fast"]
+        unload_all()
         try:
-            swaps[f"{from_role}->{to_role}"] = round(_warm_chat(client, to_model, to_options, to_keep_alive), 2)
+            _warm_chat(client, main_model, main_options, main_keep_alive)
+            transitions["main->fast_co_resident"] = round(
+                _warm_chat(client, fast_model, fast_options, fast_keep_alive), 2
+            )
         except Exception as exc:
-            swaps[f"{from_role}->{to_role}"] = {"error": f"{type(exc).__name__}: {exc}"}
-    return {"cold_load_ms": cold_loads, "swap_warm_ms": swaps}
+            transitions["main->fast_co_resident"] = {"error": f"{type(exc).__name__}: {exc}"}
+
+    if "report" in role_map:
+        report_model, report_options, report_keep_alive = role_map["report"]
+        # enter_report_model_stage explicitly evicts main + fast first.
+        try:
+            for role in ("main", "fast"):
+                if role in role_map:
+                    model, _, _ = role_map[role]
+                    _unload(client, model)
+            transitions["interactive->report"] = round(
+                _warm_chat(client, report_model, report_options, report_keep_alive), 2
+            )
+        except Exception as exc:
+            transitions["interactive->report"] = {"error": f"{type(exc).__name__}: {exc}"}
+
+        # exit_report_model_stage unloads the report writer and restores main,
+        # then fast when configured. Measure the total foreground restoration.
+        try:
+            _unload(client, report_model)
+            started = time.monotonic()
+            for role in ("main", "fast"):
+                if role in role_map:
+                    model, options, keep_alive = role_map[role]
+                    _warm_chat(client, model, options, keep_alive)
+            transitions["report->interactive"] = round((time.monotonic() - started) * 1000.0, 2)
+        except Exception as exc:
+            transitions["report->interactive"] = {"error": f"{type(exc).__name__}: {exc}"}
+
+    return {"cold_load_ms": cold_loads, "transition_ms": transitions}
 
 
 def main() -> int:
@@ -260,8 +391,10 @@ def main() -> int:
     embed_model = str(agent.get("embed_model") or "nomic-embed-text")
     main_options = dict(agent.get("main_options") or {})
     fast_options = dict(agent.get("fast_options") or {})
+    validator_cfg = dict(agent.get("tool_loop_validator") or {})
+    validator_options = {**fast_options, **dict(validator_cfg.get("options") or {})}
     report_options = dict(agent.get("report_options") or {})
-    fast_keep_alive = agent.get("fast_model_keep_alive", "2m")
+    fast_keep_alive = validator_cfg.get("keep_alive", agent.get("fast_model_keep_alive", "2m"))
     report_keep_alive = agent.get("report_model_keep_alive", "10m")
 
     runs = max(1, int(args.runs))
@@ -274,9 +407,21 @@ def main() -> int:
             "report": report_model,
             "embedding": embed_model,
         },
-        "main_ttft": _main_ttft(client, main_model, main_options, runs),
-        "fast_validator": _fast_validator(client, fast_model, fast_options, fast_keep_alive, runs),
-        "embedding_latency": _embedding_latency(client, embed_model, runs),
+        "effective_config": {
+            "main_num_ctx": main_options.get("num_ctx"),
+            "validator_num_ctx": validator_options.get("num_ctx"),
+            "report_num_ctx": report_options.get("num_ctx"),
+            "thinking_default": bool(agent.get("thinking_default", False)),
+            "semantic_memory_enabled": bool(agent.get("semantic_memory_enabled", False)),
+        },
+        "main_ttft": _main_ttft(
+            client, main_model, main_options, runs,
+            thinking_enabled=bool(agent.get("thinking_default", False)),
+        ),
+        "fast_validator": _fast_validator(client, fast_model, validator_options, fast_keep_alive, runs),
+        "embedding_latency": _embedding_latency(
+            client, embed_model, runs, enabled=bool(agent.get("semantic_memory_enabled", False))
+        ),
     }
 
     # Report synthesis intentionally runs after interactive measurements because
