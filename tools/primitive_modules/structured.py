@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .common import *  # noqa: F403
-from .common import _json, _bounded_int, _safe_workspace, _source_text, _load_json, _get_path
+from .common import _json, _bounded_int, _safe_workspace, _source_text, _source_text_info, _load_json, _get_path
 from .text import text_diff
 
 def json_query(path_expr: str = "$", data: Any = "", path: str = "") -> str:
@@ -79,14 +79,21 @@ def yaml_query(path_expr: str = "$", text: str = "", path: str = "") -> str:
     except Exception as exc:return f"Error: yaml_query failed: {exc}"
 
 def csv_query(column: str = "", equals: str = "", text: str = "", path: str = "", limit: int = 100) -> str:
-    """Read bounded CSV rows and optionally filter one column by exact string value."""
+    """Read bounded CSV rows and optionally filter one column by exact string value.
+
+    When the bounded source limit is reached, return an object carrying explicit
+    truncation metadata instead of silently presenting a partial row set as a
+    complete file parse.  Non-truncated results preserve the legacy list shape.
+    """
     import io
     try:
-        raw=_source_text(text,path); reader=csv.DictReader(io.StringIO(raw)); out=[]
+        raw, source_truncated = _source_text_info(text, path); reader=csv.DictReader(io.StringIO(raw)); out=[]
         for row in reader:
             if column and str(row.get(column,"")) != str(equals):continue
             out.append(dict(row))
             if len(out)>=_bounded_int(limit,1,500):break
+        if source_truncated:
+            return _json({"rows": out, "source_truncated": True, "warning": "Input exceeded the bounded text limit; results are partial."})
         return _json(out)
     except Exception as exc:return f"Error: csv_query failed: {exc}"
 
@@ -141,11 +148,16 @@ def json_keys(path_expr: str = "$", data: Any = "", path: str = "", limit: int =
 
 
 def csv_summary(text: str = "", path: str = "", sample_rows: int = 5) -> str:
-    """Summarize columns, missing values, numeric ranges, and sample rows from bounded CSV."""
+    """Summarize bounded CSV and explicitly report incomplete source reads."""
     import io
     try:
-        reader = csv.DictReader(io.StringIO(_source_text(text, path)))
+        source, source_truncated = _source_text_info(text, path)
+        reader = csv.DictReader(io.StringIO(source))
         columns = list(reader.fieldnames or []); rows = list(reader)
+        # A character cutoff may end halfway through the final CSV record. Drop
+        # that uncertain record rather than treating its missing cells as facts.
+        if source_truncated and source and not source.endswith(("\n", "\r")) and rows:
+            rows = rows[:-1]
         missing = {name: 0 for name in columns}; numeric: dict[str, list[float]] = {name: [] for name in columns}
         for row in rows:
             for name in columns:
@@ -161,6 +173,49 @@ def csv_summary(text: str = "", path: str = "", sample_rows: int = 5) -> str:
             for name, values in numeric.items() if values
         }
         sample_rows = _bounded_int(sample_rows, 0, 50)
-        return _json({"columns": columns, "row_count": len(rows), "missing": missing, "numeric": stats, "sample": rows[:sample_rows]})
+        payload = {"columns": columns, "row_count": len(rows), "missing": missing, "numeric": stats, "sample": rows[:sample_rows], "source_truncated": source_truncated}
+        if source_truncated:
+            payload["warning"] = "Input exceeded the bounded text limit; summary statistics are partial."
+        return _json(payload)
     except Exception as exc:
         return f"Error: csv_summary failed: {exc}"
+
+
+def jsonl_summary(text: str = "", path: str = "", sample_rows: int = 5, max_records: int = 5000) -> str:
+    """Parse newline-delimited JSON without aborting on malformed records.
+
+    Returns valid-record counts, malformed 1-based line numbers, a bounded sample,
+    and explicit source-truncation metadata. Blank lines are ignored.
+    """
+    try:
+        source, source_truncated = _source_text_info(text, path)
+        max_records = _bounded_int(max_records, 1, 20000)
+        sample_rows = _bounded_int(sample_rows, 0, 50)
+        records=[]; malformed=[]; nonblank=0; valid_count=0
+        lines = source.splitlines()
+        # If the bounded source ended mid-line, do not classify that incomplete
+        # fragment as malformed JSON; report it through source_truncated instead.
+        if source_truncated and source and not source.endswith(("\n", "\r")) and lines:
+            lines = lines[:-1]
+        for number, raw in enumerate(lines, 1):
+            if not raw.strip():
+                continue
+            nonblank += 1
+            try:
+                value = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                malformed.append({"line": number, "error": exc.msg})
+                continue
+            valid_count += 1
+            if len(records) < max_records:
+                records.append(value)
+        return _json({
+            "valid_records": valid_count,
+            "malformed_count": len(malformed),
+            "malformed": malformed[:200],
+            "sample": records[:sample_rows],
+            "records_truncated": valid_count > max_records,
+            "source_truncated": source_truncated,
+        })
+    except Exception as exc:
+        return f"Error: jsonl_summary failed: {exc}"

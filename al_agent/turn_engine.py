@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from typing import Any
 
@@ -365,6 +366,8 @@ def handle_user_turn(
         last_news_search_content = ""
         last_encyclopedia_content = ""
         last_market_quote_content = ""
+        last_current_time_content = ""
+        last_geocode_content = ""
         local_grounding_observations: list[dict[str, Any]] = []
         if not WORKING_STATE_ENABLED and continuation:
             local_grounding_observations.extend(list(previous_working_state.get("verified_observations") or []))
@@ -637,8 +640,16 @@ def handle_user_turn(
 
         def _record_harness_recovery_tool(name: str, args: dict[str, Any], *, trigger: str) -> bool:
             """Execute one deterministic read-only evidence primitive before generation."""
-            nonlocal last_news_search_content, last_encyclopedia_content, last_market_quote_content
-            if name not in AVAILABLE_TOOLS_MAP or not bool(TOOL_METADATA.get(name, {}).get("readonly", True)):
+            nonlocal last_news_search_content, last_encyclopedia_content, last_market_quote_content, last_current_time_content, last_geocode_content
+            metadata = TOOL_METADATA.get(name, {})
+            if (
+                name not in AVAILABLE_TOOLS_MAP
+                or not bool(metadata.get("readonly", True))
+                or not turn_tool_policy.allowed(name, metadata)
+            ):
+                requirement_ledger.mark_blocked(name, "blocked by explicit turn tool policy")
+                if WORKING_STATE_ENABLED:
+                    WORKING_STATE.update_requirements(requirement_ledger.as_list())
                 return False
             emit_event("tool_start", name=name, arguments=args, harness_recovery=True)
             try:
@@ -682,6 +693,10 @@ def handle_user_turn(
                     last_encyclopedia_content = result_content
                 elif name == "market_quote":
                     last_market_quote_content = result_content
+                elif name == "current_time":
+                    last_current_time_content = result_content
+                elif name == "geocode_location":
+                    last_geocode_content = result_content
                 turn_tail.append({
                     "role": "user",
                     "content": (
@@ -709,12 +724,33 @@ def handle_user_turn(
                 missing = set(report.get("missing_fact_types") or [])
 
             direct = {
-                "current_time": ("current_time", {}),
                 "host_state": ("host_snapshot", {}),
                 "network_state": ("network_snapshot", {}),
                 "repository_state": ("repo_status", {}),
             }
-            for fact_type in ("current_time", "host_state", "network_state", "repository_state"):
+            if "current_time" in missing:
+                time_args: dict[str, Any] = {}
+                requested_place = str(task_frame.get("entity") or "").strip()
+                if requested_place:
+                    # current_time accepts IANA zones directly. Human place names
+                    # are resolved through the same bounded geocoder used by
+                    # weather, avoiding a model guess about time zones.
+                    if "/" in requested_place:
+                        time_args["timezone_name"] = requested_place
+                    elif _record_harness_recovery_tool(
+                        "geocode_location", {"query": requested_place, "count": 1},
+                        trigger="pre_generation:current_time_timezone",
+                    ):
+                        try:
+                            rows = json.loads(last_geocode_content)
+                            timezone_name = str((rows[0] if isinstance(rows, list) and rows else {}).get("timezone") or "")
+                        except Exception:
+                            timezone_name = ""
+                        if timezone_name:
+                            time_args["timezone_name"] = timezone_name
+                _record_harness_recovery_tool("current_time", time_args, trigger="pre_generation:current_time")
+
+            for fact_type in ("host_state", "network_state", "repository_state"):
                 if fact_type not in missing:
                     continue
                 spec = direct.get(fact_type)
@@ -810,10 +846,51 @@ def handle_user_turn(
                 shared_context.update_tools(tool_schemas)
             turn_prefix, tool_prompt_tokens = rebuild_prefix()
 
+        def _format_current_time_result(raw: str) -> str:
+            try:
+                payload = json.loads(str(raw or ""))
+            except Exception:
+                return ""
+            if not isinstance(payload, dict):
+                return ""
+            local = str(payload.get("local") or "")
+            if not local:
+                return ""
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(local)
+            except Exception:
+                return ""
+            lower = str(user_input or "").lower()
+            zone = str(payload.get("timezone_abbreviation") or payload.get("timezone") or "").strip()
+            zone_suffix = f" {zone}" if zone else ""
+            if re.search(r"\b(?:what(?:'s| is) (?:today(?:'s)? date|the date)|current date|what day is it)\b", lower) and not re.search(r"\btime\b", lower):
+                return f"Today is **{dt.strftime('%A, %B')} {dt.day}, {dt.year}**."
+            if re.search(r"\b(?:what timezone|current timezone|timezone)\b", lower) and not re.search(r"\btime\b", lower.replace("timezone", "")):
+                tz = str(payload.get("timezone") or zone or "unknown")
+                offset = str(payload.get("utc_offset") or "")
+                return f"The timezone is **{tz}**" + (f" ({zone}, UTC{offset[:3]}:{offset[3:]})" if zone and len(offset) == 5 else ".")
+            clock = dt.strftime("%I:%M:%S %p").lstrip("0")
+            place = str(task_frame.get("entity") or "").strip()
+            where = f" in **{place}**" if place else ""
+            return f"It is **{clock}{zone_suffix}**{where}."
+
         # Structured fact fast paths avoid spending a generation on mechanical
         # reshaping and prevent small models from inventing rows/fields that are
         # absent from the provider payload. More analytical weather/news requests
         # still proceed through the model with the same grounded evidence.
+        if required_fact_types == {"current_time"} and last_current_time_content:
+            deterministic = _format_current_time_result(last_current_time_content)
+            if deterministic and grounding_report().get("grounded", False):
+                assistant_reply = {"role": "assistant", "content": deterministic}
+                append_and_save(messages, assistant_reply)
+                if WORKING_STATE_ENABLED:
+                    WORKING_STATE.complete_turn(blocked=False)
+                answer_first_visible_at = time.monotonic()
+                print(f"\nAgent: {deterministic}\n")
+                emit_event("assistant_final", content=deterministic, finalization=False, deterministic=True)
+                return
+
         if required_fact_types == {"weather"} and last_weather_recovery_result and is_simple_weather_request(user_input):
             deterministic = format_weather_recovery(last_weather_recovery_result, user_input)
             if deterministic and grounding_report().get("grounded", False):

@@ -407,27 +407,60 @@ def remember(topic: str = "general_knowledge", fact: str = "Recorded by agent ac
     return f"Stored memory under '{topic}'."
 
 
+_MEMORY_QUERY_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "can", "could",
+    "did", "do", "does", "earlier", "for", "from", "had", "has", "have", "how", "i",
+    "if", "in", "is", "it", "me", "my", "of", "on", "or", "our", "please", "said",
+    "tell", "that", "the", "their", "them", "then", "this", "to", "was", "were",
+    "what", "when", "where", "which", "who", "why", "with", "would", "you", "your",
+}
+
+
+def _memory_query_terms(query: str) -> list[str]:
+    import re
+    return [
+        token for token in re.findall(r"[a-z0-9][a-z0-9_.:-]*", str(query or "").lower())
+        if len(token) >= 3 and token not in _MEMORY_QUERY_STOPWORDS
+    ][:24]
+
+
 def search_memory(query: str = "", limit: int = 10) -> str:
-    """Search durable memories using simple keyword matching."""
+    """Search durable memories using relevance-ranked meaningful terms.
+
+    Common conversational words are ignored so a query such as "what did I tell
+    you earlier?" does not inject unrelated facts merely because they contain
+    words like "my" or "you". Results require at least one meaningful term
+    match and are ranked by topic matches, fact matches, then recency.
+    """
     limit = max(1, min(int(limit), 50))
-    query = str(query or "").strip().lower()
+    raw_query = str(query or "").strip().lower()
     with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
-        if not query or query in {"memory", "all", "everything"}:
+        if not raw_query or raw_query in {"memory", "all", "everything"}:
             rows = conn.execute(
                 "SELECT topic, fact, updated_at FROM memory ORDER BY updated_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         else:
-            keywords = [x for x in query.split() if x]
-            clauses = []
-            params: list[str] = []
-            for word in keywords:
-                clauses.append("(lower(topic) LIKE ? OR lower(fact) LIKE ?)")
-                params.extend([f"%{word}%", f"%{word}%"])
-            rows = conn.execute(
-                "SELECT topic, fact, updated_at FROM memory WHERE " + " OR ".join(clauses) + " ORDER BY updated_at DESC LIMIT ?",
-                params + [limit],
-            ).fetchall()
+            terms = _memory_query_terms(raw_query)
+            if not terms:
+                rows = []
+            else:
+                # Bound the scoring pool; memory is user-authored and typically
+                # small, but never scan an unbounded table on each turn.
+                candidates = conn.execute(
+                    "SELECT topic, fact, updated_at FROM memory ORDER BY updated_at DESC LIMIT 500"
+                ).fetchall()
+                scored = []
+                for row in candidates:
+                    topic = str(row[0] or "").lower()
+                    fact = str(row[1] or "").lower()
+                    topic_hits = sum(1 for term in terms if term in topic)
+                    fact_hits = sum(1 for term in terms if term in fact)
+                    score = topic_hits * 3 + fact_hits
+                    if score > 0:
+                        scored.append((score, str(row[2] or ""), row))
+                scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+                rows = [item[2] for item in scored[:limit]]
     return json.dumps(
         [{"topic": row[0], "fact": row[1], "updated_at": row[2]} for row in rows],
         ensure_ascii=False,

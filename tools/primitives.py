@@ -61,12 +61,21 @@ def _zone(name: str):
         return datetime.now().astimezone().tzinfo or timezone.utc
 
 
-def clock_payload() -> dict[str, Any]:
-    """Return one internally consistent UTC/local timestamp payload."""
+def clock_payload(timezone_name: str = "") -> dict[str, Any]:
+    """Return one internally consistent UTC/local timestamp payload.
+
+    ``timezone_name`` may override the configured local zone with an explicit
+    IANA timezone. Invalid values fall back safely to the configured/host zone.
+    """
     now_utc = datetime.now(timezone.utc)
     configured_tz = _configured_timezone()
     host_tz = _host_timezone_name()
-    target_tz = configured_tz or host_tz or "UTC"
+    requested_tz = str(timezone_name or "").strip()
+    target_tz = requested_tz or configured_tz or host_tz or "UTC"
+    try:
+        ZoneInfo(target_tz)
+    except (ZoneInfoNotFoundError, ValueError):
+        target_tz = configured_tz or host_tz or "UTC"
     local = now_utc.astimezone(_zone(target_tz))
     system_local = now_utc.astimezone()
     return {
@@ -84,9 +93,9 @@ def clock_payload() -> dict[str, Any]:
     }
 
 
-def current_time() -> str:
-    """Return the current clock time/date in UTC and the configured local timezone. Use this for questions about now, today, time, date, or timezone."""
-    return json.dumps(clock_payload(), ensure_ascii=False, indent=2)
+def current_time(timezone_name: str = "") -> str:
+    """Return the current clock/date for the configured zone or an explicit IANA timezone."""
+    return json.dumps(clock_payload(timezone_name), ensure_ascii=False, indent=2)
 
 
 def hostname() -> str:

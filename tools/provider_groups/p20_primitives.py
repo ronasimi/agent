@@ -94,6 +94,7 @@ TOOL_SPECS = [
     ('primitive_modules.structured', 'yaml_query'),
     ('primitive_modules.structured', 'csv_query'),
     ('primitive_modules.structured', 'csv_summary'),
+    ('primitive_modules.structured', 'jsonl_summary'),
     ('primitive_modules.documents', 'document_images'),
     ('primitive_modules.utility', 'format_datetime'),
     ('primitive_modules.observation', 'observation_get'),

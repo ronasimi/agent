@@ -444,7 +444,7 @@ def derive_task_frame(
         match = _NEWS_TIME_RE.search(text)
         frame["time_scope"] = re.sub(r"\s+", " ", match.group(0).lower()) if match else "current"
     elif intent == "current_time":
-        tz = re.search(r"\b(?:in|for)\s+([A-Za-z][A-Za-z0-9_+:/ -]{1,80})$", text)
+        tz = re.search(r"\b(?:in|for)\s+([A-Za-z][A-Za-z0-9_+:/ .-]{0,80}?)[?!.]*$", text)
         if tz:
             frame["entity"] = _clean_entity(tz.group(1))
         elif str(previous.get("intent") or "") == "current_time":
@@ -628,6 +628,25 @@ def is_evidence_reuse_request(user_text: str) -> bool:
     return bool(re.search(r"\b(?:forecast|results?|findings?|report|answer|data|output|that|those|previous|above)\b", lower))
 
 
+_META_CAPABILITY_REQUEST_RE = re.compile(
+    r"^(?:what\s+else\s+)?(?:can|could|would)\s+you\s+(?:do|help\s+with|handle|support)\b"
+    r"|^(?:what|which)\s+(?:tools|capabilities|features|things)\s+(?:can|do)\s+you\b"
+    r"|^what\s+are\s+you\s+capable\s+of\b",
+    re.I,
+)
+
+
+def is_meta_capability_request(user_text: str) -> bool:
+    """Return True for self-contained capability/help questions.
+
+    These often begin with phrases such as "what else" but are not referential
+    continuations of the prior task. Treating them as continuations can inherit a
+    stale weather/news/task frame and trigger unrelated tools.
+    """
+    text = " ".join(str(user_text or "").strip().split())
+    return bool(text and _META_CAPABILITY_REQUEST_RE.search(text))
+
+
 def is_followup_request(user_text: str) -> bool:
     """Conservatively detect requests that intentionally depend on the prior task.
 
@@ -636,6 +655,8 @@ def is_followup_request(user_text: str) -> bool:
     """
     text = " ".join(str(user_text or "").strip().split())
     if not text:
+        return False
+    if is_meta_capability_request(text):
         return False
     lower = text.lower()
     continuity = (

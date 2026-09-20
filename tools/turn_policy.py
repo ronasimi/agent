@@ -23,6 +23,7 @@ class TurnToolPolicy:
     failed_iterations: int = 0
     readonly_only: bool = False
     explicit_exemptions: set[str] = field(default_factory=set)
+    all_tools_blocked: bool = False
 
     def allowed(self, name: str, metadata: dict[str, Any]) -> bool:
         if name in self.blocked:
@@ -67,8 +68,13 @@ class TurnToolPolicy:
         parts = []
         if self.readonly_only:
             parts.append("This turn is read-only: mutating tools are disabled by the user's explicit constraint.")
-        if self.blocked:
-            parts.append("Disabled for this turn: " + ", ".join(sorted(self.blocked)) + ".")
+        if self.all_tools_blocked:
+            parts.append("All tools are disabled for this turn by the user's explicit constraint.")
+        elif self.blocked:
+            names = sorted(self.blocked)
+            shown = names[:20]
+            suffix = f", +{len(names)-20} more" if len(names) > 20 else ""
+            parts.append("Disabled for this turn: " + ", ".join(shown) + suffix + ".")
         waiting = sorted(name for name, threshold in self.delayed.items() if self.failed_iterations < threshold)
         if waiting:
             parts.append("Conditionally disabled until an allowed approach fails: " + ", ".join(waiting) + ".")
@@ -89,6 +95,19 @@ def derive_turn_tool_policy(user_text: str, known_names: set[str], metadata_by_n
     text = str(user_text or "")
     lower = text.lower()
     policy = TurnToolPolicy()
+
+    # Explicit global tool prohibition. This must be stronger than all intent
+    # bundles and harness-owned pre-grounding so contradictory requests such as
+    # "give me the exact current time without using tools" fail closed instead
+    # of silently violating the user's constraint.
+    no_tools = bool(
+        re.search(r"\b(?:do not|don't|never)\s+use\s+(?:any\s+)?tools?\b", lower)
+        or re.search(r"\bwithout\s+(?:using\s+)?(?:any\s+)?tools?\b", lower)
+        or re.search(r"(?:^|[.;:!?]\s*)no\s+tools?\s*(?:[.;:!?]|$)", lower)
+    )
+    if no_tools:
+        policy.blocked.update(known_names)
+        policy.all_tools_blocked = True
 
     # A file-modification prohibition is narrower than a globally read-only
     # turn. Block direct file/package mutators, but do not erase separately

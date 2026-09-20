@@ -90,9 +90,11 @@ def parse_slash_command(text: str) -> tuple[SlashCommandSpec | None, str]:
     raw = str(text or "").strip()
     if not raw.startswith("/"):
         return None, ""
-    token, separator, rest = raw.partition(" ")
+    parts = raw.split(None, 1)
+    token = parts[0]
+    rest = parts[1].strip() if len(parts) > 1 else ""
     spec = _COMMAND_BY_NAME.get(token.lower())
-    return spec, rest.strip() if separator else ""
+    return spec, rest
 
 
 def _usage(spec: SlashCommandSpec, detail: str = "") -> SlashCommandResult:

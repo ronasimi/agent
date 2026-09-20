@@ -62,18 +62,34 @@ def _bounded_int(value: int, low: int, high: int) -> int:
 def _safe_workspace(path: str) -> Path:
     return Path(_get_safe_path(path))
 
-def _source_text(text: str = "", path: str = "", limit: int = MAX_TEXT) -> str:
+def _strip_text_bom(text: str) -> str:
+    """Normalize a leading Unicode BOM without altering interior content."""
+    value = str(text or "")
+    return value[1:] if value.startswith("\ufeff") else value
+
+
+def _source_text_info(text: str = "", path: str = "", limit: int = MAX_TEXT) -> tuple[str, bool]:
+    """Return normalized bounded text plus whether input was truncated."""
+    limit = max(1, int(limit))
     if path:
-        p=_safe_workspace(path)
-        return p.read_text(encoding="utf-8",errors="replace")[:limit]
-    return str(text)[:limit]
+        p = _safe_workspace(path)
+        with p.open("r", encoding="utf-8-sig", errors="replace") as handle:
+            value = handle.read(limit + 1)
+        return value[:limit], len(value) > limit
+    value = _strip_text_bom(str(text or ""))
+    return value[:limit], len(value) > limit
+
+
+def _source_text(text: str = "", path: str = "", limit: int = MAX_TEXT) -> str:
+    return _source_text_info(text, path, limit)[0]
+
 
 def _load_json(data: Any = "", path: str = "") -> Any:
     if path:
         return json.loads(_source_text("", path))
     if isinstance(data, (dict, list, int, float, bool)) or data is None:
         return data
-    return json.loads(str(data))
+    return json.loads(_strip_text_bom(str(data)))
 
 def _get_path(obj: Any, path: str) -> Any:
     if path in {"", ".", "$"}: return obj

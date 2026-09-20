@@ -35,6 +35,7 @@ TOOL_SELECTION_STOPWORDS = {'for', 'of', 'show', 'it', 'with', 'in', 'do', 'woul
 ALWAYS_TOOL_NAMES: set[str] = set()
 
 TOOL_BUNDLES = (
+    ({'jsonl', 'ndjson', 'newline'}, ('jsonl_summary', 'read_text', 'read_lines')),
     ({'repo', 'script', 'project', 'python', 'file', 'files', 'coding', 'code'},
      ('read_file', 'path_stat', 'list_directory', 'find_paths', 'read_text', 'read_lines', 'directory_size', 'tail_file', 'file_hash', 'mime_type', 'text_search', 'regex_extract', 'regex_replace', 'json_query', 'run_pipeline', 'get_repo_map', 'search_repo_symbols', 'repo_status', 'repo_diff', 'repo_checks')),
     ({'edit', 'overwrite', 'save', 'create', 'write', 'modify'},
@@ -68,7 +69,7 @@ TOOL_BUNDLES = (
     ({'recipes', 'reuse', 'pipeline', 'workflow', 'recipe', 'reusable'},
      ('search_recipes', 'list_recipes', 'run_recipe', 'run_pipeline', 'save_recipe', 'recipe_coverage')),
     ({'path', 'hash', 'mime', 'folder', 'directory', 'find', 'json', 'tail', 'diff', 'regex', 'grep'},
-     ('find_paths', 'list_directory', 'path_stat', 'read_text', 'read_lines', 'directory_size', 'tail_file', 'file_hash', 'mime_type', 'text_search', 'regex_extract', 'regex_replace', 'text_split', 'text_head', 'text_tail', 'text_count', 'text_sort', 'text_unique', 'json_query', 'json_filter', 'json_sort', 'json_head', 'json_count', 'json_keys', 'json_diff', 'yaml_query', 'csv_query', 'csv_summary', 'text_diff', 'run_pipeline')),
+     ('find_paths', 'list_directory', 'path_stat', 'read_text', 'read_lines', 'directory_size', 'tail_file', 'file_hash', 'mime_type', 'text_search', 'regex_extract', 'regex_replace', 'text_split', 'text_head', 'text_tail', 'text_count', 'text_sort', 'text_unique', 'json_query', 'json_filter', 'json_sort', 'json_head', 'json_count', 'json_keys', 'json_diff', 'yaml_query', 'csv_query', 'csv_summary', 'jsonl_summary', 'text_diff', 'run_pipeline')),
     ({'remember', 'preference', 'recall', 'profile', 'identity'},
      ('search_memory', 'remember', 'set_user_identity', 'set_research_preference', 'profile_image_info')),
     ({'timer', 'schedule', 'remind', 'reminder'},
