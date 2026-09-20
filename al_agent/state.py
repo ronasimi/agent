@@ -13,11 +13,11 @@ from tools.working_state import WorkingStateStore
 CONFIG_PATH = os.environ.get("AGENT_CONFIG", "/app/config/config.yaml")
 CONFIG = load_config()
 AGENT_CFG = CONFIG.get("agent", {})
-MODEL = AGENT_CFG.get("model", "qwen3.5:4b")
-FAST_MODEL = AGENT_CFG.get("fast_model", "qwen3.5:2b")
+MODEL = AGENT_CFG.get("model", "agent-main:4b")
+FAST_MODEL = AGENT_CFG.get("fast_model", "agent-fast:2b")
 FAST_MODEL_KEEP_ALIVE = AGENT_CFG.get("fast_model_keep_alive", 0)
-MAIN_OPTIONS = AGENT_CFG.get("main_options") or {"num_ctx": 16384, "temperature": 0.2, "top_p": 0.9, "top_k": 20}
-FAST_OPTIONS = AGENT_CFG.get("fast_options") or {"num_ctx": 8192, "temperature": 0.0, "top_p": 0.9, "top_k": 20}
+MAIN_OPTIONS = AGENT_CFG.get("main_options") or {"num_ctx": 16384, "temperature": 0.6, "top_p": 0.95, "top_k": 20}
+FAST_OPTIONS = AGENT_CFG.get("fast_options") or {"num_ctx": 8192, "temperature": 0.6, "top_p": 0.95, "top_k": 20}
 MAX_TOOLS_PER_TURN = max(8, int(AGENT_CFG.get("max_tools_per_turn", 12)))
 OLLAMA_HOST = AGENT_CFG.get("host", "http://127.0.0.1:11434")
 os.environ["OLLAMA_HOST"] = OLLAMA_HOST

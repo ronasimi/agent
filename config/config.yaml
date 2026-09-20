@@ -4,18 +4,18 @@
 agent:
   # The Ollama server is intentionally external to this container.
   host: "http://127.0.0.1:11434"
-  model: "huihui_ai/qwen3.5-abliterated:4B"
-  fast_model: "huihui_ai/qwen3.5-abliterated:2B"
+  model: "agent-main:4b"
+  fast_model: "agent-fast:2b"
 
   # Dedicated long-form research writer/verifier. /research uses this model
   # only after source collection. The worker temporarily evicts the interactive
   # and fast models while this larger model is resident, then restores them.
-  report_model: "tobestyledintro/qwen3.8-9b-distill:latest"
+  report_model: "agent-report:9b"
   report_model_keep_alive: "10m"
   report_options:
     num_ctx: 8192
-    temperature: 0.1
-    top_p: 0.85
+    temperature: 0.6
+    top_p: 0.95
     top_k: 20
   report_restore_models_after_stage: true
   report_restore_fast_model: true
@@ -126,8 +126,8 @@ agent:
     keep_alive: "2m"
     options:
       num_ctx: 4096
-      temperature: 0.0
-      top_p: 0.9
+      temperature: 0.6
+      top_p: 0.95
       top_k: 20
       num_predict: 96
 
@@ -171,8 +171,8 @@ agent:
   # therefore keeps main_options.num_ctx in that case.
   compaction_options:
     num_ctx: 4096
-    temperature: 0.0
-    top_p: 0.9
+    temperature: 0.6
+    top_p: 0.95
     top_k: 20
     num_predict: 512
 
@@ -193,14 +193,14 @@ agent:
 
   main_options:
     num_ctx: 16384
-    temperature: 0.2
-    top_p: 0.9
+    temperature: 0.6
+    top_p: 0.95
     top_k: 20
 
   fast_options:
     num_ctx: 8192
-    temperature: 0.0
-    top_p: 0.9
+    temperature: 0.6
+    top_p: 0.95
     top_k: 20
 
   system_prompt: |
@@ -314,8 +314,8 @@ self_optimization:
   test_memory_limit_mb: 1536
   model_options:
     num_ctx: 16384
-    temperature: 0.1
-    top_p: 0.9
+    temperature: 0.6
+    top_p: 0.95
     top_k: 20
     num_predict: 4096
   test_commands:

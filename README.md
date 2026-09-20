@@ -8,8 +8,9 @@
 
 The default configuration is tuned for a small local model pair:
 
-- **Main model:** `qwen3.5:4b`
-- **Fast model:** `qwen3.5:2b`
+- **Main model:** `agent-main:4b` (Empero Qwen3.8 4B Distill, Q8_0)
+- **Fast model:** `agent-fast:2b` (Empero Qwen3.8 2B Distill, Q4_K_M)
+- **Report model:** `agent-report:9b` (Empero Qwen3.8 9B Distill, Q4_K_M)
 - **Context window:** 16K for the main agent
 
 The main model handles the conversation and final synthesis. The fast model handles bounded validation, research planning, source distillation, and other work that can be offloaded without blocking the main loop.
@@ -24,12 +25,20 @@ You need:
 - a running Ollama server reachable from the host network
 - the models configured in `config/config.yaml`
 
-Pull the default models if you do not already have them:
+Create the stable role aliases after pulling the three Hugging Face GGUF models:
 
 ```bash
-ollama pull qwen3.5:4b
-ollama pull qwen3.5:2b
+# Create the role aliases from already-pulled Hugging Face GGUF models:
+./scripts/create_ollama_aliases.sh
 ```
+
+The aliases map to:
+
+- `agent-main:4b` → `hf.co/empero-ai/Qwen3.8-4B-Distill-GGUF:Q8_0`
+- `agent-fast:2b` → `hf.co/empero-ai/Qwen3.8-2B-Distill-GGUF:Q4_K_M`
+- `agent-report:9b` → `hf.co/empero-ai/Qwen3.8-9B-Distill-GGUF:Q4_K_M`
+
+All three aliases use the distill release's recommended sampling defaults: `temperature=0.6`, `top_p=0.95`, and `top_k=20`. The harness also passes those values explicitly so behavior is unchanged if an alias is recreated without a Modelfile.
 
 ### 2. Start the agent
 
@@ -196,7 +205,7 @@ Research jobs can survive process restarts because state and checkpoints are sto
 `/research` now separates source collection from long-form synthesis. Search planning,
 source distillation, and gap detection continue to use the small fast model, while the
 report stage uses the configurable `agent.report_model` (default:
-`tobestyledintro/qwen3.8-9b-distill:latest`). Before any prose is drafted, the report
+`agent-report:9b`). Before any prose is drafted, the report
 model builds a per-source claim ledger. Every retained claim must include a support
 excerpt that the harness verifies occurs in the fetched raw source text.
 
@@ -310,9 +319,9 @@ Important defaults:
 
 ```yaml
 agent:
-  model: "huihui_ai/qwen3.5-abliterated:4B"
-  fast_model: "huihui_ai/qwen3.5-abliterated:2B"
-  report_model: "tobestyledintro/qwen3.8-9b-distill:latest"
+  model: "agent-main:4b"
+  fast_model: "agent-fast:2b"
+  report_model: "agent-report:9b"
   fast_model_keep_alive: "2m"
   report_model_keep_alive: "10m"
   report_restore_models_after_stage: true
@@ -320,8 +329,8 @@ agent:
 
   report_options:
     num_ctx: 8192
-    temperature: 0.1
-    top_p: 0.85
+    temperature: 0.6
+    top_p: 0.95
     top_k: 20
   thinking_default: false
   max_iterations: 12
@@ -346,14 +355,14 @@ agent:
 
   main_options:
     num_ctx: 16384
-    temperature: 0.2
-    top_p: 0.9
+    temperature: 0.6
+    top_p: 0.95
     top_k: 20
 
   fast_options:
     num_ctx: 8192
-    temperature: 0.0
-    top_p: 0.9
+    temperature: 0.6
+    top_p: 0.95
     top_k: 20
 
   recipes:
