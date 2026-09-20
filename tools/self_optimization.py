@@ -44,7 +44,7 @@ OLLAMA_HOST = str(AGENT_CFG.get("host", os.environ.get("OLLAMA_HOST", "http://12
 SELF_OPTIONS = OPT_CFG.get("model_options") or {
     "num_ctx": 16384, "temperature": 0.6, "top_p": 0.95, "top_k": 20, "num_predict": 4096,
 }
-FAST_OPTIONS = AGENT_CFG.get("fast_options") or {"num_ctx": 8192, "temperature": 0.6, "top_p": 0.95, "top_k": 20}
+FAST_OPTIONS = AGENT_CFG.get("fast_options") or {"num_ctx": 4096, "temperature": 0.6, "top_p": 0.95, "top_k": 20}
 
 _PLAN_SCHEMA = {
     "type": "object",

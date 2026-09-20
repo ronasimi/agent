@@ -122,6 +122,34 @@ def _warm_chat(client: Client, model: str, options: dict[str, Any], keep_alive: 
     return elapsed
 
 
+def _ps_snapshot(client: Client) -> dict[str, Any]:
+    """Return a compact Ollama residency snapshot suitable for JSON output."""
+    try:
+        response = client.ps()
+    except Exception as exc:
+        return {"available": False, "error": f"{type(exc).__name__}: {exc}", "models": []}
+
+    rows = []
+    for item in list(_value(response, "models", []) or []):
+        size = _value(item, "size", None)
+        size_vram = _value(item, "size_vram", None)
+        row = {
+            "name": str(_value(item, "name", _value(item, "model", "")) or ""),
+            "model": str(_value(item, "model", _value(item, "name", "")) or ""),
+            "context_length": _value(item, "context_length", None),
+            "size_bytes": size,
+            "size_vram_bytes": size_vram,
+            "expires_at": str(_value(item, "expires_at", "") or ""),
+        }
+        try:
+            if size and size_vram is not None:
+                row["vram_percent"] = round((float(size_vram) / float(size)) * 100.0, 1)
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+        rows.append(row)
+    return {"available": True, "models": rows}
+
+
 def _main_ttft(
     client: Client,
     model: str,
@@ -311,10 +339,11 @@ def _embedding_latency(client: Client, model: str, runs: int, *, enabled: bool =
 
 
 def _load_and_swap(client: Client, roles: list[tuple[str, str, dict[str, Any], Any]]) -> dict[str, Any]:
-    """Measure cold loads and the residency transitions the harness actually uses."""
+    """Measure cold loads, warm role switches, and observed Ollama residency."""
     cold_loads: dict[str, Any] = {}
     role_map = {role: (model, options, keep_alive) for role, model, options, keep_alive in roles}
     all_models = list(dict.fromkeys(model for _, model, _, _ in roles if model))
+    snapshots: dict[str, Any] = {}
 
     def unload_all() -> None:
         for model in all_models:
@@ -336,11 +365,24 @@ def _load_and_swap(client: Client, roles: list[tuple[str, str, dict[str, Any], A
         unload_all()
         try:
             _warm_chat(client, main_model, main_options, main_keep_alive)
-            transitions["main->fast_co_resident"] = round(
+            snapshots["main_only"] = _ps_snapshot(client)
+            transitions["main->fast_cold_beside_main"] = round(
                 _warm_chat(client, fast_model, fast_options, fast_keep_alive), 2
             )
+            snapshots["main_fast_after_fast_load"] = _ps_snapshot(client)
+
+            # Both runners should now be resident. These two timings are the
+            # actual steady-state role-switch cost rather than another load.
+            transitions["warm_fast->main"] = round(
+                _warm_chat(client, main_model, main_options, main_keep_alive), 2
+            )
+            snapshots["after_warm_main_switch"] = _ps_snapshot(client)
+            transitions["warm_main->fast"] = round(
+                _warm_chat(client, fast_model, fast_options, fast_keep_alive), 2
+            )
+            snapshots["after_warm_fast_switch"] = _ps_snapshot(client)
         except Exception as exc:
-            transitions["main->fast_co_resident"] = {"error": f"{type(exc).__name__}: {exc}"}
+            transitions["main_fast_residency"] = {"error": f"{type(exc).__name__}: {exc}"}
 
     if "report" in role_map:
         report_model, report_options, report_keep_alive = role_map["report"]
@@ -353,23 +395,41 @@ def _load_and_swap(client: Client, roles: list[tuple[str, str, dict[str, Any], A
             transitions["interactive->report"] = round(
                 _warm_chat(client, report_model, report_options, report_keep_alive), 2
             )
+            snapshots["report_only"] = _ps_snapshot(client)
         except Exception as exc:
             transitions["interactive->report"] = {"error": f"{type(exc).__name__}: {exc}"}
 
-        # exit_report_model_stage unloads the report writer and restores main,
-        # then fast when configured. Measure the total foreground restoration.
+        # Runtime report teardown now restores only main while holding the
+        # inference lock. Fast is lazy-loaded later if a validator/research call
+        # actually needs it, so report recovery no longer blocks a foreground
+        # turn on an unnecessary 2B load.
         try:
             _unload(client, report_model)
-            started = time.monotonic()
-            for role in ("main", "fast"):
-                if role in role_map:
-                    model, options, keep_alive = role_map[role]
-                    _warm_chat(client, model, options, keep_alive)
-            transitions["report->interactive"] = round((time.monotonic() - started) * 1000.0, 2)
+            if "main" in role_map:
+                main_model, main_options, main_keep_alive = role_map["main"]
+                transitions["report->main_restore"] = round(
+                    _warm_chat(client, main_model, main_options, main_keep_alive), 2
+                )
+                snapshots["after_report_main_restore"] = _ps_snapshot(client)
+            if "fast" in role_map:
+                fast_model, fast_options, fast_keep_alive = role_map["fast"]
+                transitions["main->fast_lazy_after_report"] = round(
+                    _warm_chat(client, fast_model, fast_options, fast_keep_alive), 2
+                )
+                snapshots["after_lazy_fast_restore"] = _ps_snapshot(client)
+                if "main" in role_map:
+                    main_model, main_options, main_keep_alive = role_map["main"]
+                    transitions["warm_fast->main_after_report"] = round(
+                        _warm_chat(client, main_model, main_options, main_keep_alive), 2
+                    )
         except Exception as exc:
-            transitions["report->interactive"] = {"error": f"{type(exc).__name__}: {exc}"}
+            transitions["report_recovery"] = {"error": f"{type(exc).__name__}: {exc}"}
 
-    return {"cold_load_ms": cold_loads, "transition_ms": transitions}
+    return {
+        "cold_load_ms": cold_loads,
+        "transition_ms": transitions,
+        "residency_snapshots": snapshots,
+    }
 
 
 def main() -> int:
@@ -409,8 +469,10 @@ def main() -> int:
         },
         "effective_config": {
             "main_num_ctx": main_options.get("num_ctx"),
+            "fast_num_ctx": fast_options.get("num_ctx"),
             "validator_num_ctx": validator_options.get("num_ctx"),
             "report_num_ctx": report_options.get("num_ctx"),
+            "report_fast_restore_mode": "lazy",
             "thinking_default": bool(agent.get("thinking_default", False)),
             "semantic_memory_enabled": bool(agent.get("semantic_memory_enabled", False)),
         },

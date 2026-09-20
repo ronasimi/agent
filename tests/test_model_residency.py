@@ -1,7 +1,7 @@
 from contextlib import nullcontext
 
 
-def test_report_stage_swaps_models_and_restores_normal_residency(monkeypatch):
+def test_report_stage_restores_main_only_and_defers_fast(monkeypatch):
     from al_agent import model_residency as residency
 
     calls = []
@@ -19,12 +19,10 @@ def test_report_stage_swaps_models_and_restores_normal_residency(monkeypatch):
     monkeypatch.setattr(residency, "FAST_MODEL", "fast:2b")
     monkeypatch.setattr(residency, "REPORT_MODEL", "report:9b")
     monkeypatch.setattr(residency, "REPORT_MODEL_KEEP_ALIVE", -1)
-    monkeypatch.setattr(residency, "FAST_MODEL_KEEP_ALIVE", "2m")
     monkeypatch.setattr(residency, "REPORT_RESTORE_MODELS", True)
-    monkeypatch.setattr(residency, "REPORT_RESTORE_FAST_MODEL", True)
 
     residency.enter_report_model_stage("job-1")
-    residency.exit_report_model_stage("job-1", restore=True)
+    result = residency.exit_report_model_stage("job-1", restore=True)
 
     assert calls[:3] == [
         ("main:4b", 0, False),
@@ -34,8 +32,10 @@ def test_report_stage_swaps_models_and_restores_normal_residency(monkeypatch):
     assert calls[3:] == [
         ("report:9b", 0, False),
         ("main:4b", -1, True),
-        ("fast:2b", "2m", True),
     ]
+    assert result["main_restored"] is True
+    assert result["fast_restored"] is False
+    assert result["fast_restore_deferred"] is True
     assert any(key == "agent.report_model_active" and value is False for key, value in state_updates)
 
 

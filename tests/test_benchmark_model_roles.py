@@ -42,6 +42,19 @@ class FakeClient:
         self.calls.append(kwargs)
         return {"embeddings": [[0.1, 0.2]]}
 
+    def ps(self):
+        return {
+            "models": [
+                {
+                    "name": "main",
+                    "model": "main",
+                    "context_length": 16384,
+                    "size": 100,
+                    "size_vram": 50,
+                }
+            ]
+        }
+
 
 def test_main_ttft_mirrors_runtime_thinking_flag():
     client = FakeClient()
@@ -78,3 +91,28 @@ def test_missing_disabled_embedding_is_actionable_but_not_runtime_failure():
     assert result["installed"] is False
     assert result["failures"] == 0
     assert result["remediation"] == "ollama pull nomic-embed-text"
+
+
+def test_ps_snapshot_records_context_and_memory_placement():
+    result = bench._ps_snapshot(FakeClient())
+    assert result["available"] is True
+    assert result["models"][0]["context_length"] == 16384
+    assert result["models"][0]["vram_percent"] == 50.0
+
+
+def test_residency_benchmark_includes_true_warm_switches_and_main_only_report_restore():
+    client = FakeClient()
+    result = bench._load_and_swap(client, [
+        ("main", "main", {"num_ctx": 16384}, -1),
+        ("fast", "fast", {"num_ctx": 4096}, "2m"),
+        ("report", "report", {"num_ctx": 8192}, "10m"),
+    ])
+    transitions = result["transition_ms"]
+    assert "main->fast_cold_beside_main" in transitions
+    assert "warm_fast->main" in transitions
+    assert "warm_main->fast" in transitions
+    assert "report->main_restore" in transitions
+    assert "main->fast_lazy_after_report" in transitions
+    assert "report->interactive" not in transitions
+    assert "main_only" in result["residency_snapshots"]
+    assert "after_report_main_restore" in result["residency_snapshots"]

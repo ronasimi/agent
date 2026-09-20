@@ -227,12 +227,13 @@ prose. When enabled, audit sidecars are written next to the report as
 
 The worker also swaps Ollama residency around synthesis: it unloads the interactive
 and fast models before loading the report model, keeps the larger writer resident only
-for the report stage, then unloads it and restores the normal models. The report
-model also has a finite keep-alive TTL as a crash-safety backstop. Foreground turns
-have priority; if a user turn arrives, the report worker yields and the interactive path
-evicts any lingering report model before loading the main model. This behavior is
-controlled by `agent.report_model`, `agent.report_options`,
-`agent.report_restore_models_after_stage`, and `agent.report_restore_fast_model`.
+for the report stage, then unloads it and restores the main foreground model. The fast
+role is intentionally not synchronously restored; it lazy-loads only when validator or
+research work actually needs it. The report model also has a finite keep-alive TTL as a
+crash-safety backstop. Foreground turns have priority; if a user turn arrives, the
+report worker yields and the interactive path evicts any lingering report model before
+loading the main model. This behavior is controlled by `agent.report_model`,
+`agent.report_options`, and `agent.report_restore_models_after_stage`.
 
 ## Reminders and scheduled work
 
@@ -337,7 +338,6 @@ agent:
   fast_model_keep_alive: "2m"
   report_model_keep_alive: "10m"
   report_restore_models_after_stage: true
-  report_restore_fast_model: true
 
   report_options:
     num_ctx: 8192
@@ -372,7 +372,7 @@ agent:
     top_k: 20
 
   fast_options:
-    num_ctx: 8192
+    num_ctx: 4096
     temperature: 0.6
     top_p: 0.95
     top_k: 20
@@ -383,7 +383,7 @@ agent:
     validator_fallback_max_tools: 12
 ```
 
-`fast_model_keep_alive: "2m"` keeps the 2B recovery/research model warm for clustered work. With `OLLAMA_MAX_LOADED_MODELS=2`, the 4B main and 2B fast roles can normally coexist; the worker explicitly evicts them before loading the 9B report writer and restores the interactive roles afterward.
+`fast_model_keep_alive: "2m"` keeps the 2B recovery/research model warm for clustered work. All 2B fast-role calls use the same 4096-token context so Ollama can reuse one runner instead of reloading it for validator versus research work. With `OLLAMA_MAX_LOADED_MODELS=2`, the 4B main and 2B fast roles can normally coexist. The worker explicitly evicts them before loading the 9B report writer; after report synthesis it restores only the 4B foreground model while holding the inference lock. The 2B role lazy-loads on its next real request so report cleanup cannot make an arriving user wait behind an unnecessary validator warm-up.
 
 ### Ollama server settings
 

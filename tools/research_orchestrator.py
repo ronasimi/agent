@@ -13,7 +13,7 @@ from .reminders import schedule_reminder
 
 CONFIG = load_config()
 FAST_MODEL = CONFIG.get("agent", {}).get("fast_model", "agent-fast:2b")
-FAST_OPTIONS = CONFIG.get("agent", {}).get("fast_options", {"num_ctx": 8192, "temperature": 0.6, "top_p": 0.95, "top_k": 20})
+FAST_OPTIONS = CONFIG.get("agent", {}).get("fast_options", {"num_ctx": 4096, "temperature": 0.6, "top_p": 0.95, "top_k": 20})
 FAST_KEEP_ALIVE = CONFIG.get("agent", {}).get("fast_model_keep_alive", CONFIG.get("worker", {}).get("fast_model_keep_alive", 0))
 
 

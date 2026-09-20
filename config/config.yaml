@@ -18,10 +18,9 @@ agent:
     top_p: 0.95
     top_k: 20
   report_restore_models_after_stage: true
-  report_restore_fast_model: true
 
-  # Keep the small validator/research model warm briefly. Ollama will still
-  # evict it under memory pressure, while repeated recovery steps avoid a cold load.
+  # Keep the small validator/research model warm briefly. All fast-role calls use
+  # the same 4K runner configuration so Ollama can reuse one resident runner.
   fast_model_keep_alive: "2m"
   embed_model: "nomic-embed-text"
   timezone: "America/Toronto"
@@ -123,8 +122,8 @@ agent:
     max_candidate_tools: 24
     timeout_seconds: 45
     max_transcript_chars: 12000
-    # Short TTL amortizes validator cold-loads while still allowing Ollama to
-    # reclaim memory automatically.
+    # Uses the same 4K context as fast_options so validation never forces a
+    # context-size runner reload.
     keep_alive: "2m"
     options:
       num_ctx: 4096
@@ -202,7 +201,7 @@ agent:
     top_k: 20
 
   fast_options:
-    num_ctx: 8192
+    num_ctx: 4096
     temperature: 0.6
     top_p: 0.95
     top_k: 20

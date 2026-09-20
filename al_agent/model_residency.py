@@ -19,15 +19,12 @@ from tools.runtime import get_monitor_state, record_monitor_state, utc_now
 
 from .background.config import (
     FAST_MODEL,
-    FAST_MODEL_KEEP_ALIVE,
-    FAST_OPTIONS,
     MAIN_OPTIONS,
     MODEL,
     OLLAMA_HOST,
     REPORT_MODEL,
     REPORT_MODEL_KEEP_ALIVE,
     REPORT_OPTIONS,
-    REPORT_RESTORE_FAST_MODEL,
     REPORT_RESTORE_MODELS,
 )
 
@@ -123,16 +120,25 @@ def enter_report_model_stage(job_id: str = "") -> dict[str, Any]:
 
 
 def exit_report_model_stage(job_id: str = "", *, restore: bool = True) -> dict[str, Any]:
-    """Unload the report model and optionally restore normal model residency."""
+    """Unload the report writer and restore only the foreground model.
+
+    The fast role is deliberately *not* restored here. Report teardown owns the
+    shared inference lock, so warming a validator/research runner that may never
+    be used would make an arriving user wait behind avoidable background work.
+    The 2B fast model instead lazy-loads on its next real request.
+    """
     client = _client()
-    result = {"report_unloaded": False, "main_restored": False, "fast_restored": False}
+    result = {
+        "report_unloaded": False,
+        "main_restored": False,
+        "fast_restored": False,
+        "fast_restore_deferred": bool(restore and REPORT_RESTORE_MODELS and FAST_MODEL and FAST_MODEL != MODEL),
+    }
     with background_inference_slot():
         result["report_unloaded"] = _unload(client, REPORT_MODEL)
         record_monitor_state(_REPORT_STATE_KEY, False)
         if restore and REPORT_RESTORE_MODELS:
             result["main_restored"] = _warm(client, MODEL, MAIN_OPTIONS, -1)
-            if REPORT_RESTORE_FAST_MODEL and FAST_MODEL and FAST_MODEL != MODEL:
-                result["fast_restored"] = _warm(client, FAST_MODEL, FAST_OPTIONS, FAST_MODEL_KEEP_ALIVE)
     return result
 
 
