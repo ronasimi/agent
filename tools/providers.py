@@ -49,6 +49,8 @@ TOOL_BUNDLES = (
      ('news_search', 'web_search', 'browse_url', 'page_metadata', 'page_links', 'discover_site', 'read_feed', 'extract_document', 'page_fingerprint', 'page_diff', 'fetch_url', 'extract_readable_text', 'extract_links', 'extract_metadata', 'extract_images', 'extract_jsonld', 'take_web_screenshot', 'enqueue_research', 'get_research_status', 'read_observation')),
     ({'weather', 'forecast', 'forecasts', 'precipitation', 'rainfall', 'snowfall'},
      ('geocode_location', 'weather_forecast', 'web_search', 'browse_url', 'read_observation')),
+    ({'market', 'price', 'prices', 'quote', 'quotes', 'commodity', 'commodities', 'crude', 'oil', 'wti', 'brent', 'gold', 'silver'},
+     ('market_quote', 'web_search', 'browse_url', 'read_observation')),
     ({'media', 'images', 'photo', 'screenshots', 'vision', 'image', 'screenshot', 'picture', 'visual', 'profile', 'avatar'},
      ('attach_media', 'image_info', 'mime_type', 'profile_image_info', 'set_profile_image')),
     ({'clock', 'time', 'local', 'today', 'utc', 'timezone', 'date'},

@@ -26,6 +26,7 @@ from tools.grounding import (
     validate_fact_grounding,
 )
 from tools.media import unpack_media_result
+from tools.market import extract_market_instruments, format_market_quotes, is_simple_market_price_request
 from tools.model_context import SharedModelContext
 from tools.recipe_learning import handle_recipe_confirmation, maybe_create_recipe_candidate, pending_recipe_prompt
 from tools.pipeline import execute_pipeline
@@ -363,6 +364,7 @@ def handle_user_turn(
         last_weather_recovery_result: dict[str, Any] | None = None
         last_news_search_content = ""
         last_encyclopedia_content = ""
+        last_market_quote_content = ""
         local_grounding_observations: list[dict[str, Any]] = []
         if not WORKING_STATE_ENABLED and continuation:
             local_grounding_observations.extend(list(previous_working_state.get("verified_observations") or []))
@@ -635,7 +637,7 @@ def handle_user_turn(
 
         def _record_harness_recovery_tool(name: str, args: dict[str, Any], *, trigger: str) -> bool:
             """Execute one deterministic read-only evidence primitive before generation."""
-            nonlocal last_news_search_content, last_encyclopedia_content
+            nonlocal last_news_search_content, last_encyclopedia_content, last_market_quote_content
             if name not in AVAILABLE_TOOLS_MAP or not bool(TOOL_METADATA.get(name, {}).get("readonly", True)):
                 return False
             emit_event("tool_start", name=name, arguments=args, harness_recovery=True)
@@ -678,6 +680,8 @@ def handle_user_turn(
                     last_news_search_content = result_content
                 elif name == "wiki_search":
                     last_encyclopedia_content = result_content
+                elif name == "market_quote":
+                    last_market_quote_content = result_content
                 turn_tail.append({
                     "role": "user",
                     "content": (
@@ -737,6 +741,18 @@ def handle_user_turn(
                     },
                     trigger="pre_generation:news",
                 )
+
+            # Live market-price requests use a structured quote provider before
+            # model generation. This prevents a small model from answering from
+            # stale pretraining or disclaiming real-time access when the harness
+            # has a current-data primitive.
+            report = grounding_report()
+            if "market_price" in set(report.get("missing_fact_types") or []):
+                instruments = list(task_frame.get("instruments") or extract_market_instruments(user_input))
+                if instruments:
+                    _record_harness_recovery_tool(
+                        "market_quote", {"instruments": instruments}, trigger="pre_generation:market_price"
+                    )
 
             # Short stable definition/identity requests get one bounded
             # encyclopedic lookup before generation.  This keeps a small local
@@ -816,6 +832,18 @@ def handle_user_turn(
                 limit=6,
                 location=str(task_frame.get("entity") or ""),
             )
+            if deterministic and grounding_report().get("grounded", False):
+                assistant_reply = {"role": "assistant", "content": deterministic}
+                append_and_save(messages, assistant_reply)
+                if WORKING_STATE_ENABLED:
+                    WORKING_STATE.complete_turn(blocked=False)
+                answer_first_visible_at = time.monotonic()
+                print(f"\nAgent: {deterministic}\n")
+                emit_event("assistant_final", content=deterministic, finalization=False, deterministic=True)
+                return
+
+        if required_fact_types == {"market_price"} and last_market_quote_content and is_simple_market_price_request(user_input):
+            deterministic = format_market_quotes(last_market_quote_content)
             if deterministic and grounding_report().get("grounded", False):
                 assistant_reply = {"role": "assistant", "content": deterministic}
                 append_and_save(messages, assistant_reply)
@@ -1187,6 +1215,8 @@ def handle_user_turn(
                         recovery_tools.append("current_time")
                     if "news" in missing:
                         recovery_tools.append("news_search")
+                    if "market_price" in missing:
+                        recovery_tools.append("market_quote")
                     if "web_fact" in missing:
                         recovery_tools.extend(["web_search", "browse_url"])
                     if "host_state" in missing:

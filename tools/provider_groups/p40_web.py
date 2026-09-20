@@ -5,6 +5,7 @@ TOOL_SPECS = [
     ('web', 'web_search'),
     ('web', 'news_search'),
     ('web', 'wiki_search'),
+    ('market', 'market_quote'),
     ('web', 'browse_url'),
     ('web_research', 'page_metadata'),
     ('web_research', 'page_links'),

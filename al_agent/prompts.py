@@ -25,6 +25,7 @@ _CAPABILITY_POLICIES = {
     "web": "For current web research, use web_search for discovery and browse_url or another content reader for verification. Search snippets alone are discovery evidence.",
     "time": "For an explicit current clock/date/timezone request, use current_time and never infer the answer from uptime, prior observations, logs, conversation timestamps, or working-state timestamps.",
     "weather": "For weather/forecast requests, prefer geocode_location + weather_forecast for structured data; use web_search + browse_url only as an independent fallback. Use the requested or recalled location and verify the requested time scope. current_time is never weather evidence.",
+    "market": "For explicit current/latest market-price requests, use market_quote and report the provider timestamp. Never answer live prices from model memory.",
     "host": "Use structured host_snapshot/network diagnostics before generic shell commands. Distinguish container-access limitations from facts about the host.",
     "network": "For LAN discovery, use local_subnets first when multiple interfaces may exist, then scan_subnet per relevant private subnet. network_reachability is not a LAN scanner.",
     "automation": "For long-running work use durable jobs/checkpoints. For reminders use the reminder tools; never create ad-hoc scheduler/systemd state yourself.",
@@ -45,6 +46,7 @@ def build_turn_capability_context(user_text: str, tool_names: set[str] | None = 
     if names & {"web_search","browse_url","fetch_url","extract_document"} or any(x in text for x in ("web", "source", "research", "documentation", "url")): add("web")
     if "current_time" in names: add("time")
     if names & {"geocode_location","weather_forecast","web_search","browse_url"} and any(x in text for x in ("weather", "forecast", "rain", "snow")): add("weather")
+    if "market_quote" in names: add("market")
     if names & {"host_snapshot","process_snapshot","pressure_snapshot","filesystem_snapshot","service_health"}: add("host")
     if names & {"network_snapshot","local_subnets","scan_subnet","neighbor_snapshot","connection_snapshot"}: add("network")
     if names & {"enqueue_research","schedule_reminder","cancel_reminder","queue_work"}: add("automation")

@@ -10,6 +10,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from .market import extract_market_instruments, is_market_price_request
+
 
 @dataclass
 class Requirement:
@@ -63,6 +65,7 @@ _RULES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     ("tool_health", "tool_health", "registered tool/dependency health", (r"\btool/?dependency health\b", r"\btool health\b", r"\bcurrent tool.*health\b")),
     ("dependency_audit", "dependency_audit", "runtime dependency audit", (r"\bdependency health\b", r"\bdependency audit\b", r"\btool/?dependency health\b")),
     ("news_search", "news_search", "current news headline discovery", (r"\b(?:latest|recent|current|today(?:'s)?)\b.{0,48}\b(?:news|headlines?|stories?)\b", r"\b(?:latest|top|local)\s+headlines?\b")),
+    ("market_quote", "market_quote", "current market/commodity quote", (r"\b(?:current|latest|live|today(?:'s)?|right now)\b.{0,64}\b(?:price|prices|quote|quotes|trading at)\b", r"\b(?:price|prices|quote|quotes)\b.{0,64}\b(?:wti|brent|crude oil|gold|silver|natural gas|copper)\b")),
     ("web_search", "web_search", "current web source discovery", (r"\bweb research\b", r"\bresearch the current\b", r"\bcurrent .*documentation\b", r"\blook up\b", r"\bsearch the web\b")),
     ("web_verify", "browse_url", "authoritative source content verification", (r"\bcurrent .*documentation\b", r"\bofficial .*documentation\b", r"\bsource urls?\b", r"\bverify .*source\b", r"\bweb research\b")),
     ("screenshot", "take_web_screenshot", "requested webpage screenshot", (r"\btake (?:a )?screenshot\b", r"\bscreenshot of\b", r"\bcapture .*page\b")),
@@ -85,7 +88,7 @@ _EXPLICIT_TOOL_NAMES = {
     "host_snapshot", "pressure_snapshot", "process_snapshot", "filesystem_snapshot",
     "service_health", "network_snapshot", "neighbor_snapshot", "connection_snapshot",
     "dns_diagnose", "network_path", "endpoint_probe", "http_probe", "tool_health",
-    "dependency_audit", "news_search", "web_search", "browse_url", "take_web_screenshot", "geocode_location", "weather_forecast",
+    "dependency_audit", "news_search", "market_quote", "web_search", "browse_url", "take_web_screenshot", "geocode_location", "weather_forecast",
     "repo_status", "repo_checks", "page_metadata", "page_links", "extract_document",
     "current_time", "hostname", "environment_summary", "local_subnets", "scan_subnet",
 }
@@ -95,6 +98,7 @@ _FACT_RULE_INTENTS = {
     "host_health": "host_state",
     "network_state": "network_state",
     "news_search": "news",
+    "market_quote": "market_price",
     "repo_status": "repository_state",
 }
 
@@ -225,6 +229,8 @@ def classify_request_intent(user_text: str) -> str:
         return "repository_state"
     if is_news_fact_request(text):
         return "news"
+    if not implementation and is_market_price_request(text):
+        return "market_price"
     return ""
 
 # Temporal qualifiers are deliberately stripped before a weather phrase is
@@ -443,7 +449,14 @@ def derive_task_frame(
             frame["entity"] = _clean_entity(tz.group(1))
         elif str(previous.get("intent") or "") == "current_time":
             frame["entity"] = str(previous.get("entity") or "")
-    return {key: value for key, value in frame.items() if value not in {"", None}}
+    elif intent == "market_price":
+        instruments = extract_market_instruments(text)
+        if not instruments and str(previous.get("intent") or "") == "market_price":
+            instruments = [str(item) for item in (previous.get("instruments") or []) if str(item)]
+        if instruments:
+            frame["instruments"] = instruments
+        frame["time_scope"] = "current"
+    return {key: value for key, value in frame.items() if value not in ("", None)}
 
 
 def is_task_continuation(user_text: str, previous_frame: dict[str, Any] | None = None) -> bool:
@@ -472,6 +485,8 @@ def is_task_continuation(user_text: str, previous_frame: dict[str, Any] | None =
     if previous_intent == "weather" and previous.get("entity") and not current.get("entity"):
         return True
     if previous_intent == "current_time" and previous.get("entity") and not current.get("entity"):
+        return True
+    if previous_intent == "market_price" and previous.get("instruments") and not current.get("instruments"):
         return True
     return False
 
@@ -520,6 +535,10 @@ def _scope_for_requirement(key: str, tool: str, text: str, frame: dict[str, Any]
         if frame.get("time_scope"):
             scope["time_scope"] = frame["time_scope"]
         scope["fact_type"] = "news"
+    if frame.get("intent") == "market_price" and tool == "market_quote":
+        if frame.get("instruments"):
+            scope["instruments"] = list(frame["instruments"])
+        scope["fact_type"] = "market_price"
     return scope
 
 
@@ -553,6 +572,13 @@ def _scope_matches(scope: dict[str, Any], arguments: Any, result_text: str = "")
     # Time scope is intentionally not required for browse_url: a verified page can
     # inherit the time scope from the linked search observation. Grounding performs
     # the stricter search->browse provenance check.
+    instruments = [str(item).lower() for item in (scope.get("instruments") or []) if str(item)]
+    if instruments:
+        actual = []
+        if isinstance(arguments, dict):
+            actual = [str(item).lower() for item in (arguments.get("instruments") or []) if str(item)]
+        if actual and not all(item in actual for item in instruments):
+            return False
     if scope.get("time_scope") and isinstance(arguments, dict) and "query" in arguments:
         expected = str(scope["time_scope"]).lower()
         temporal_tokens = [t for t in re.findall(r"[a-z0-9]+", expected) if len(t) > 2]

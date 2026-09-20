@@ -25,6 +25,7 @@ _REQUIRED_OVERRIDES = {
     "web_search": {"query"},
     "news_search": {"query"},
     "wiki_search": {"query"},
+    "market_quote": {"instruments"},
     "browse_url": {"url"},
     "geocode_location": {"query"},
     "weather_forecast": {"latitude", "longitude"},
@@ -53,6 +54,7 @@ _SCHEMA_OVERRIDES: dict[tuple[str, str], dict[str, Any]] = {
 
 _PARAMETER_HINTS = {
     "query": "Search query text.",
+    "instruments": "List of market instruments or explicit ticker/futures symbols to quote.",
     "topic": "Short topic/category label, or the research topic where applicable.",
     "fact": "Fact/text to store; supply the actual content rather than a placeholder.",
     "lines": "Maximum number of lines to return.",

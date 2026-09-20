@@ -1,25 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-create_alias() {
-  local alias="$1" source="$2"
-  local mf
-  mf="$(mktemp)"
-  trap 'rm -f "$mf"' RETURN
-  cat >"$mf" <<EOF
-FROM ${source}
-PARAMETER temperature 0.6
-PARAMETER top_p 0.95
-PARAMETER top_k 20
-EOF
-  ollama create "$alias" -f "$mf"
-  rm -f "$mf"
-  trap - RETURN
-}
+# Stable role aliases for the locally pulled base Qwen3.5 models.
+# `ollama cp` reuses the existing blobs instead of duplicating model storage.
+for alias in agent-main:4b agent-fast:2b agent-report:9b; do
+  ollama rm "$alias" >/dev/null 2>&1 || true
+done
 
-create_alias agent-report:9b 'hf.co/empero-ai/Qwen3.8-9B-Distill-GGUF:Q4_K_M'
-create_alias agent-main:4b   'hf.co/empero-ai/Qwen3.8-4B-Distill-GGUF:Q8_0'
-create_alias agent-fast:2b   'hf.co/empero-ai/Qwen3.8-2B-Distill-GGUF:Q4_K_M'
+ollama cp qwen3.5:4b agent-main:4b
+ollama cp qwen3.5:2b agent-fast:2b
+ollama cp qwen3.5:9b agent-report:9b
 
 printf '\nCreated aliases:\n'
 ollama list | grep -E '^(agent-report|agent-main|agent-fast):' || true

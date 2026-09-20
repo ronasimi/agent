@@ -126,6 +126,7 @@ _FACT_TOOL_INTENTS = {
     "weather_forecast": "weather",
     "news_search": "news",
     "wiki_search": "encyclopedic",
+    "market_quote": "market_price",
 }
 
 

@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from .task_requirements import classify_request_intent, derive_task_frame, is_implementation_request
+from .market import extract_market_instruments, is_market_price_request
 
 WEATHER_RECIPE_NAME = "weather.current_forecast"
 
@@ -85,6 +86,8 @@ def requested_fact_types(user_request: str, task_frame: dict[str, Any] | None = 
         result.add("repository_state")
     if frame.get("intent") == "news" or explicit_intent == "news" or (not implementation and _NEWS_REQUEST_RE.search(text)):
         result.add("news")
+    if frame.get("intent") == "market_price" or explicit_intent == "market_price" or (not implementation and is_market_price_request(text)):
+        result.add("market_price")
     if _WEB_FACT_REQUEST_RE.search(text) and not result and not implementation:
         result.add("web_fact")
     if not result and encyclopedic_lookup_query(text):
@@ -200,6 +203,11 @@ def classify_fact_types(tool_name: str, content: str) -> set[str]:
         payload = _json_payload(text)
         if isinstance(payload, dict) and str(payload.get("summary") or "").strip():
             result.add("encyclopedic")
+    if name == "market_quote":
+        payload = _json_payload(text)
+        quotes = payload.get("quotes") if isinstance(payload, dict) else None
+        if isinstance(quotes, list) and any(isinstance(item, dict) and isinstance(item.get("price"), (int, float)) for item in quotes):
+            result.add("market_price")
     if name == "browse_url" and text.strip():
         lowered = text.lower()
         browse_error = re.search(r"\b(?:404 not found|403 forbidden|access denied|page not found)\b", lowered)
@@ -633,6 +641,36 @@ def validate_fact_grounding(
             evidence["news"] = ["news_search"]
         else:
             missing.append("news")
+
+    if "market_price" in required:
+        turn_items = [
+            item for item in usable
+            if not current_turn_id or int(item.get("turn_id") or 0) == int(current_turn_id)
+        ]
+        expected = set(str(item).lower() for item in (frame.get("instruments") or extract_market_instruments(user_request)) if str(item))
+        matches = []
+        for item in turn_items:
+            if str(item.get("tool") or "").lower() != "market_quote" or "market_price" not in _fact_types(item):
+                continue
+            payload = _json_payload(str(item.get("content") or item.get("evidence_preview") or ""))
+            if not isinstance(payload, dict):
+                # Runtime observations may keep the original result outside content;
+                # arguments still prove the requested scope for legacy callers.
+                args = dict(item.get("arguments") or {})
+                actual_args = {str(x).lower() for x in (args.get("instruments") or []) if str(x)}
+                if expected and actual_args and not expected.issubset(actual_args):
+                    continue
+                matches.append(item)
+                continue
+            rows = [row for row in (payload.get("quotes") or []) if isinstance(row, dict) and isinstance(row.get("price"), (int, float))]
+            actual = {str(row.get("instrument") or "").lower() for row in rows}
+            if expected and not expected.issubset(actual):
+                continue
+            matches.append(item)
+        if matches:
+            evidence["market_price"] = ["market_quote"]
+        else:
+            missing.append("market_price")
 
     if "web_fact" in required:
         turn_items = [
