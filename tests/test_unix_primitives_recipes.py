@@ -358,10 +358,11 @@ def test_pipeline_treats_soft_tool_failure_as_recipe_failure(monkeypatch):
     assert "no_progress_result" in result["error"]
 
 
-def test_fast_model_keep_alive_uses_short_residency_ttl_in_config():
+def test_fast_model_keep_alive_is_indefinite_and_consistent_in_config():
     import yaml
     root = Path(__file__).resolve().parents[1]
     config = yaml.safe_load((root / "config" / "config.yaml").read_text(encoding="utf-8"))
-    assert config["agent"]["fast_model_keep_alive"] == "2m"
-    assert config["agent"]["tool_loop_validator"]["keep_alive"] == "2m"
-    assert config["worker"]["fast_model_keep_alive"] == "2m"
+    assert config["agent"]["fast_model_keep_alive"] == -1
+    assert config["agent"]["tool_loop_validator"]["keep_alive"] == -1
+    assert config["worker"]["fast_model_keep_alive"] == -1
+    assert config["agent"]["warmup"]["fast_model_prewarm"] is True

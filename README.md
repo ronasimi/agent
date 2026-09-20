@@ -26,15 +26,11 @@ You need:
 - a running Ollama server reachable from the host network
 - the models configured in `config/config.yaml`
 
-Create the stable role aliases after pulling the base Qwen3.5 models. If you
-enable semantic memory, also install the configured embedding model:
+Create the stable role aliases after pulling the base Qwen3.5 models:
 
 ```bash
 # Create the role aliases from already-pulled base Qwen3.5 models:
 ./scripts/create_ollama_aliases.sh
-
-# Needed when agent.semantic_memory_enabled is true:
-ollama pull nomic-embed-text
 ```
 
 The aliases map to:
@@ -227,13 +223,14 @@ prose. When enabled, audit sidecars are written next to the report as
 
 The worker also swaps Ollama residency around synthesis: it unloads the interactive
 and fast models before loading the report model, keeps the larger writer resident only
-for the report stage, then unloads it and restores the main foreground model. The fast
-role is intentionally not synchronously restored; it lazy-loads only when validator or
-research work actually needs it. The report model also has a finite keep-alive TTL as a
-crash-safety backstop. Foreground turns have priority; if a user turn arrives, the
-report worker yields and the interactive path evicts any lingering report model before
-loading the main model. This behavior is controlled by `agent.report_model`,
-`agent.report_options`, and `agent.report_restore_models_after_stage`.
+for the report stage, then unloads it and restores the main model. Only that main-model
+restore occurs inside the shared inference lock. The fast model is prewarmed afterward
+on a deduplicated maintenance thread during an idle window, so foreground work never
+queues behind the optional preload. The report model has a finite keep-alive TTL as a
+crash-safety backstop. If a user turn arrives, the report worker yields and the
+interactive path evicts any lingering report model before loading main. This behavior
+is controlled by `agent.report_model`, `agent.report_options`, and
+`agent.report_restore_models_after_stage`.
 
 ## Reminders and scheduled work
 
@@ -335,7 +332,7 @@ agent:
   model: "agent-main:4b"
   fast_model: "agent-fast:2b"
   report_model: "agent-report:9b"
-  fast_model_keep_alive: "2m"
+  fast_model_keep_alive: -1
   report_model_keep_alive: "10m"
   report_restore_models_after_stage: true
 
@@ -357,6 +354,7 @@ agent:
 
   warmup:
     enabled: true
+    fast_model_prewarm: true
     prime_system_prefix: false
 
   working_state:
@@ -383,7 +381,7 @@ agent:
     validator_fallback_max_tools: 12
 ```
 
-`fast_model_keep_alive: "2m"` keeps the 2B recovery/research model warm for clustered work. All 2B fast-role calls use the same 4096-token context so Ollama can reuse one runner instead of reloading it for validator versus research work. With `OLLAMA_MAX_LOADED_MODELS=2`, the 4B main and 2B fast roles can normally coexist. The worker explicitly evicts them before loading the 9B report writer; after report synthesis it restores only the 4B foreground model while holding the inference lock. The 2B role lazy-loads on its next real request so report cleanup cannot make an arriving user wait behind an unnecessary validator warm-up.
+`fast_model_keep_alive: -1` pins the canonical 4K fast runner after its first load. With `OLLAMA_MAX_LOADED_MODELS=2`, the 4B main and 2B fast roles can normally coexist. Startup warms main first and then schedules fast prewarming; report teardown restores main synchronously and schedules fast only after foreground inference is available again.
 
 ### Ollama server settings
 
@@ -505,10 +503,14 @@ The `.venv/` directory is intentionally not committed or packaged because Python
 Use the deployment-host benchmark to measure whether model-role changes actually improve the target machine:
 
 ```bash
-python scripts/benchmark_model_roles.py --runs 5 --report-runs 1
+python scripts/benchmark_model_roles.py --runs 20 --report-runs 1
 ```
 
-It records 4B time-to-first-visible-token (plus first model-token latency), 2B validator latency using the validator's effective context/options, 9B report throughput with thinking disabled exactly as in report synthesis, embedding availability/latency, and optional model residency transitions. Disabled semantic memory is reported without treating its embedding latency as a benchmark failure. Use `--skip-load-swap` when you do not want the benchmark to disturb current Ollama residency.
+It reports cold and warm 4B TTFT and 2B validator latency separately, includes every
+warm sample, records 9B throughput and residency snapshots, and issues a foreground
+main request while fast prewarming is in flight to expose server-level resource
+contention. Use `--skip-residency` when you do not want the benchmark to disturb
+current Ollama residency (`--skip-load-swap` remains a compatibility alias).
 
 ## Testing
 
@@ -533,7 +535,7 @@ python scripts/benchmark_harness.py
 Benchmark live Ollama model roles on the deployment host with:
 
 ```bash
-python scripts/benchmark_model_roles.py --runs 5 --report-runs 1
+python scripts/benchmark_model_roles.py --runs 20 --report-runs 1
 ```
 
 Simulate turns without an Ollama server. A scripted client replaces the model

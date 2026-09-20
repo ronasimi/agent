@@ -34,6 +34,7 @@ TOOL_LOOP_RESERVE = int(AGENT_CFG.get("context", {}).get("tool_loop_reserve_toke
 VOLATILE_CONTEXT_LAST = bool(AGENT_CFG.get("context", {}).get("volatile_blocks_last", True))
 WARMUP_CFG = AGENT_CFG.get("warmup", {})
 WARMUP_ENABLED = bool(WARMUP_CFG.get("enabled", True))
+WARMUP_FAST_MODEL = WARMUP_ENABLED and bool(WARMUP_CFG.get("fast_model_prewarm", True))
 WARMUP_PRIME_PREFIX = WARMUP_ENABLED and bool(WARMUP_CFG.get("prime_system_prefix", True))
 MAX_ITERATIONS = int(AGENT_CFG.get("max_iterations", 12))
 MAX_ITERATIONS_HARD = max(MAX_ITERATIONS, int(AGENT_CFG.get("max_iterations_hard", 32)))

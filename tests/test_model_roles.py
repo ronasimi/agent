@@ -16,9 +16,3 @@ def test_alias_helper_contains_only_generation_role_aliases():
     assert "qwen3.5:4b" in text
     assert "qwen3.5:2b" in text
     assert "qwen3.5:9b" in text
-
-
-def test_fast_role_uses_one_canonical_4k_runner_configuration():
-    cfg = load_config()["agent"]
-    assert cfg["fast_options"]["num_ctx"] == 4096
-    assert cfg["tool_loop_validator"]["options"]["num_ctx"] == 4096

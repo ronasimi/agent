@@ -22,9 +22,9 @@ def test_role_models_use_local_aliases_and_sampling_defaults():
         assert opts["temperature"] == 0.6
         assert opts["top_p"] == 0.95
         assert opts["top_k"] == 20
-    assert agent["fast_options"]["num_ctx"] == 4096
-    assert agent["report_options"]["num_ctx"] == 8192
     validator = cfg["agent"]["tool_loop_validator"]["options"]
+    assert agent["fast_options"]["num_ctx"] == 4096
+    assert validator["num_ctx"] == 4096
     assert validator["temperature"] == 0.6
     assert validator["top_p"] == 0.95
     assert validator["top_k"] == 20

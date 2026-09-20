@@ -21,7 +21,11 @@ from .slash_commands import SLASH_COMMANDS
 from .console import get_bottom_toolbar
 from .prompts import build_system_prompt
 from .model_protocol import warm_model_async
-from .state import FAST_MODEL, MAIN_OPTIONS, MAX_CTX, MODEL, OLLAMA, THINKING_DEFAULT, WARMUP_PRIME_PREFIX
+from .model_residency import schedule_fast_model_prewarm
+from .state import (
+    FAST_MODEL, MAIN_OPTIONS, MAX_CTX, MODEL, OLLAMA, THINKING_DEFAULT,
+    WARMUP_FAST_MODEL, WARMUP_PRIME_PREFIX,
+)
 from .turn_engine import handle_user_turn
 
 
@@ -66,10 +70,15 @@ def main() -> None:
     # Non-blocking: the prompt is usable immediately. Weight preloading is
     # reliable; optional prefix priming is disabled by default and should only
     # be enabled after cache telemetry shows that the backend reuses it.
+    def _main_warm_complete() -> None:
+        print('\n[System]: Main model loaded and pinned in VRAM.')
+        if WARMUP_FAST_MODEL:
+            schedule_fast_model_prewarm("startup")
+
     warm_model_async(
         OLLAMA, MODEL, options=MAIN_OPTIONS, keep_alive=-1,
         system_prompt=build_system_prompt() if WARMUP_PRIME_PREFIX else "",
-        on_success=lambda: print('\n[System]: Main model loaded and pinned in VRAM.'),
+        on_success=_main_warm_complete,
         on_error=lambda exc: print(f'\n[System]: Warning - failed to preload main model: {exc}'),
     )
     print('Commands: '+', '.join(command.name for command in __import__('al_agent.cli_commands',fromlist=['COMMANDS']).COMMANDS))

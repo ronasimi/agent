@@ -58,6 +58,11 @@ async def _lifespan(_app: FastAPI):
     """
     if agent_runtime.WARMUP_ENABLED:
         from al_agent.model_protocol import warm_model_async
+        from al_agent.model_residency import schedule_fast_model_prewarm
+
+        def _main_warm_complete() -> None:
+            if agent_runtime.WARMUP_FAST_MODEL:
+                schedule_fast_model_prewarm("startup")
 
         warm_model_async(
             agent_runtime.OLLAMA,
@@ -67,6 +72,7 @@ async def _lifespan(_app: FastAPI):
             system_prompt=(
                 agent_runtime.build_system_prompt() if agent_runtime.WARMUP_PRIME_PREFIX else ""
             ),
+            on_success=_main_warm_complete,
             on_error=lambda exc: print(f"[webui]: main-model warm-up skipped: {exc}"),
         )
     yield
