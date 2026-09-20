@@ -62,14 +62,15 @@ def _interactive_recent() -> bool:
         return False
 
 def _interactive_busy() -> bool:
-    """Return True while the frontend owns the interactive inference path."""
-    active = get_monitor_state("agent.interaction_active", False)
-    if isinstance(active, dict) and active.get("pid"):
-        try:
-            os.kill(int(active["pid"]), 0)
-            return True
-        except (OSError, ValueError, TypeError):
-            record_monitor_state("agent.interaction_active", False)
+    """Return True while a foreground turn is active *or waiting* for inference."""
+    for key in ("agent.interaction_active", "agent.interaction_waiting"):
+        active = get_monitor_state(key, False)
+        if isinstance(active, dict) and active.get("pid"):
+            try:
+                os.kill(int(active["pid"]), 0)
+                return True
+            except (OSError, ValueError, TypeError):
+                record_monitor_state(key, False)
     return _interactive_recent()
 
 def _ensure_interactive_idle() -> None:

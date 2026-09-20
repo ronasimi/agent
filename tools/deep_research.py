@@ -388,8 +388,14 @@ def deep_search_and_scrape(
     return json.dumps({"run_id": run_id, "query": query, "sources_added": added}, ensure_ascii=False, indent=2)
 
 
-def get_research_sources(run_id: str = "", source_ids: Optional[list[object]] = None) -> list[dict]:
-    """Return normalized persisted source records for a research run."""
+def get_research_sources(
+    run_id: str = "", source_ids: Optional[list[object]] = None, *, include_raw: bool = False
+) -> list[dict]:
+    """Return normalized persisted source records for a research run.
+
+    ``include_raw`` is reserved for the factuality/claim-ledger stage. Normal
+    callers intentionally avoid carrying full pages through memory.
+    """
     init_research_db()
     run_id = str(run_id or "legacy")
     requested = {_source_number(value) for value in (source_ids or [])}
@@ -397,7 +403,7 @@ def get_research_sources(run_id: str = "", source_ids: Optional[list[object]] = 
     with _connect() as conn:
         rows = conn.execute(
             """SELECT id, title, url, query, summary, evidence, limitations,
-                      image_candidates, retrieved_at
+                      image_candidates, retrieved_at, raw_content
                FROM research_buffer WHERE run_id=? ORDER BY id""",
             (run_id,),
         ).fetchall()
@@ -409,7 +415,7 @@ def get_research_sources(run_id: str = "", source_ids: Optional[list[object]] = 
             image_candidates = json.loads(row["image_candidates"] or "[]")
         except Exception:
             image_candidates = []
-        sources.append({
+        item = {
             "id": int(row["id"]),
             "source_id": f"S{row['id']}",
             "title": row["title"],
@@ -420,7 +426,10 @@ def get_research_sources(run_id: str = "", source_ids: Optional[list[object]] = 
             "limitations": json.loads(row["limitations"] or "[]"),
             "image_candidates": image_candidates if isinstance(image_candidates, list) else [],
             "retrieved_at": row["retrieved_at"],
-        })
+        }
+        if include_raw:
+            item["raw_content"] = row["raw_content"] or ""
+        sources.append(item)
     return sources
 
 

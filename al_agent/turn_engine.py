@@ -50,6 +50,7 @@ from .events import (
 )
 from .prompts import IMAGE_REGEX, append_and_save, build_memory_context, build_system_prompt, build_turn_capability_context, encode_image
 from .model_protocol import merge_stream_tool_calls, ollama_wire_messages, stream_with_preflight_retry, tool_result_message
+from .model_residency import evict_report_model_for_interactive
 from .state import *  # stable runtime configuration/service aliases
 from .turn_support import (
     _adaptive_iteration_limit, _add_recovery_schema, _bounded_tool_result_with_ref,
@@ -66,14 +67,30 @@ def handle_user_turn(
     turn_started = time.monotonic()
     answer_first_visible_at: float | None = None
     last_model_metrics: dict[str, Any] = {}
-    inference_lock = _acquire_inference_lock()
+    # Advertise foreground demand before blocking on the cross-process lock so
+    # a background report worker cannot repeatedly reacquire it between long
+    # 9B synthesis calls and starve an interactive turn.
+    record_monitor_state("agent.last_interaction", utc_now())
+    record_monitor_state("agent.interaction_waiting", {"pid": os.getpid(), "started_at": utc_now()})
+    try:
+        inference_lock = _acquire_inference_lock()
+    except Exception:
+        record_monitor_state("agent.interaction_waiting", False)
+        raise
     lock_acquired = time.monotonic()
+    record_monitor_state("agent.interaction_waiting", False)
     emit_event(
         "turn_start", content=user_input, thinking=bool(thinking_enabled),
         queue_wait_ms=(lock_acquired - turn_started) * 1000.0,
     )
-    record_monitor_state("agent.last_interaction", utc_now())
     record_monitor_state("agent.interaction_active", {"pid": os.getpid(), "started_at": utc_now()})
+    # A large /research writer may have been kept resident between background
+    # calls. We own the inference lock here, so evict it before Ollama loads the
+    # interactive model and avoid a transient over-budget three-model state.
+    try:
+        evict_report_model_for_interactive()
+    except Exception:
+        pass
     try:
         if refresh_history:
             system_message = messages[0] if messages and messages[0].get("role") == "system" else {"role": "system", "content": build_system_prompt()}
@@ -1506,6 +1523,7 @@ def handle_user_turn(
                 emit_fallback_recipe_save_prompt()
 
     finally:
+        record_monitor_state("agent.interaction_waiting", False)
         record_monitor_state("agent.interaction_active", False)
         total_turn_ms = (time.monotonic() - turn_started) * 1000.0
         turn_metrics = {

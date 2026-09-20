@@ -174,10 +174,13 @@ plan
   -> search/fetch/distill
   -> evaluate coverage
   -> fill evidence gaps
-  -> plan report
+  -> build source-verbatim claim ledger
+  -> plan report with dedicated report_model
   -> collect media
   -> write sections
-  -> assemble Markdown/PDF
+  -> factuality gate + bounded repair
+  -> write/audit front matter
+  -> assemble Markdown/PDF + audit sidecars
 ```
 
 Completed reports are written under:
@@ -187,6 +190,32 @@ workspace/research/
 ```
 
 Research jobs can survive process restarts because state and checkpoints are stored in SQLite.
+
+### Dedicated report model and factuality gate
+
+`/research` now separates source collection from long-form synthesis. Search planning,
+source distillation, and gap detection continue to use the small fast model, while the
+report stage uses the configurable `agent.report_model` (default:
+`tobestyledintro/qwen3.8-9b-distill:latest`). Before any prose is drafted, the report
+model builds a per-source claim ledger. Every retained claim must include a support
+excerpt that the harness verifies occurs in the fetched raw source text.
+
+Sections are written only from that verified ledger. Each generated section and the
+front matter then pass a structured factuality gate that checks for unsupported facts,
+citation mismatches, overstated causality, unattributed analysis, invented specifics,
+and source-scope errors. Failed passages receive bounded repair passes; sections that
+still fail degrade to a deterministic ledger-only form instead of shipping unsupported
+prose. When enabled, audit sidecars are written next to the report as
+`*.claims.json` and `*.factuality.json`.
+
+The worker also swaps Ollama residency around synthesis: it unloads the interactive
+and fast models before loading the report model, keeps the larger writer resident only
+for the report stage, then unloads it and restores the normal models. The report
+model also has a finite keep-alive TTL as a crash-safety backstop. Foreground turns
+have priority; if a user turn arrives, the report worker yields and the interactive path
+evicts any lingering report model before loading the main model. This behavior is
+controlled by `agent.report_model`, `agent.report_options`,
+`agent.report_restore_models_after_stage`, and `agent.report_restore_fast_model`.
 
 ## Reminders and scheduled work
 
@@ -281,9 +310,19 @@ Important defaults:
 
 ```yaml
 agent:
-  model: "qwen3.5:4b"
-  fast_model: "qwen3.5:2b"
+  model: "huihui_ai/qwen3.5-abliterated:4B"
+  fast_model: "huihui_ai/qwen3.5-abliterated:2B"
+  report_model: "tobestyledintro/qwen3.8-9b-distill:latest"
   fast_model_keep_alive: "2m"
+  report_model_keep_alive: "10m"
+  report_restore_models_after_stage: true
+  report_restore_fast_model: true
+
+  report_options:
+    num_ctx: 8192
+    temperature: 0.1
+    top_p: 0.85
+    top_k: 20
   thinking_default: false
   max_iterations: 12
   max_tools_per_turn: 12
@@ -307,7 +346,7 @@ agent:
 
   main_options:
     num_ctx: 16384
-    temperature: 0.4
+    temperature: 0.2
     top_p: 0.9
     top_k: 20
 

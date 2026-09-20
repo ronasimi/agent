@@ -6,6 +6,20 @@ agent:
   host: "http://127.0.0.1:11434"
   model: "huihui_ai/qwen3.5-abliterated:4B"
   fast_model: "huihui_ai/qwen3.5-abliterated:2B"
+
+  # Dedicated long-form research writer/verifier. /research uses this model
+  # only after source collection. The worker temporarily evicts the interactive
+  # and fast models while this larger model is resident, then restores them.
+  report_model: "tobestyledintro/qwen3.8-9b-distill:latest"
+  report_model_keep_alive: "10m"
+  report_options:
+    num_ctx: 8192
+    temperature: 0.1
+    top_p: 0.85
+    top_k: 20
+  report_restore_models_after_stage: true
+  report_restore_fast_model: true
+
   # Keep the small validator/research model warm briefly. Ollama will still
   # evict it under memory pressure, while repeated recovery steps avoid a cold load.
   fast_model_keep_alive: "2m"
@@ -215,6 +229,22 @@ research:
     section_num_predict: 1100
     overview_num_predict: 900
     include_key_findings: true
+
+    # Evidence contract for the dedicated report model. Claims are extracted
+    # from raw source text with exact support excerpts before drafting. Every
+    # generated section is then checked against that ledger and repaired before
+    # it can enter the final report.
+    factuality:
+      enabled: true
+      source_batch_size: 3
+      source_raw_chars: 7000
+      max_claims_per_source: 8
+      max_repair_passes: 2
+      claim_num_predict: 1400
+      gate_num_predict: 900
+      repair_num_predict: 1200
+      write_audit_sidecars: true
+
     images:
       enabled: true
       max_images: 3

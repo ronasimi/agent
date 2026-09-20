@@ -11,7 +11,13 @@ MONITOR_CFG = CONFIG.get("host_monitor", {})
 MODEL = AGENT_CFG.get("model", "qwen3.5:4b")
 FAST_MODEL = AGENT_CFG.get("fast_model", "qwen3.5:2b")
 FAST_MODEL_KEEP_ALIVE = AGENT_CFG.get("fast_model_keep_alive", 0)
+REPORT_MODEL = AGENT_CFG.get("report_model", MODEL)
+REPORT_MODEL_KEEP_ALIVE = AGENT_CFG.get("report_model_keep_alive", "10m")
 MAIN_OPTIONS = AGENT_CFG.get("main_options", {"num_ctx": 16384, "temperature": 0.4})
+FAST_OPTIONS = AGENT_CFG.get("fast_options", {"num_ctx": 8192, "temperature": 0.0})
+REPORT_OPTIONS = AGENT_CFG.get("report_options") or {"num_ctx": 8192, "temperature": 0.1, "top_p": 0.85, "top_k": 20}
+REPORT_RESTORE_MODELS = bool(AGENT_CFG.get("report_restore_models_after_stage", True))
+REPORT_RESTORE_FAST_MODEL = bool(AGENT_CFG.get("report_restore_fast_model", True))
 COMPACTION_MODEL = str(AGENT_CFG.get("compaction_model") or MODEL)
 _COMPACTION_OVERRIDES = AGENT_CFG.get("compaction_options") or dict(MAIN_OPTIONS)
 # Ollama keys a loaded runner by its context size, so requesting the *same*
