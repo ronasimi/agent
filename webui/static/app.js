@@ -3,8 +3,8 @@ const messagesEl=$('#messages'),promptEl=$('#prompt'),appShell=$('#appShell');
 let socket=null,activeTurn=null,assistantNode=null,activeUserMessageEl=null,attachments=[],workspacePath='',workspaceRows=[];
 let followOutput=true,slashCommands=[],slashMenuIndex=0;
 const artifactCards=new Map();
-const UI_STATE_KEYS={left:'agent.webui.leftSidebarCollapsed',right:'agent.webui.workspaceOpen',commandHistory:'agent.webui.commandHistory.v1',conversation:'agent.webui.activeConversation.v1'};
-let activeConversationId=localStorage.getItem(UI_STATE_KEYS.conversation)||'default';
+const UI_STATE_KEYS={left:'agent.webui.leftSidebarCollapsed',right:'agent.webui.workspaceOpen',commandHistory:'agent.webui.commandHistory.v1'};
+let activeConversationId='';
 const commandHistory=new CommandHistoryBuffer({storage:localStorage,key:UI_STATE_KEYS.commandHistory,limit:100});
 
 function setPromptValue(value,{history=false}={}){
@@ -111,10 +111,43 @@ async function loadTheme(){try{const t=await api('/api/theme');const c=t.colors|
 async function loadHealth(){const h=await api('/api/health');$('#mainModel').textContent=h.main_model;$('#fastModel').textContent=h.fast_model;$('#contextSize').textContent=(h.context/1024).toFixed(0)+'K';}
 function refreshProfileImage(){const avatar=document.querySelector('.agent-avatar'),img=$('#userProfileImage');if(!avatar||!img)return;img.onload=()=>avatar.classList.add('has-image');img.onerror=()=>avatar.classList.remove('has-image');img.src=`/api/profile-image?v=${Date.now()}`;}
 function conversationQuery(){return `conversation_id=${encodeURIComponent(activeConversationId)}`;}
+async function createFreshConversation(){
+  const created=await api('/api/conversations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+  activeConversationId=created.id;
+  return created;
+}
+async function activateConversation(conversationId){
+  if(activeTurn)return false;
+  activeConversationId=String(conversationId||'');
+  await Promise.all([loadHistory(),loadState()]);
+  showPanel('chat');
+  await loadConversations();
+  promptEl.focus();
+  return true;
+}
+async function deleteSavedConversation(row){
+  if(activeTurn)return;
+  const title=String(row?.title||'Conversation');
+  if(!window.confirm(`Delete "${title}"? This permanently removes its saved messages and state.`))return;
+  const deletingActive=row.id===activeConversationId;
+  const result=await api(`/api/conversations/${encodeURIComponent(row.id)}`,{method:'DELETE'});
+  if(!result?.ok)throw new Error('Conversation could not be deleted.');
+  if(deletingActive){
+    await createFreshConversation();
+    await Promise.all([loadHistory(),loadState()]);
+    showPanel('chat');
+  }
+  await loadConversations();
+  promptEl.focus();
+}
 async function loadConversations(){
   const rows=await api('/api/conversations');const host=$('#recentConversations');host.innerHTML='';
-  if(!rows.some(row=>row.id===activeConversationId)){activeConversationId=rows[0]?.id||'default';localStorage.setItem(UI_STATE_KEYS.conversation,activeConversationId);}
-  for(const row of rows){const btn=document.createElement('button');btn.className='recent-item';btn.dataset.panel='chat';btn.dataset.conversationId=row.id;btn.classList.toggle('active',row.id===activeConversationId);btn.title=row.title||'Conversation';btn.innerHTML=`<span>${esc(row.title||'Conversation')}</span>`;btn.onclick=async()=>{if(activeTurn)return;activeConversationId=row.id;localStorage.setItem(UI_STATE_KEYS.conversation,activeConversationId);await Promise.all([loadHistory(),loadState()]);showPanel('chat');await loadConversations();};host.appendChild(btn);}
+  for(const row of rows){
+    const wrap=document.createElement('div');wrap.className='recent-conversation';wrap.dataset.conversationId=row.id;
+    const btn=document.createElement('button');btn.type='button';btn.className='recent-item';btn.dataset.panel='chat';btn.dataset.conversationId=row.id;btn.classList.toggle('active',row.id===activeConversationId);btn.title=row.title||'Conversation';btn.innerHTML=`<span>${esc(row.title||'Conversation')}</span>`;btn.onclick=()=>activateConversation(row.id);
+    const del=document.createElement('button');del.type='button';del.className='recent-delete';del.title='Delete conversation';del.setAttribute('aria-label',`Delete ${row.title||'conversation'}`);del.textContent='×';del.onclick=async(e)=>{e.preventDefault();e.stopPropagation();try{await deleteSavedConversation(row);}catch(err){console.error(err);window.alert(err.message||String(err));}};
+    wrap.append(btn,del);host.appendChild(wrap);
+  }
 }
 async function loadHistory(){const rows=await api(`/api/history?${conversationQuery()}`);messagesEl.innerHTML='';artifactCards.clear();activeUserMessageEl=null;for(const m of rows){if(m.role==='user'||m.role==='assistant')addMessage(m.role,m.content);else if(m.role==='tool')addTool(m.name||'tool','history',m.content);}applyChatSearch();scrollBottom(true);}
 async function loadState(){$('#stateView').textContent=JSON.stringify(await api(`/api/state?${conversationQuery()}`),null,2);}
@@ -220,7 +253,7 @@ window.addEventListener('dragover',(ev)=>{if(fileDrag(ev))ev.preventDefault();})
 window.addEventListener('drop',(ev)=>{if(fileDrag(ev))ev.preventDefault();});
 messagesEl.addEventListener('scroll',updateScrollFollow,{passive:true});
 $('#scrollLatest').addEventListener('click',()=>scrollBottom(true));
-$('#newChat').addEventListener('click',async()=>{if(activeTurn)return;const created=await api('/api/conversations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});activeConversationId=created.id;localStorage.setItem(UI_STATE_KEYS.conversation,activeConversationId);await Promise.all([loadConversations(),loadHistory(),loadState()]);showPanel('chat');promptEl.focus();});
+$('#newChat').addEventListener('click',async()=>{if(activeTurn)return;await createFreshConversation();await Promise.all([loadConversations(),loadHistory(),loadState()]);showPanel('chat');promptEl.focus();});
 $('#refresh').addEventListener('click',()=>Promise.all([loadHistory(),loadState(),loadJobs(),loadReminders(),loadWorkspace(workspacePath)]));
 async function copyEntireChat(){
   const button=$('#copyChat');const original=button.textContent;
@@ -275,4 +308,13 @@ window.addEventListener('resize',()=>{
   }
 });
 refreshProfileImage();
-Promise.all([loadTheme(),loadHealth(),loadSlashCommands(),loadConversations(),loadHistory(),loadState(),loadJobs(),loadReminders(),loadWorkspace('')]).finally(()=>{connect();checkOnboarding();});
+async function bootstrapWebUi(){
+  // A page load always starts with a fresh thread. Existing conversations remain
+  // durable in the sidebar and are only reopened when the user explicitly clicks one.
+  await Promise.all([loadTheme(),loadHealth(),loadSlashCommands(),loadJobs(),loadReminders(),loadWorkspace('')]);
+  await createFreshConversation();
+  await Promise.all([loadConversations(),loadHistory(),loadState()]);
+  connect();
+  await checkOnboarding();
+}
+bootstrapWebUi().catch(err=>{console.error('Web UI bootstrap failed',err);setStatus('Startup failed','error');connect();});

@@ -69,3 +69,41 @@ def test_weather_renderer_enforces_next_week_horizon_and_provider_fields_only():
     assert "Humidity" not in rendered
     assert rendered.count("\n|") == 9  # header + separator + seven data rows
     assert is_simple_weather_request("What is the weather for the next week?") is True
+
+
+def test_weather_right_now_uses_current_conditions_and_not_daily_table():
+    result = {
+        "ok": True,
+        "result": {
+            "location": "London, Ontario, Canada",
+            "place": {"name": "London", "admin1": "Ontario", "country": "Canada"},
+            "forecast": {
+                "retrieved_at": "2026-09-19T23:56:20+00:00",
+                "timezone_abbreviation": "EDT",
+                "current": {
+                    "time": "2026-09-19T19:55",
+                    "temperature_2m": 18.4,
+                    "apparent_temperature": 17.8,
+                    "precipitation": 0.0,
+                    "weather_code": 3,
+                    "cloud_cover": 91,
+                    "wind_speed_10m": 8.2,
+                    "wind_direction_10m": 45,
+                    "wind_gusts_10m": 14.8,
+                },
+                "daily": {
+                    "time": ["2026-09-19", "2026-09-20"],
+                    "weather_code": [3, 2],
+                    "temperature_2m_max": [23, 24],
+                    "temperature_2m_min": [13, 14],
+                },
+            },
+        },
+    }
+    rendered = format_weather_recovery(result, "What is the weather right now?")
+    assert "Current weather for London, Ontario, Canada" in rendered
+    assert "Overcast, 18.4 °C" in rendered
+    assert "feels like 17.8 °C" in rendered
+    assert "8.2 km/h NE" in rendered
+    assert "| Date |" not in rendered
+    assert "2026-09-20" not in rendered

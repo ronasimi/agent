@@ -289,3 +289,35 @@ def test_profile_image_endpoint_uses_durable_user_picture(tmp_path, monkeypatch)
     response = server.profile_image()
     assert Path(response.path) == profile
     assert response.media_type == "image/png"
+
+
+def test_webui_saved_conversations_have_delete_control_and_refresh_starts_fresh():
+    root = Path(__file__).resolve().parents[1]
+    js = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
+    css = (root / "webui" / "static" / "style.css").read_text(encoding="utf-8")
+
+    assert "recent-delete" in js
+    assert "Delete conversation" in js
+    assert "method:'DELETE'" in js
+    assert "deleteSavedConversation" in js
+    assert ".recent-delete" in css
+    assert "async function bootstrapWebUi()" in js
+    assert "await createFreshConversation();" in js
+    assert "activeConversationId=localStorage.getItem" not in js
+
+
+def test_empty_placeholder_conversations_are_not_listed(tmp_path, monkeypatch):
+    from tools import memory
+
+    db = str(tmp_path / "conversation-list.db")
+    monkeypatch.setattr(memory, "DB_PATH", db)
+    memory.init_db()
+    assert all(row["id"] != "default" for row in memory.list_conversations())
+    fresh = memory.create_conversation()["id"]
+    assert all(row["id"] != fresh for row in memory.list_conversations())
+
+    memory._save_message_to_db({"role": "user", "content": "legacy thread"}, conversation_id="default")
+    assert any(row["id"] == "default" for row in memory.list_conversations())
+
+    assert memory.delete_conversation("default") is True
+    assert all(row["id"] != "default" for row in memory.list_conversations())

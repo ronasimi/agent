@@ -258,3 +258,37 @@ def test_weather_location_hint_survives_mixed_profile_and_memory_context():
 '''
     query = build_weather_query("What is the weather for the next week?", context)
     assert "London, Ontario, Canada" in query
+
+
+def test_weather_temporal_qualifiers_are_not_location_entities():
+    from tools.task_requirements import derive_task_frame
+
+    for request in (
+        "What is the weather right now?",
+        "What is the weather currently?",
+        "What is the weather this evening?",
+        "What is the weather at the moment?",
+    ):
+        frame = derive_task_frame(request)
+        assert frame["intent"] == "weather"
+        assert not frame.get("entity"), (request, frame)
+
+
+def test_weather_explicit_location_strips_trailing_right_now():
+    from tools.task_requirements import derive_task_frame
+
+    frame = derive_task_frame("What is the weather in London Ontario right now?")
+    assert frame["intent"] == "weather"
+    assert frame.get("entity") == "London Ontario"
+    assert frame.get("time_scope") == "now"
+
+
+def test_weather_right_now_falls_back_to_saved_profile_location(monkeypatch):
+    from tools.grounding import build_weather_query, _forecast_days_for_request
+    import tools.user_profile
+
+    monkeypatch.setattr(tools.user_profile, "get_user_location", lambda: "London, Ontario, Canada")
+    query = build_weather_query("What is the weather right now?", "")
+    assert "London, Ontario, Canada" in query
+    assert "Rightangle" not in query
+    assert _forecast_days_for_request("What is the weather right now?") == 1

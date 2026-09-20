@@ -156,8 +156,15 @@ def list_conversations(limit: int = 50) -> list[dict[str, Any]]:
         ).fetchall()
     result = []
     for row in rows:
-        first = " ".join(str(row["first_user"] or "").split())[:64]
         title = str(row["title"] or "").strip()
+        # Placeholder threads are created eagerly so the next user turn already
+        # has a stable conversation_id, but an untouched blank thread is not a
+        # saved conversation yet. Keep those placeholders out of the Recent list.
+        if int(row["last_message_id"] or 0) == 0 and (
+            row["id"] == DEFAULT_CONVERSATION_ID or title in {"", "New conversation", "Current conversation"}
+        ):
+            continue
+        first = " ".join(str(row["first_user"] or "").split())[:64]
         if not title or title in {"New conversation", "Current conversation"}:
             title = first or title or "Conversation"
         result.append({

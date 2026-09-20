@@ -169,6 +169,73 @@ _WMO_DESCRIPTIONS = {
 }
 
 
+
+
+_CURRENT_WEATHER_RE = re.compile(
+    r"\b(?:right\s+now|now|currently|current\s+(?:weather|conditions?))\b|\bat\s+the\s+moment\b",
+    re.I,
+)
+
+
+def _is_current_weather_request(user_request: str) -> bool:
+    return bool(_CURRENT_WEATHER_RE.search(str(user_request or "")))
+
+
+def _wind_direction_label(value: Any) -> str:
+    try:
+        degrees = float(value) % 360.0
+    except (TypeError, ValueError):
+        return ""
+    labels = ("N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+              "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW")
+    return labels[int((degrees + 11.25) // 22.5) % 16]
+
+
+def _canonical_place(place: Any, fallback: str = "") -> str:
+    if isinstance(place, dict):
+        parts = [
+            str(place.get("name") or "").strip(),
+            str(place.get("admin1") or "").strip(),
+            str(place.get("country") or "").strip(),
+        ]
+        canonical = ", ".join(part for index, part in enumerate(parts) if part and part not in parts[:index])
+        if canonical:
+            return canonical
+    return str(fallback or "").strip()
+
+
+def _format_current_weather(forecast: dict[str, Any], location: str) -> str:
+    current = forecast.get("current") or {}
+    if not isinstance(current, dict) or not current:
+        return ""
+    try:
+        code = int(current.get("weather_code"))
+    except (TypeError, ValueError):
+        code = -1
+    condition = _WMO_DESCRIPTIONS.get(code, f"Weather code {code}" if code >= 0 else "Current conditions")
+    temperature = _fmt_number(current.get("temperature_2m"), " °C", 1)
+    apparent = _fmt_number(current.get("apparent_temperature"), " °C", 1)
+    precip = _fmt_number(current.get("precipitation"), " mm", 1)
+    wind = _fmt_number(current.get("wind_speed_10m"), " km/h", 1)
+    gusts = _fmt_number(current.get("wind_gusts_10m"), " km/h", 1)
+    direction = _wind_direction_label(current.get("wind_direction_10m"))
+    cloud = _fmt_number(current.get("cloud_cover"), "%")
+    observed = str(current.get("time") or "").replace("T", " ")
+    retrieved = str(forecast.get("retrieved_at") or "").replace("T", " ")[:25]
+
+    lines = [f"**Current weather for {location or 'the requested location'}**", "", f"**{condition}, {temperature}**"]
+    if apparent != "—":
+        lines[-1] += f" (feels like {apparent})"
+    lines.extend([
+        f"- **Precipitation:** {precip}",
+        f"- **Wind:** {wind}{f' {direction}' if direction else ''}{f', gusting to {gusts}' if gusts != '—' else ''}",
+        f"- **Cloud cover:** {cloud}",
+    ])
+    if observed:
+        lines.append(f"- **Observed:** {observed} {str(forecast.get('timezone_abbreviation') or '').strip()}".rstrip())
+    lines.extend(["", f"Source: Open-Meteo. Retrieved {retrieved} UTC.".rstrip()])
+    return "\n".join(lines)
+
 def _fmt_number(value: Any, suffix: str = "", digits: int = 0) -> str:
     if value is None or value == "":
         return "—"
@@ -239,13 +306,15 @@ def format_weather_recovery(result: dict[str, Any], user_request: str) -> str:
     location = str(payload.get("location") or "").strip()
     if not isinstance(forecast, dict):
         return ""
+    location = _canonical_place(place, location)
+    if _is_current_weather_request(user_request):
+        current_rendered = _format_current_weather(forecast, location)
+        if current_rendered:
+            return current_rendered
+
     rows = _requested_daily_rows(_daily_rows(forecast), user_request)
     if not rows:
         return ""
-    if isinstance(place, dict):
-        parts = [str(place.get("name") or "").strip(), str(place.get("admin1") or "").strip(), str(place.get("country") or "").strip()]
-        canonical = ", ".join(part for index, part in enumerate(parts) if part and part not in parts[:index])
-        location = canonical or location
     title = f"**Weather forecast for {location or 'the requested location'}**"
     lines = [title, "", "| Date | Conditions | High | Low | Precip. chance | Precip. | Wind | Gusts |", "|---|---|---:|---:|---:|---:|---:|---:|"]
     for row in rows:

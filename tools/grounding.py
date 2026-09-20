@@ -699,7 +699,7 @@ def _weather_location(user_request: str, memory_context: str = "") -> str:
 def _forecast_days_for_request(user_request: str) -> int:
     """Return a bounded provider horizon that fully covers the requested period."""
     text = str(user_request or "").lower()
-    if re.search(r"\b(?:today|tonight|this (?:morning|afternoon|evening))\b", text):
+    if re.search(r"\b(?:today|tonight|now|currently|right now|this (?:morning|afternoon|evening))\b|\bat the moment\b", text):
         return 1
     if re.search(r"\btomorrow\b", text):
         return 2  # provider includes today

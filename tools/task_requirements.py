@@ -99,12 +99,32 @@ _TEMPORAL_RE = re.compile(
     r"\b(today|tomorrow|tonight|now|current|this (?:morning|afternoon|evening|week|weekend)|next (?:\d+ )?(?:hours?|days?|week|weekend)|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b",
     re.I,
 )
-_LOCATION_STOP = {"the", "weather", "forecast", "today", "tomorrow", "tonight", "now", "current", "please", "like"}
+_LOCATION_STOP = {"the", "weather", "forecast", "today", "tomorrow", "tonight", "now", "current", "currently", "please", "like"}
+
+# Temporal qualifiers are deliberately stripped before a weather phrase is
+# allowed to become a location candidate.  This prevents prompts such as
+# "weather right now" from geocoding "right" (which can resolve to a real
+# place) instead of falling back to the user's declared location.
+_WEATHER_TEMPORAL_QUALIFIER_RE = re.compile(
+    r"(?:"
+    r"\bright\s+now\b|"
+    r"\bat\s+the\s+moment\b|\bthe\s+moment\b|\bat\s+present\b|\bpresent\b|"
+    r"\bcurrently\b|\bcurrent(?:ly)?\b|"
+    r"\b(?:today|tomorrow|tonight|now)\b|"
+    r"\bthis\s+(?:morning|afternoon|evening|week|weekend)\b|"
+    r"\bnext\s+(?:\d+\s+)?(?:hours?|days?|week|weekend)\b|"
+    r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|"
+    r"\bat\s+\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?\b"
+    r")",
+    re.I,
+)
 
 
 def _clean_entity(value: str) -> str:
     text = re.sub(r"[?!.;,]+$", "", str(value or "").strip())
-    text = re.split(r"\b(?:today|tomorrow|tonight|now|this week|next week|next \d+ days?|current)\b", text, maxsplit=1, flags=re.I)[0]
+    match = _WEATHER_TEMPORAL_QUALIFIER_RE.search(text)
+    if match:
+        text = text[:match.start()]
     return re.sub(r"\s+", " ", text).strip(" ,:-")[:180]
 
 
