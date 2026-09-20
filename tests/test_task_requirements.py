@@ -1,4 +1,7 @@
-from tools.task_requirements import TaskRequirementLedger, is_evidence_reuse_request, is_followup_request
+from tools.task_requirements import (
+    TaskRequirementLedger, build_news_query, derive_task_frame, is_evidence_reuse_request,
+    is_followup_request, is_task_continuation,
+)
 from tools.turn_policy import derive_turn_tool_policy
 
 
@@ -119,3 +122,27 @@ def test_local_network_scan_has_deterministic_discovery_requirements():
         "scan the local network and subnets for hosts, then compile a list of hosts"
     )
     assert {"local_subnets", "scan_subnet"} <= set(ledger.required_tools())
+
+
+def test_live_fact_prompts_are_distinct_from_implementation_prompts():
+    pairs = (
+        ("What is the weather in London ON?", "Refactor the weather validator and update its tests", "weather"),
+        ("What time is it?", "Fix the current time tool", "current_time"),
+        ("What are the latest headlines in London ON?", "Debug the latest-headlines formatter", "news"),
+    )
+    for live_prompt, implementation_prompt, expected in pairs:
+        assert derive_task_frame(live_prompt).get("intent") == expected
+        assert derive_task_frame(implementation_prompt).get("intent") is None
+        assert TaskRequirementLedger.from_request(implementation_prompt).required_tools() == []
+
+
+def test_local_news_followup_inherits_location_but_topical_news_does_not():
+    first = derive_task_frame("What are the latest headlines in London ON?")
+    assert first["entity"] == "London, Ontario, Canada"
+    assert is_task_continuation("What are the latest local headlines?", first) is True
+    followup = derive_task_frame("What are the latest local headlines?", first)
+    assert followup["entity"] == first["entity"]
+    assert build_news_query("What are the latest local headlines?", followup) == (
+        "London, Ontario, Canada local latest news"
+    )
+    assert is_task_continuation("What are the latest AI headlines?", first) is False

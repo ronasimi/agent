@@ -3026,10 +3026,16 @@ BUILTIN_MANIFEST = [{'module': 'memory',
   'function': 'news_search',
   'schema': {'type': 'function',
              'function': {'name': 'news_search',
-                          'description': 'Search current news and return bounded structured headline metadata.',
+                          'description': 'Search current news and return bounded, optionally location-scoped '
+                                         'headlines.',
                           'parameters': {'type': 'object',
                                          'properties': {'query': {'type': 'string',
                                                                   'description': 'Search query text.'},
+                                                        'location': {'type': 'string',
+                                                                     'description': 'Canonical city/region/country '
+                                                                                    'scope used to disambiguate '
+                                                                                    'location-sensitive results.',
+                                                                     'default': ''},
                                                         'timelimit': {'type': 'string',
                                                                       'default': 'd',
                                                                       'enum': ['', 'd', 'w', 'm']},

@@ -44,6 +44,17 @@ def test_successful_completed_readonly_repeat_is_suppressed_when_work_remains():
     assert any("redundant completed requirement" in note for note in notes)
 
 
+def test_successful_completed_readonly_repeat_is_suppressed_after_all_work_finishes():
+    ledger = TaskRequirementLedger.from_request("What time is it?")
+    ledger.record_tool("current_time", status="ok", fingerprint="time-one")
+    repeated = _call("current_time")
+    calls, notes = _suppress_completed_requirement_calls(
+        [repeated], ledger, {tool_call_signature(repeated)}, "What time is it?"
+    )
+    assert calls == []
+    assert any("redundant completed requirement" in note for note in notes)
+
+
 def test_fallback_finalizer_preserves_latest_media(monkeypatch):
     import agent
 

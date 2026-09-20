@@ -318,6 +318,21 @@ def test_tool_selection_context_ignores_prior_assistant_capability_suggestions()
     assert "Weather answer" not in context
 
 
+def test_fact_tool_schemas_are_pruned_for_similar_implementation_prompt():
+    from al_agent.turn_support import _prune_mismatched_fact_tools
+
+    schemas = [
+        {"function": {"name": "weather_forecast"}},
+        {"function": {"name": "geocode_location"}},
+        {"function": {"name": "read_file"}},
+    ]
+    changed = _prune_mismatched_fact_tools(
+        schemas, {}, "Refactor the weather validator and update its tests"
+    )
+    assert changed is True
+    assert [schema["function"]["name"] for schema in schemas] == ["read_file"]
+
+
 def test_prompt_policy_leak_guard_detects_runtime_policy_but_not_normal_tool_discussion():
     from al_agent.turn_support import _looks_like_prompt_policy_leak
 

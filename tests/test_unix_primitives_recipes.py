@@ -161,6 +161,33 @@ def test_candidate_is_expired_by_unrelated_response(tmp_path, monkeypatch):
     assert pending_candidate() is None
 
 
+def test_recipe_confirmation_does_not_steal_artifact_save_request(tmp_path, monkeypatch):
+    _set_recipe_db(tmp_path, monkeypatch)
+    from tools.recipe_learning import maybe_create_recipe_candidate, handle_recipe_confirmation
+    trace = [
+        {"tool": "resolve_host", "args": {"host": "example.com"}, "success": True, "readonly": True},
+        {"tool": "tcp_connect", "args": {"host": "example.com", "port": 443}, "success": True, "readonly": True},
+    ]
+    assert maybe_create_recipe_candidate("connectivity test", trace, 2)
+    handled, reply = handle_recipe_confirmation("yes save it as report.md")
+    assert handled is False and reply == ""
+
+
+def test_builtin_weather_workflow_is_not_suggested_as_duplicate_recipe(tmp_path, monkeypatch):
+    _set_recipe_db(tmp_path, monkeypatch)
+    from tools.recipe_learning import maybe_create_recipe_candidate
+    trace = [
+        {"tool": "geocode_location", "args": {"query": "London ON"}, "success": True, "readonly": True},
+        {
+            "tool": "weather_forecast",
+            "args": {"latitude": 42.98, "longitude": -81.23, "forecast_days": 7},
+            "success": True,
+            "readonly": True,
+        },
+    ]
+    assert maybe_create_recipe_candidate("weather for London ON", trace, 2) is None
+
+
 def test_recipe_selector_bundle():
     from tools import load_tools, select_tool_schemas
     load_tools()

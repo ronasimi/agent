@@ -107,6 +107,7 @@ _PARAMETER_HINTS = {
     "tool_name": "Custom tool name.",
     "specification": "Natural-language specification for the custom tool.",
     "context": "Short context explaining what should be inspected or why.",
+    "location": "Canonical city/region/country scope used to disambiguate location-sensitive results.",
     "sort_by": "Sort mode accepted by this tool.",
     "include_command": "Whether to include a bounded, redacted process command line.",
     "state": "Optional connection-state filter.",

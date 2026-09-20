@@ -53,6 +53,12 @@ def build_candidate(objective: str, trace: list[dict[str, Any]]) -> tuple[list[d
 def maybe_create_recipe_candidate(objective: str, trace: list[dict[str, Any]], min_stages: int = 2) -> dict[str, Any] | None:
     stages,params=build_candidate(objective,trace)
     if len(stages)<max(1,int(min_stages)):return None
+    stage_tools = [str(stage.get("tool") or "") for stage in stages]
+    # The harness already ships and versions this workflow as
+    # ``weather.current_forecast``. Do not ask the user to save a duplicate just
+    # because a model happened to issue its component primitives manually.
+    if "geocode_location" in stage_tools and "weather_forecast" in stage_tools:
+        return None
     if recipe_exists_for_task(objective,stages):return None
     tools=[s["tool"] for s in stages]
     cid=create_candidate(objective,stages,params,tags=tools[:8])
@@ -70,7 +76,7 @@ def handle_recipe_confirmation(text: str) -> tuple[bool,str]:
     """Handle a direct yes/no response to a harness recipe-save prompt."""
     if not pending_candidate():return False,""
     normalized=re.sub(r"\s+"," ",str(text).strip().lower())
-    named = re.match(r"^(?:yes[, ]+)?save (?:it|this recipe)(?: as)?\s+(.+)$", normalized)
+    named = re.match(r"^(?:yes[, ]+)?save (?:this )?recipe as\s+(.+)$", normalized)
     if named:
         recipe=save_pending_candidate(name=named.group(1).strip()[:80])
         if not recipe:return True,"No pending recipe was available to save."

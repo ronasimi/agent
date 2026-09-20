@@ -15,6 +15,7 @@ def _at(dt):
 def test_weather_request_is_fact_grounded_but_unrelated_request_is_not_gated():
     assert requested_fact_types("What's the weather in London Ontario now?") == {"weather"}
     assert requested_fact_types("Explain how HTTP caching works") == set()
+    assert requested_fact_types("Check network status") == {"network_state"}
 
 
 def test_current_time_only_is_missing_weather_evidence():

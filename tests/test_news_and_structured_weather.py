@@ -2,7 +2,8 @@ import json
 
 from tools.grounding import make_observation, requested_fact_types, validate_fact_grounding
 from tools.weather import format_weather_recovery, is_simple_weather_request
-from tools.web import format_news_results, is_simple_headline_request
+from tools.task_requirements import build_news_query, derive_task_frame
+from tools.web import _location_scoped_news_rows, format_news_results, is_simple_headline_request
 
 
 def test_latest_headlines_require_news_grounding():
@@ -15,6 +16,8 @@ def test_latest_headlines_require_news_grounding():
 
 def test_news_search_observation_satisfies_latest_headlines():
     req = "what are the latest headlines for London ON"
+    frame = derive_task_frame(req)
+    query = build_news_query(req, frame)
     content = json.dumps([{
         "date": "2026-09-19T19:00:00+00:00",
         "title": "Local headline",
@@ -22,8 +25,11 @@ def test_news_search_observation_satisfies_latest_headlines():
         "snippet": "Story summary",
         "source": "Example News",
     }])
-    obs = make_observation("news_search", content, turn_id=7, arguments={"query": req})
-    report = validate_fact_grounding(req, [obs], current_turn_id=7)
+    obs = make_observation(
+        "news_search", content, turn_id=7,
+        arguments={"query": query, "location": frame["entity"]},
+    )
+    report = validate_fact_grounding(req, [obs], current_turn_id=7, task_frame=frame)
     assert report["grounded"] is True
     assert report["evidence"]["news"] == ["news_search"]
 
@@ -37,6 +43,46 @@ def test_news_renderer_only_uses_returned_rows():
     assert "One" in rendered and "Two" in rendered
     assert "example.com/1" in rendered and "example.com/2" in rendered
     assert is_simple_headline_request("latest headlines for London ON") is True
+    assert is_simple_headline_request("Fix the latest-headlines formatter") is False
+
+
+def test_news_grounding_rejects_wrong_location_query():
+    req = "what are the latest headlines for London ON"
+    frame = derive_task_frame(req)
+    content = json.dumps([{
+        "title": "London headline", "url": "https://example.co.uk/story",
+        "source": "London News", "snippet": "London story",
+    }])
+    wrong = make_observation(
+        "news_search", content, turn_id=7,
+        arguments={"query": "London UK latest news", "location": "London, United Kingdom"},
+    )
+    report = validate_fact_grounding(req, [wrong], current_turn_id=7, task_frame=frame)
+    assert report["grounded"] is False
+    assert report["missing_fact_types"] == ["news"]
+
+
+def test_location_scoped_news_filter_rejects_similar_city_noise():
+    rows = [
+        {
+            "title": "Man Utd XI vs Fulham", "url": "https://standard.co.uk/sport/story",
+            "source": "London Evening Standard", "snippet": "",
+        },
+        {
+            "title": "Game scheduled in London", "url": "https://sports.yahoo.com/story",
+            "source": "Yahoo Sports", "snippet": "",
+        },
+        {
+            "title": "Council approves housing plan", "url": "https://lfpress.com/news/local/council",
+            "source": "London Free Press", "snippet": "",
+        },
+        {
+            "title": "London police issue update", "url": "https://cbc.ca/news/canada/london/update",
+            "source": "CBC News", "snippet": "Ontario investigation",
+        },
+    ]
+    filtered = _location_scoped_news_rows(rows, "London ON")
+    assert [row["source"] for row in filtered] == ["CBC News", "London Free Press"]
 
 
 def test_weather_renderer_enforces_next_week_horizon_and_provider_fields_only():

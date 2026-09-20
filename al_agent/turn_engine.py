@@ -32,11 +32,11 @@ from tools.pipeline import execute_pipeline
 from tools.recipe_store import check_recipes_for_task, render_recipe_preflight
 from tools.runtime import record_monitor_state, utc_now
 from tools.task_requirements import (
-    TaskRequirementLedger, derive_task_frame, effective_request_for_frame,
-    is_evidence_reuse_request, is_followup_request,
+    TaskRequirementLedger, build_news_query, derive_task_frame, effective_request_for_frame,
+    is_evidence_reuse_request, is_task_continuation, news_region_for_frame,
 )
 from tools.turn_policy import derive_turn_tool_policy
-from tools.user_profile import get_relevant_user_prompt_context
+from tools.user_profile import get_relevant_user_prompt_context, get_user_location
 from tools.weather import format_weather_recovery, is_simple_weather_request
 from tools.web import (
     format_encyclopedia_result, format_news_results,
@@ -58,7 +58,7 @@ from .turn_support import (
     _recover_textual_readonly_tool_call,
     _prune_compacted_history, _queue_compaction_if_needed, _refresh_requirement_tool_schemas,
     _sanitize_tool_call_batch, _suppress_completed_requirement_calls, _tool_status_prefix,
-    _looks_like_prompt_policy_leak, _selection_context_for_turn,
+    _looks_like_prompt_policy_leak, _prune_mismatched_fact_tools, _selection_context_for_turn,
 )
 
 def handle_user_turn(
@@ -123,13 +123,26 @@ def handle_user_turn(
         current_turn_id = int(msg.get("_db_id") or 0)
 
         system_prompt = build_system_prompt()
+        previous_working_state = WORKING_STATE.load() if WORKING_STATE_ENABLED else {}
+        previous_frame = dict(previous_working_state.get("task_frame") or {})
+        continuation = is_task_continuation(user_input, previous_frame)
+        try:
+            default_location = get_user_location()
+        except Exception:
+            default_location = ""
+        task_frame = derive_task_frame(
+            user_input,
+            previous_frame if continuation else {},
+            default_location=default_location,
+        )
+        effective_request = effective_request_for_frame(user_input, task_frame)
+        required_fact_types = requested_fact_types(user_input, task_frame=task_frame) if GROUNDING_ENABLED else set()
         # Tool selection must not be contaminated by the assistant's prior prose.
         # Recommendations such as "system monitoring" or phrases such as "local
         # environment" can otherwise expose unrelated host/time tools on the next
         # independent turn.  Only genuine referential continuations receive a tiny
         # slice of prior *user* intent as selection context.
-        continuation = is_followup_request(user_input)
-        recent_selection_context = _selection_context_for_turn(messages, user_input)
+        recent_selection_context = _selection_context_for_turn(messages, user_input, continuation)
         recipe_preflight = {
             "status": "disabled", "checked": False, "candidates": [], "relevant": [], "error": "",
         }
@@ -151,11 +164,6 @@ def handle_user_turn(
                 f"\nSaved recipe match: {relevant_recipe['name']} - {relevant_recipe['description']}"
             )
         evidence_reuse_request = is_evidence_reuse_request(user_input)
-        previous_working_state = WORKING_STATE.load() if WORKING_STATE_ENABLED else {}
-        previous_frame = (previous_working_state.get("task_frame") or {}) if continuation else {}
-        task_frame = derive_task_frame(user_input, previous_frame)
-        effective_request = effective_request_for_frame(user_input, task_frame)
-        required_fact_types = requested_fact_types(user_input, task_frame=task_frame) if GROUNDING_ENABLED else set()
         if not continuation:
             previous_working_state = {}
         prior_evidence_refs = [
@@ -172,6 +180,7 @@ def handle_user_turn(
             max_tools=selection_limit,
             context_text=recent_selection_context,
         )
+        _prune_mismatched_fact_tools(selected_tool_schemas, task_frame, user_input)
         turn_tool_policy = derive_turn_tool_policy(user_input, set(AVAILABLE_TOOLS_MAP), TOOL_METADATA)
         turn_tool_policy.allow_explicit_requirements(set(required_tools), TOOL_METADATA)
         tool_schemas = turn_tool_policy.filter_schemas(selected_tool_schemas, TOOL_METADATA)
@@ -662,6 +671,9 @@ def handle_user_turn(
             elif success:
                 record_local_grounding(name, result_content, status, normalized)
             if success:
+                signature = tool_call_signature({"function": {"name": name, "arguments": normalized}})
+                seen_tool_calls.add(signature)
+                successful_readonly_signatures.add(signature)
                 if name == "news_search":
                     last_news_search_content = result_content
                 elif name == "wiki_search":
@@ -698,7 +710,9 @@ def handle_user_turn(
                 "network_state": ("network_snapshot", {}),
                 "repository_state": ("repo_status", {}),
             }
-            for fact_type in list(missing):
+            for fact_type in ("current_time", "host_state", "network_state", "repository_state"):
+                if fact_type not in missing:
+                    continue
                 spec = direct.get(fact_type)
                 if spec is not None:
                     _record_harness_recovery_tool(spec[0], spec[1], trigger=f"pre_generation:{fact_type}")
@@ -709,11 +723,18 @@ def handle_user_turn(
             # list headlines.
             report = grounding_report()
             if "news" in set(report.get("missing_fact_types") or []):
-                lower_request = effective_request.lower()
-                region = "ca-en" if any(token in lower_request for token in (" ontario", " canada", " on ", "london on")) else "us-en"
+                news_location = str(task_frame.get("entity") or default_location or "")
+                news_query = build_news_query(user_input, task_frame, default_location)
+                region = news_region_for_frame(task_frame, default_location)
                 _record_harness_recovery_tool(
                     "news_search",
-                    {"query": effective_request, "timelimit": "d", "region": region, "max_results": 8},
+                    {
+                        "query": news_query,
+                        "location": news_location,
+                        "timelimit": "d",
+                        "region": region,
+                        "max_results": 8,
+                    },
                     trigger="pre_generation:news",
                 )
 
@@ -756,6 +777,23 @@ def handle_user_turn(
 
         attempt_initial_grounding_recovery()
 
+        # Harness-owned pre-grounding runs before the first model request, so
+        # pruning requirements it already satisfied has no KV-cache penalty. It
+        # also prevents the model from immediately repeating current_time/host/
+        # network/repository lookups whose evidence is already in the turn tail.
+        if _refresh_requirement_tool_schemas(
+            tool_schemas,
+            requirement_ledger,
+            turn_tool_policy,
+            minimize_churn=False,
+        ):
+            if WORKING_STATE_ENABLED:
+                WORKING_STATE.update_tools(tool_schemas)
+                WORKING_STATE.update_requirements(requirement_ledger.as_list())
+            else:
+                shared_context.update_tools(tool_schemas)
+            turn_prefix, tool_prompt_tokens = rebuild_prefix()
+
         # Structured fact fast paths avoid spending a generation on mechanical
         # reshaping and prevent small models from inventing rows/fields that are
         # absent from the provider payload. More analytical weather/news requests
@@ -773,7 +811,11 @@ def handle_user_turn(
                 return
 
         if required_fact_types == {"news"} and last_news_search_content and is_simple_headline_request(user_input):
-            deterministic = format_news_results(last_news_search_content, limit=6)
+            deterministic = format_news_results(
+                last_news_search_content,
+                limit=6,
+                location=str(task_frame.get("entity") or ""),
+            )
             if deterministic and grounding_report().get("grounded", False):
                 assistant_reply = {"role": "assistant", "content": deterministic}
                 append_and_save(messages, assistant_reply)
@@ -1311,6 +1353,7 @@ def handle_user_turn(
             attached_from: list[str] = []
             post_validator_blocked: list[str] = []
             iteration_progress = False
+            terminal_schema_changed = False
             for call in tool_calls:
                 name = call["function"]["name"]
                 raw_args = call["function"].get("arguments", {})
@@ -1369,6 +1412,19 @@ def handle_user_turn(
                 reason = str(outcome.get("reason") or ("ok" if success else "tool_error"))
                 if error_reason and not success:
                     reason = error_reason
+                if not success and reason == "tool_unavailable":
+                    turn_tool_policy.blocked.add(name)
+                    before_count = len(tool_schemas)
+                    tool_schemas[:] = [
+                        schema for schema in tool_schemas
+                        if str(schema.get("function", {}).get("name") or "") != name
+                    ]
+                    terminal_schema_changed = terminal_schema_changed or len(tool_schemas) != before_count
+                    requirement_ledger.mark_blocked(name, "tool backend unavailable for this turn")
+                    append_control_note(
+                        f"[Harness terminal tool failure] {name} reported that its backend is unavailable. "
+                        "Do not retry this tool with different or missing arguments; report the backend blocker accurately."
+                    )
                 result_with_status = _tool_status_prefix(success, reason, outcome_status) + "\n" + result_content
                 result_text, observation_id = _bounded_tool_result_with_ref(name, result_with_status)
                 print(f"  \033[90m{result_text[:300].replace(chr(10), ' ')}{'...' if len(result_text) > 300 else ''}\033[0m")
@@ -1495,12 +1551,12 @@ def handle_user_turn(
             if WORKING_STATE_ENABLED:
                 WORKING_STATE.update_tools(tool_schemas)
                 WORKING_STATE.update_requirements(requirement_ledger.as_list())
-            elif policy_changed or schemas_changed:
+            elif policy_changed or schemas_changed or terminal_schema_changed:
                 shared_context.update_tools(tool_schemas)
             # Tool evidence/failures and requirement completion were just
             # committed. Refresh the 4B prefix so both models see the same
             # state and the next inference pays only for still-useful schemas.
-            if WORKING_STATE_ENABLED or policy_changed or schemas_changed:
+            if WORKING_STATE_ENABLED or policy_changed or schemas_changed or terminal_schema_changed:
                 turn_prefix, tool_prompt_tokens = rebuild_prefix()
             signal = tracker.consume_signal()
             if signal:

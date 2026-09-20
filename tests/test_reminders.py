@@ -1,7 +1,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from tools.reminders import _calendar_expression, _slug
+from tools.reminders import _backend_unavailable, _calendar_expression, _slug
 
 
 def test_calendar_and_slug():
@@ -31,3 +31,9 @@ def test_unit_files_are_safe_and_use_runtime(monkeypatch, tmp_path):
     assert "%% test" in service_text
     assert "hello world" in service_text
     assert "OnCalendar=2026-09-18 09:30:00" in timer_text
+
+
+def test_missing_user_bus_is_a_terminal_backend_failure():
+    assert _backend_unavailable(
+        "Failed to connect to user scope bus via local transport: No such file or directory"
+    ) is True

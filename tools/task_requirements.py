@@ -90,9 +90,41 @@ _EXPLICIT_TOOL_NAMES = {
     "current_time", "hostname", "environment_summary", "local_subnets", "scan_subnet",
 }
 
+_FACT_RULE_INTENTS = {
+    "current_time": "current_time",
+    "host_health": "host_state",
+    "network_state": "network_state",
+    "news_search": "news",
+    "repo_status": "repository_state",
+}
 
-_WEATHER_INTENT_RE = re.compile(
-    r"\b(?:weather|forecast|current conditions?|precipitation|rainfall|snowfall|humidity|wind speed)\b",
+
+_IMPLEMENTATION_ACTION_RE = re.compile(
+    r"\b(?:refactor|implement|debug|fix|patch|modify|change|update|write|create|build|test|review|"
+    r"inspect|explain|compare|design|optimi[sz]e)\b",
+    re.I,
+)
+_IMPLEMENTATION_ARTIFACT_RE = re.compile(
+    r"\b(?:code|script|module|function|method|class|validator|formatter|parser|router|routing|"
+    r"classifier|intent|prompt|regex|schema|harness|application|app|ui|api|integration|"
+    r"implementation|logic|library|package)\b",
+    re.I,
+)
+_FACT_FEATURE_ARTIFACT_RE = re.compile(
+    r"\b(?:weather|forecast|news|headlines?|current[ _-]?time)\s+"
+    r"(?:api|validator|formatter|parser|router|classifier|tool|function|method|module|code|tests?|schema|widget|app)\b"
+    r"|\b(?:api|validator|formatter|parser|router|classifier|tool|function|method|module|code|tests?|schema|widget|app)\s+"
+    r"(?:for\s+)?(?:weather|forecast|news|headlines?|current[ _-]?time)\b",
+    re.I,
+)
+_WEATHER_PRIMARY_RE = re.compile(r"\b(?:weather|forecast|current conditions?)\b", re.I)
+_WEATHER_DETAIL_RE = re.compile(
+    r"\b(?:temperature|precipitation|rain(?:fall|ing)?|snow(?:fall|ing)?|humidity|wind speed|"
+    r"highs?|lows?|feels like|dew point)\b",
+    re.I,
+)
+_REQUEST_CUE_RE = re.compile(
+    r"(?:^\s*(?:what|when|where|will|is|are|show|check|get|give|tell|find|look up)\b|[?]\s*$)",
     re.I,
 )
 _TEMPORAL_RE = re.compile(
@@ -100,6 +132,100 @@ _TEMPORAL_RE = re.compile(
     re.I,
 )
 _LOCATION_STOP = {"the", "weather", "forecast", "today", "tomorrow", "tonight", "now", "current", "currently", "please", "like"}
+
+_CANADIAN_PROVINCES = {
+    "ab": "Alberta", "bc": "British Columbia", "mb": "Manitoba", "nb": "New Brunswick",
+    "nl": "Newfoundland and Labrador", "ns": "Nova Scotia", "nt": "Northwest Territories",
+    "nu": "Nunavut", "on": "Ontario", "pe": "Prince Edward Island", "pei": "Prince Edward Island",
+    "qc": "Quebec", "pq": "Quebec", "sk": "Saskatchewan", "yt": "Yukon",
+}
+_CANADIAN_PROVINCE_NAMES = {value.lower() for value in _CANADIAN_PROVINCES.values()}
+_COUNTRY_ALIASES = {
+    "uk": "United Kingdom", "u.k.": "United Kingdom", "usa": "United States",
+    "u.s.": "United States", "us": "United States",
+}
+_NEWS_TIME_RE = re.compile(
+    r"\b(?:latest|recent|current|today(?:'s)?|tonight|this\s+(?:week|weekend|month)|"
+    r"last\s+(?:day|week|month)|past\s+\d+\s+(?:hours?|days?))\b",
+    re.I,
+)
+_NEWS_GENERIC_TOKENS = {
+    "a", "about", "are", "around", "current", "for", "from", "headlines", "headline", "in",
+    "latest", "local", "me", "near", "news", "of", "please", "recent", "show", "stories",
+    "story", "tell", "the", "today", "todays", "top", "what", "whats",
+}
+
+
+def is_implementation_request(user_text: str) -> bool:
+    """Return whether fact-like words refer to software/harness work, not live facts.
+
+    Small local models are especially vulnerable to lexical collisions such as
+    ``refactor the weather validator`` versus ``check the weather``.  This gate
+    requires an implementation action plus a concrete software artifact, while
+    also recognizing direct compounds such as ``news API``.
+    """
+    text = " ".join(str(user_text or "").strip().split())
+    if not text:
+        return False
+    return bool(
+        _FACT_FEATURE_ARTIFACT_RE.search(text)
+        or (_IMPLEMENTATION_ACTION_RE.search(text) and _IMPLEMENTATION_ARTIFACT_RE.search(text))
+    )
+
+
+def is_weather_fact_request(user_text: str) -> bool:
+    """Distinguish a live weather request from code or conceptual discussion."""
+    text = " ".join(str(user_text or "").strip().split())
+    if not text or is_implementation_request(text):
+        return False
+    primary = bool(_WEATHER_PRIMARY_RE.search(text))
+    detail = bool(_WEATHER_DETAIL_RE.search(text))
+    temporal = bool(_TEMPORAL_RE.search(text))
+    location_cue = bool(re.search(r"\b(?:in|at|near|for)\s+[A-Za-z]", text, re.I))
+    direct = bool(_REQUEST_CUE_RE.search(text) or re.match(r"^\s*(?:weather|forecast)\b", text, re.I))
+    live_detail_question = bool(re.search(
+        r"\b(?:is it|will it|does it|what(?:'s| is) (?:the )?(?:temperature|humidity|wind speed))\b",
+        text,
+        re.I,
+    ))
+    return bool(
+        (primary and (direct or temporal or location_cue))
+        or (detail and direct and (temporal or location_cue or live_detail_question))
+    )
+
+
+def is_news_fact_request(user_text: str) -> bool:
+    """Return whether the user is asking for current news/headline facts."""
+    text = " ".join(str(user_text or "").strip().split())
+    if not text or is_implementation_request(text):
+        return False
+    return bool(re.search(
+        r"(?:\b(?:latest|recent|current|today(?:'s)?)\b.{0,48}\b(?:news|headlines?|stories?)\b|"
+        r"\b(?:news|headlines?)\b.{0,48}\b(?:latest|recent|current|today)\b|"
+        r"\b(?:latest|top|local)\s+headlines?\b)",
+        text,
+        re.I,
+    ))
+
+
+def classify_request_intent(user_text: str) -> str:
+    """Classify only explicit operational/live-fact intents for task framing."""
+    text = " ".join(str(user_text or "").strip().split())
+    lower = text.lower()
+    implementation = is_implementation_request(text)
+    if is_weather_fact_request(text):
+        return "weather"
+    if not implementation and re.search(r"\b(?:what time is it|current time|current date|what day is it|timezone)\b", lower):
+        return "current_time"
+    if not implementation and re.search(r"\b(?:host (?:health|cpu|memory|disk|temperature|state)|system health|host snapshot)\b", lower):
+        return "host_state"
+    if not implementation and re.search(r"\b(?:network (?:interfaces|routes|health|state|status|connections?)|neighbor table|arp table|ndp table)\b", lower):
+        return "network_state"
+    if not implementation and re.search(r"\b(?:repo(?:sitory)? (?:status|diff|health)|git status|git diff)\b", lower):
+        return "repository_state"
+    if is_news_fact_request(text):
+        return "news"
+    return ""
 
 # Temporal qualifiers are deliberately stripped before a weather phrase is
 # allowed to become a location candidate.  This prevents prompts such as
@@ -126,6 +252,136 @@ def _clean_entity(value: str) -> str:
     if match:
         text = text[:match.start()]
     return re.sub(r"\s+", " ", text).strip(" ,:-")[:180]
+
+
+def canonicalize_location(value: str) -> str:
+    """Expand high-value country/province abbreviations for unambiguous search.
+
+    This intentionally avoids guessing arbitrary two-letter tokens as US states;
+    short Canadian province names are expanded because the configured/default
+    news region is Canadian and prompts such as ``London ON`` otherwise drift to
+    London, England.
+    """
+    raw = re.sub(r"\s+", " ", str(value or "")).strip(" ,:-")
+    if not raw:
+        return ""
+    raw = re.sub(r"[?!.;]+$", "", raw).strip()
+    pieces = [piece.strip() for piece in raw.split(",") if piece.strip()]
+    words = raw.replace(",", " ").split()
+    if words:
+        last = words[-1].lower().rstrip(".")
+        if last in _CANADIAN_PROVINCES:
+            city = " ".join(words[:-1]).strip(" ,")
+            province = _CANADIAN_PROVINCES[last]
+            return ", ".join(part for part in (city, province, "Canada") if part)[:180]
+        if last in _COUNTRY_ALIASES:
+            place = " ".join(words[:-1]).strip(" ,")
+            return ", ".join(part for part in (place, _COUNTRY_ALIASES[last]) if part)[:180]
+    lower = raw.lower()
+    if "canada" not in lower:
+        matched_province = next((name for name in _CANADIAN_PROVINCE_NAMES if re.search(rf"\b{re.escape(name)}\b", lower)), "")
+        if matched_province:
+            pieces = pieces or [raw]
+            pieces.append("Canada")
+            return ", ".join(dict.fromkeys(pieces))[:180]
+    return raw[:180]
+
+
+def _clean_news_entity(value: str) -> str:
+    text = re.sub(r"[?!.;]+$", "", str(value or "").strip())
+    match = _NEWS_TIME_RE.search(text)
+    if match:
+        text = text[:match.start()]
+    text = re.sub(r"\b(?:local\s+)?(?:news|headlines?|stories?)\b.*$", "", text, flags=re.I)
+    text = re.sub(r"\s+", " ", text).strip(" ,:-")
+    return canonicalize_location(text)
+
+
+def _looks_like_location_candidate(value: str) -> bool:
+    raw = str(value or "").strip(" ,")
+    if not raw or len(raw.split()) > 8:
+        return False
+    lower_words = [word.lower().rstrip(".") for word in re.findall(r"[A-Za-z]+", raw)]
+    if any(word in _CANADIAN_PROVINCES or word in _COUNTRY_ALIASES for word in lower_words):
+        return True
+    if any(name in raw.lower() for name in _CANADIAN_PROVINCE_NAMES) or "," in raw:
+        return True
+    # Preserve case from the request: a capitalized place is much less likely to
+    # be a topical phrase such as "news in technology".
+    return bool(re.search(r"(?:^|\s)[A-Z][A-Za-z'-]+", raw))
+
+
+def _extract_news_entity(
+    text: str,
+    previous: dict[str, Any] | None = None,
+    default_location: str = "",
+) -> str:
+    value = " ".join(str(text or "").split())
+    # Location after the news noun: "headlines in London ON".
+    match = re.search(
+        r"\b(?:news|headlines?|stories?)\b[^?]{0,80}?\b(?:in|for|from|near|around)\s+([^?]+?)[?!.]*$",
+        value,
+        flags=re.I,
+    )
+    if match and _looks_like_location_candidate(match.group(1)):
+        candidate = _clean_news_entity(match.group(1))
+        if candidate:
+            return candidate
+    # Location before the noun: "London ON local news".
+    match = re.search(r"^(?:what(?:'s| is| are)?\s+)?(?:the\s+)?(.{1,100}?)\s+(?:local\s+)?(?:news|headlines?)\b", value, re.I)
+    if match:
+        raw = re.sub(r"^(?:latest|recent|current|today(?:'s)?|top)\s+", "", match.group(1), flags=re.I)
+        if _looks_like_location_candidate(raw):
+            candidate = _clean_news_entity(raw)
+            if candidate:
+                return candidate
+    lower = value.lower()
+    if previous and str(previous.get("intent") or "") == "news":
+        if re.search(r"\b(?:local|nearby|there|same (?:place|area|city|location))\b", lower) or not _news_topic_terms(value):
+            prior = str(previous.get("entity") or "").strip()
+            if prior:
+                return prior
+    if re.search(r"\b(?:local|nearby|near me|around me)\b", lower):
+        return canonicalize_location(default_location)
+    return ""
+
+
+def _news_topic_terms(text: str, entity: str = "") -> list[str]:
+    entity_tokens = {token.lower() for token in re.findall(r"[A-Za-z0-9]+", str(entity or ""))}
+    result: list[str] = []
+    for token in re.findall(r"[A-Za-z0-9'-]+", str(text or "")):
+        lower = token.lower().replace("'", "")
+        if lower in _NEWS_GENERIC_TOKENS or lower in entity_tokens or len(lower) < 2:
+            continue
+        if lower not in result:
+            result.append(lower)
+    return result[:8]
+
+
+def build_news_query(user_text: str, frame: dict[str, Any] | None = None, default_location: str = "") -> str:
+    """Build a search-engine query whose locality cannot be lost in prose."""
+    resolved = dict(frame or {})
+    entity = canonicalize_location(str(resolved.get("entity") or default_location or ""))
+    raw = " ".join(str(user_text or "").strip().split())
+    if not entity:
+        return raw[:1000]
+    topics = _news_topic_terms(raw, entity)
+    topical = (" " + " ".join(topics)) if topics else ""
+    time_scope = str(resolved.get("time_scope") or "latest").strip().lower()
+    if time_scope in {"", "current", "recent"}:
+        time_scope = "latest"
+    return f"{entity} local{topical} {time_scope} news"[:1000]
+
+
+def news_region_for_frame(frame: dict[str, Any] | None = None, default_location: str = "") -> str:
+    location = canonicalize_location(str((frame or {}).get("entity") or default_location or "")).lower()
+    if "canada" in location or any(name in location for name in _CANADIAN_PROVINCE_NAMES):
+        return "ca-en"
+    if any(token in location for token in ("united kingdom", "england", "scotland", "wales", "northern ireland")):
+        return "uk-en"
+    if "australia" in location:
+        return "au-en"
+    return "ca-en"
 
 
 def _extract_weather_entity(text: str, previous: dict[str, Any] | None = None) -> str:
@@ -161,38 +417,63 @@ def _extract_time_scope(text: str, previous: dict[str, Any] | None = None) -> st
     return str((previous or {}).get("time_scope") or "")
 
 
-def derive_task_frame(user_text: str, previous_frame: dict[str, Any] | None = None) -> dict[str, Any]:
+def derive_task_frame(
+    user_text: str,
+    previous_frame: dict[str, Any] | None = None,
+    default_location: str = "",
+) -> dict[str, Any]:
     """Resolve the current task intent/entity/time scope for referential follow-ups."""
     text = " ".join(str(user_text or "").strip().split())
     previous = dict(previous_frame or {})
-    intent = ""
-    lower = text.lower()
-    if _WEATHER_INTENT_RE.search(text):
-        intent = "weather"
-    elif re.search(r"\b(?:what time is it|current time|current date|what day is it|timezone)\b", lower):
-        intent = "current_time"
-    elif re.search(r"\b(?:host (?:health|cpu|memory|disk|temperature|state)|system health|host snapshot)\b", lower):
-        intent = "host_state"
-    elif re.search(r"\b(?:network (?:interfaces|routes|health|state|connections?)|neighbor table|arp table|ndp table)\b", lower):
-        intent = "network_state"
-    elif re.search(r"\b(?:repo(?:sitory)? (?:status|diff|health)|git status|git diff)\b", lower):
-        intent = "repository_state"
-    elif re.search(r"(?:\b(?:latest|recent|current|today(?:'s)?)\b.{0,48}\b(?:news|headlines?|stories?)\b|\b(?:latest|top|local)\s+headlines?\b)", lower):
-        intent = "news"
-    elif is_followup_request(text) and previous.get("intent"):
+    intent = classify_request_intent(text)
+    if not intent and is_followup_request(text) and previous.get("intent"):
         intent = str(previous.get("intent"))
 
     frame: dict[str, Any] = {"intent": intent}
     if intent == "weather":
-        frame["entity"] = _extract_weather_entity(text, previous)
+        frame["entity"] = _extract_weather_entity(text, previous) or canonicalize_location(default_location)
         frame["time_scope"] = _extract_time_scope(text, previous) or "current"
+    elif intent == "news":
+        frame["entity"] = _extract_news_entity(text, previous, default_location)
+        match = _NEWS_TIME_RE.search(text)
+        frame["time_scope"] = re.sub(r"\s+", " ", match.group(0).lower()) if match else "current"
     elif intent == "current_time":
         tz = re.search(r"\b(?:in|for)\s+([A-Za-z][A-Za-z0-9_+:/ -]{1,80})$", text)
         if tz:
             frame["entity"] = _clean_entity(tz.group(1))
-        elif is_followup_request(text) and str(previous.get("intent") or "") == "current_time":
+        elif str(previous.get("intent") or "") == "current_time":
             frame["entity"] = str(previous.get("entity") or "")
     return {key: value for key, value in frame.items() if value not in {"", None}}
+
+
+def is_task_continuation(user_text: str, previous_frame: dict[str, Any] | None = None) -> bool:
+    """Detect both referential follow-ups and underspecified same-intent turns.
+
+    ``latest local headlines`` is a complete news sentence but ``local`` is
+    deictic: it must inherit the previous news location.  Conversely, a topical
+    request such as ``latest AI news`` starts a new frame and must not inherit a
+    city merely because it also contains the word ``news``.
+    """
+    if is_followup_request(user_text):
+        return True
+    previous = dict(previous_frame or {})
+    previous_intent = str(previous.get("intent") or "")
+    if not previous_intent:
+        return False
+    current = derive_task_frame(user_text)
+    if str(current.get("intent") or "") != previous_intent:
+        return False
+    if previous_intent == "news" and previous.get("entity") and not current.get("entity"):
+        lower = str(user_text or "").lower()
+        return bool(
+            re.search(r"\b(?:local|nearby|there|same (?:place|area|city|location))\b", lower)
+            or not _news_topic_terms(user_text)
+        )
+    if previous_intent == "weather" and previous.get("entity") and not current.get("entity"):
+        return True
+    if previous_intent == "current_time" and previous.get("entity") and not current.get("entity"):
+        return True
+    return False
 
 
 def effective_request_for_frame(user_text: str, frame: dict[str, Any] | None) -> str:
@@ -233,6 +514,12 @@ def _scope_for_requirement(key: str, tool: str, text: str, frame: dict[str, Any]
         if frame.get("time_scope"):
             scope["time_scope"] = frame["time_scope"]
         scope["fact_type"] = "weather"
+    if frame.get("intent") == "news" and tool == "news_search":
+        if frame.get("entity"):
+            scope["entity"] = frame["entity"]
+        if frame.get("time_scope"):
+            scope["time_scope"] = frame["time_scope"]
+        scope["fact_type"] = "news"
     return scope
 
 
@@ -283,6 +570,9 @@ def derive_requirements(user_text: str) -> list[Requirement]:
     frame = derive_task_frame(text)
 
     for key, tool, label, patterns in _RULES:
+        expected_intent = _FACT_RULE_INTENTS.get(key)
+        if expected_intent and frame.get("intent") != expected_intent and is_implementation_request(text):
+            continue
         if any(re.search(pattern, lower, flags=re.I) for pattern in patterns):
             if tool not in seen_tools:
                 result.append(Requirement(key=key, tool=tool, label=label, scope=_scope_for_requirement(key, tool, text, frame)))

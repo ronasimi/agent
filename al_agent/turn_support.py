@@ -98,20 +98,63 @@ def _looks_like_prompt_policy_leak(content: str) -> bool:
     return any(marker.replace("### ", "") in probe for marker in _PROMPT_LEAK_MARKERS)
 
 
-def _selection_context_for_turn(messages: list[dict[str, Any]], user_input: str) -> str:
+def _selection_context_for_turn(
+    messages: list[dict[str, Any]],
+    user_input: str,
+    continuation: bool | None = None,
+) -> str:
     """Return prior *user* intent only for genuine referential continuations.
 
     Assistant prose is deliberately excluded.  Otherwise a prior answer that
     casually mentions "system monitoring", "local environment", "web search",
     or another capability can make those unrelated tools appear on the next turn.
     """
-    if not is_followup_request(user_input):
+    if continuation is None:
+        continuation = is_followup_request(user_input)
+    if not continuation:
         return ""
     return "\n".join(
         str(item.get("content") or "")
         for item in messages[-7:-1]
         if item.get("role") == "user" and item.get("content")
     )[-1800:]
+
+
+_FACT_TOOL_INTENTS = {
+    "current_time": "current_time",
+    "geocode_location": "weather",
+    "weather_forecast": "weather",
+    "news_search": "news",
+    "wiki_search": "encyclopedic",
+}
+
+
+def _prune_mismatched_fact_tools(
+    tool_schemas: list[dict[str, Any]],
+    task_frame: dict[str, Any],
+    user_input: str,
+) -> bool:
+    """Remove live-fact primitives selected only by lexical name collision.
+
+    Explicit tool-name requests remain available for debugging/documentation.
+    The web discovery primitives are intentionally not pruned because they serve
+    many non-news tasks.
+    """
+    intent = str((task_frame or {}).get("intent") or "")
+    raw = str(user_input or "").lower()
+    kept: list[dict[str, Any]] = []
+    changed = False
+    for schema in tool_schemas:
+        name = str(schema.get("function", {}).get("name") or "")
+        expected = _FACT_TOOL_INTENTS.get(name)
+        explicit_name = bool(name and re.search(rf"\b{re.escape(name.lower())}\b", raw))
+        if expected and intent != expected and not explicit_name:
+            changed = True
+            continue
+        kept.append(schema)
+    if changed:
+        tool_schemas[:] = kept
+    return changed
 
 def _recover_textual_readonly_tool_call(content: str, allowed_names: set[str]) -> tuple[list[dict], str]:
     """Recover a narrowly formatted read-only pseudo tool call emitted as prose.
@@ -297,13 +340,13 @@ def _suppress_completed_requirement_calls(
     successful_readonly_signatures: set[str],
     user_text: str,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Suppress exact successful repeats when other explicit checks are pending.
+    """Suppress exact successful repeats of completed explicit checks.
 
     Small models often revisit a familiar successful snapshot instead of moving
     to the next pending requirement.  Rechecks remain available when the user
     explicitly asks for monitoring/change detection.
     """
-    if not SUPPRESS_COMPLETED_REQUIREMENT_REPEATS or not requirement_ledger.pending() or _user_requests_recheck(user_text):
+    if not SUPPRESS_COMPLETED_REQUIREMENT_REPEATS or _user_requests_recheck(user_text):
         return calls, []
     accepted: list[dict[str, Any]] = []
     notes: list[str] = []

@@ -147,7 +147,9 @@ agent:
   recipes:
     enabled: true
     suggest_after_success: true
-    min_stages: 1
+    # A single tool call is not a reusable workflow and produces noisy,
+    # ambiguous "save it" prompts after ordinary lookups.
+    min_stages: 2
     semantic_match_threshold: 0.35
     preflight_limit: 3
     max_pipeline_stages: 16

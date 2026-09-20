@@ -138,6 +138,8 @@ Successful multi-tool workflows can be saved as recipes so the model can reuse a
 
 The harness does **not** inject all tools into every model request. It selects a small relevant subset based on the current request, recent conversational context, explicit completion requirements, and recipe matches. This reduces prompt prefill and improves tool choice on smaller local models.
 
+Live-fact routing is separated from implementation intent before schemas reach the model. For example, “weather in London” can expose weather tools, while “refactor the weather validator” cannot accidentally become a forecast request. The same distinction applies to time, news, host, network, and repository prompts. Deictic follow-ups such as “latest local headlines” may inherit the prior news location, while a new topical request such as “latest AI news” starts a new frame.
+
 Examples of available tool families include:
 
 - **Time/system:** `current_time`, `environment_summary`, `host_snapshot`
@@ -145,6 +147,7 @@ Examples of available tool families include:
 - **Network:** `local_subnets`, `scan_subnet`, `dns_diagnose`, `network_path`, `http_probe`
 - **Web:** `web_search`, `browse_url`, `extract_document`, `page_diff`
 - **Weather:** `geocode_location`, `weather_forecast` (structured first; verified web fallback)
+- **News:** `news_search` (location-aware query, filtering, and grounding)
 - **Git/repository:** `repo_status`, `repo_diff`, `repo_checks`, `get_repo_map`
 - **Research:** `enqueue_research`, `get_research_status`
 - **Automation:** `schedule_reminder`, `list_reminders`, durable jobs
@@ -157,7 +160,7 @@ Generic shell and Python execution exist as fallback capabilities, but structure
 
 Recipes are durable reusable workflows built from primitives. The harness performs a recipe preflight before planning a task.
 
-When a successful workflow does not match an existing recipe, the agent can ask whether you want to save it. Recipes are stored separately from model prompts and remain subject to current tool policy and user constraints.
+When a successful workflow with at least two meaningful stages does not match an existing recipe, the agent can ask whether you want to save it. A built-in workflow such as the structured weather path is not suggested as a duplicate recipe. Recipes are stored separately from model prompts and remain subject to current tool policy and user constraints. Explicit `save recipe` wording is used for recipe persistence so a request such as “save it as report.md” remains an artifact-save request.
 
 Typical examples:
 
@@ -243,7 +246,7 @@ Useful slash commands include:
 /optimizations         list optimization candidates
 ```
 
-Model-facing reminder tools use the host's user-level systemd environment rather than generating ad-hoc unit files directly.
+Model-facing reminder tools use the host's user-level systemd environment rather than generating ad-hoc unit files directly. If that backend is unavailable, the tool removes any partial unit files, reports a terminal `tool_unavailable` result, and is not retried with degraded or missing arguments during the same turn.
 
 ## Conversation memory and context
 
@@ -290,6 +293,10 @@ Fact-retrieval turns have a deterministic finalization gate in addition to the m
 Weather is deliberately strict: a current-turn answer requires a weather-bearing structured provider observation, a verified weather recipe, linked `web_search` + `browse_url` observations, or a sufficiently fresh carried weather observation. `current_time` never satisfies weather. Before the first answer generation, the harness executes the built-in `weather.current_forecast` recipe (`geocode_location` → `weather_forecast` → composed evidence) using the requested location or the explicitly stored OOBE location. If the structured provider fails, it falls back to `web_search` → `browse_url`. Pre-generation evidence acquisition is normal tool work and does not surface a `missing_evidence` validator warning; that warning is reserved for an actual recovery/finalization failure. Candidate factual prose is buffered until the grounding gate passes.
 
 The default stored-weather freshness window is 10,800 seconds (3 hours) and can be changed with `agent.grounding.weather_max_age_seconds`. The grounding registry also covers current time, host state, network state, repository state, and explicit web-fact retrieval, and is intended to be extended with additional fact types as typed tools are added.
+
+Location-scoped news uses the same principle. The task frame carries a canonical city/region, the search receives separate query and location fields, and the grounding gate only accepts observations that match that scope. Same-name-city noise and conflicting country domains are filtered before a local headline answer can finalize.
+
+See `PROMPT_ROUTING_AND_FALLTHROUGH_REVIEW.md` for the reviewed prompt pairs, corrected failure paths, and control-loop invariants.
 
 This is intended to prevent loops such as repeatedly calling the same failing web endpoint or repeatedly retrying a tool with unchanged bad arguments, while still allowing a materially different primitive composition as the final recovery attempt.
 

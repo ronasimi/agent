@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from .task_requirements import derive_task_frame
+from .task_requirements import classify_request_intent, derive_task_frame, is_implementation_request
 
 WEATHER_RECIPE_NAME = "weather.current_forecast"
 
@@ -31,7 +31,7 @@ _HOST_REQUEST_RE = re.compile(
     re.I,
 )
 _NETWORK_REQUEST_RE = re.compile(
-    r"\b(?:network (?:interfaces|routes|health|state|connections?)|listening sockets?|active connections?|neighbor table|arp|ndp)\b",
+    r"\b(?:network (?:interfaces|routes|health|state|status|connections?)|listening sockets?|active connections?|neighbor table|arp|ndp)\b",
     re.I,
 )
 _REPO_REQUEST_RE = re.compile(
@@ -71,19 +71,21 @@ def requested_fact_types(user_request: str, task_frame: dict[str, Any] | None = 
     text = " ".join(str(user_request or "").split())
     frame = dict(task_frame or {})
     result: set[str] = set()
-    if frame.get("intent") == "weather" or any(pattern.search(text) for pattern in _WEATHER_REQUEST_PATTERNS):
+    explicit_intent = classify_request_intent(text)
+    implementation = is_implementation_request(text)
+    if frame.get("intent") == "weather" or explicit_intent == "weather" or (not implementation and any(pattern.search(text) for pattern in _WEATHER_REQUEST_PATTERNS)):
         result.add("weather")
-    if frame.get("intent") == "current_time" or _TIME_REQUEST_RE.search(text):
+    if frame.get("intent") == "current_time" or explicit_intent == "current_time" or (not implementation and _TIME_REQUEST_RE.search(text)):
         result.add("current_time")
-    if frame.get("intent") == "host_state" or _HOST_REQUEST_RE.search(text):
+    if frame.get("intent") == "host_state" or explicit_intent == "host_state" or (not implementation and _HOST_REQUEST_RE.search(text)):
         result.add("host_state")
-    if frame.get("intent") == "network_state" or _NETWORK_REQUEST_RE.search(text):
+    if frame.get("intent") == "network_state" or explicit_intent == "network_state" or (not implementation and _NETWORK_REQUEST_RE.search(text)):
         result.add("network_state")
-    if frame.get("intent") == "repository_state" or _REPO_REQUEST_RE.search(text):
+    if frame.get("intent") == "repository_state" or explicit_intent == "repository_state" or (not implementation and _REPO_REQUEST_RE.search(text)):
         result.add("repository_state")
-    if frame.get("intent") == "news" or _NEWS_REQUEST_RE.search(text):
+    if frame.get("intent") == "news" or explicit_intent == "news" or (not implementation and _NEWS_REQUEST_RE.search(text)):
         result.add("news")
-    if _WEB_FACT_REQUEST_RE.search(text) and not result:
+    if _WEB_FACT_REQUEST_RE.search(text) and not result and not implementation:
         result.add("web_fact")
     if not result and encyclopedic_lookup_query(text):
         result.add("encyclopedic")
@@ -425,6 +427,36 @@ def _observation_matches_frame(item: dict[str, Any], frame: dict[str, Any], *, l
     return True
 
 
+def _news_observation_matches_frame(item: dict[str, Any], frame: dict[str, Any]) -> bool:
+    """Require a scoped news query when the task names a location.
+
+    A non-empty ``news_search`` result is not sufficient by itself: without this
+    check a search for London, England or even global headlines can satisfy a
+    London, Ontario request.  Modern calls carry both ``query`` and ``location``;
+    older calls remain acceptable only when the query itself contains the full
+    requested scope.
+    """
+    if not frame or frame.get("intent") != "news":
+        return True
+    entity = str(frame.get("entity") or "").strip()
+    if not entity:
+        return True
+    arguments = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
+    query = str(arguments.get("query") or item.get("target") or "")
+    location = str(arguments.get("location") or "")
+    scope_tokens = set(_frame_tokens(" ".join((query, location))))
+    segments = [segment.strip() for segment in entity.split(",") if segment.strip()]
+    if not segments:
+        segments = [entity]
+    city_tokens = set(_frame_tokens(segments[0]))
+    qualifier_tokens = set(_frame_tokens(" ".join(segments[1:])))
+    if city_tokens and not city_tokens.issubset(scope_tokens):
+        return False
+    if qualifier_tokens and not qualifier_tokens.issubset(scope_tokens):
+        return False
+    return bool(scope_tokens)
+
+
 def grounding_metadata(tool_name: str, content: str, *, arguments: Any = None) -> dict[str, Any]:
     """Return compact scope/provenance metadata safe to persist with evidence."""
     name = str(tool_name or "").strip().lower()
@@ -595,6 +627,7 @@ def validate_fact_grounding(
         matches = [
             item for item in turn_items
             if str(item.get("tool") or "").lower() == "news_search" and "news" in _fact_types(item)
+            and _news_observation_matches_frame(item, frame)
         ]
         if matches:
             evidence["news"] = ["news_search"]

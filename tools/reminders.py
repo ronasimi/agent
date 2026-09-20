@@ -22,6 +22,13 @@ XDG_RUNTIME_DIR = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{HOST_UID}")
 TIMER_DIR = Path(_REMINDER_CFG.get("timer_dir") or (Path.home() / ".config/systemd/user")).resolve()
 UNIT_PREFIX = str(_REMINDER_CFG.get("unit_prefix", "agent-reminder"))
 DB_SYSTEMCTL_TIMEOUT = int(_REMINDER_CFG.get("systemctl_timeout", 10))
+_BACKEND_UNAVAILABLE_MARKERS = (
+    "failed to connect to bus",
+    "failed to connect to user scope bus",
+    "no such file or directory",
+    "no medium found",
+    "system has not been booted with systemd",
+)
 
 def _connect():
     init_runtime_db()
@@ -93,6 +100,19 @@ def _systemctl(*args: str) -> subprocess.CompletedProcess:
     )
 
 
+def _backend_unavailable(detail: str) -> bool:
+    lowered = str(detail or "").lower()
+    return any(marker in lowered for marker in _BACKEND_UNAVAILABLE_MARKERS)
+
+
+def _cleanup_unit_files(*paths: Path) -> None:
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def schedule_reminder(
     title: str = "",
     message: str = "",
@@ -121,6 +141,8 @@ def schedule_reminder(
 
     reminder_id = _slug(reminder_id or f"{title}-{dt.strftime('%Y%m%d-%H%M%S')}")
     unit_name = f"{UNIT_PREFIX}-{reminder_id}"
+    service_path: Path | None = None
+    timer_path: Path | None = None
     try:
         service_path, timer_path = _unit_files(unit_name, title, message, calendar, repeat)
         reload_result = _systemctl("daemon-reload")
@@ -145,14 +167,25 @@ def schedule_reminder(
             )
         return f"Reminder scheduled: {reminder_id} ({calendar}); unit={unit_name}"
     except Exception as exc:
+        _cleanup_unit_files(*(path for path in (service_path, timer_path) if path is not None))
         try:
+            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
             with _connect() as conn:
                 conn.execute(
-                    "INSERT INTO reminders(id, title, message, when_iso, repeat_mode, unit_name, status, created_at, updated_at, last_error) VALUES (?, ?, ?, ?, ?, ?, 'error', ?, ?, ?)",
-                    (reminder_id, title, message, dt.isoformat(), repeat, unit_name, datetime.now(timezone.utc).isoformat(timespec="seconds"), datetime.now(timezone.utc).isoformat(timespec="seconds"), str(exc)),
+                    """
+                    INSERT INTO reminders(id, title, message, when_iso, repeat_mode, unit_name, status, created_at, updated_at, last_error)
+                    VALUES (?, ?, ?, ?, ?, ?, 'error', ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        title=excluded.title, message=excluded.message, when_iso=excluded.when_iso,
+                        repeat_mode=excluded.repeat_mode, unit_name=excluded.unit_name, status='error',
+                        updated_at=excluded.updated_at, last_error=excluded.last_error
+                    """,
+                    (reminder_id, title, message, dt.isoformat(), repeat, unit_name, now, now, str(exc)),
                 )
         except Exception:
             pass
+        if _backend_unavailable(str(exc)):
+            return f"Error: reminder backend unavailable: {exc}"
         return f"Error: scheduling reminder failed: {exc}"
 
 

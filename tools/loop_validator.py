@@ -101,7 +101,7 @@ def classify_tool_outcome(
     # A few read tools have deterministic empty-result shapes that otherwise
     # look like successful JSON/text. Mark only those known shapes as no-progress
     # so three fruitless tries reach the fast validator instead of looping.
-    if name == "web_search" and text.strip() == "[]":
+    if name in {"web_search", "news_search"} and text.strip() == "[]":
         return {"success": False, "status": "error", "reason": "no_progress_result", "fingerprint": result_fingerprint(text)}
     if name == "browse_url" and "the page returned no readable text content." in lowered:
         return {"success": False, "status": "error", "reason": "no_progress_result", "fingerprint": result_fingerprint(text)}
@@ -124,6 +124,8 @@ def classify_tool_outcome(
         except (TypeError, ValueError, json.JSONDecodeError):
             pass
 
+    if lowered.startswith("error: reminder backend unavailable:"):
+        return {"success": False, "status": "error", "reason": "tool_unavailable", "fingerprint": result_fingerprint(text)}
     if lowered.startswith(_PARTIAL_PREFIXES):
         return {"success": True, "status": "partial", "reason": "nonzero_with_output", "fingerprint": result_fingerprint(text)}
     if lowered.startswith(_ERROR_PREFIXES):

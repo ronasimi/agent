@@ -152,10 +152,21 @@ def test_tool_aware_empty_search_and_unreachable_network_are_no_progress():
     from tools.loop_validator import classify_tool_outcome
 
     assert classify_tool_outcome("[]", tool_name="web_search")["success"] is False
+    assert classify_tool_outcome("[]", tool_name="news_search")["success"] is False
     unreachable = '[{"target":"https://example.invalid","ok":false}]'
     assert classify_tool_outcome(unreachable, tool_name="network_reachability")["success"] is False
     blank_page = "URL: https://example.com\n\nThe page returned no readable text content."
     assert classify_tool_outcome(blank_page, tool_name="browse_url")["success"] is False
+
+
+def test_unavailable_reminder_backend_is_not_treated_as_retryable_arguments():
+    from tools.loop_validator import classify_tool_outcome
+
+    outcome = classify_tool_outcome(
+        "Error: reminder backend unavailable: Failed to connect to user scope bus"
+    )
+    assert outcome["success"] is False
+    assert outcome["reason"] == "tool_unavailable"
 
 
 def test_validator_receives_shared_semantic_context():
