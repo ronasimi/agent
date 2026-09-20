@@ -292,3 +292,35 @@ def test_weather_right_now_falls_back_to_saved_profile_location(monkeypatch):
     assert "London, Ontario, Canada" in query
     assert "Rightangle" not in query
     assert _forecast_days_for_request("What is the weather right now?") == 1
+
+
+def test_tool_selection_context_ignores_prior_assistant_capability_suggestions():
+    from al_agent.turn_support import _selection_context_for_turn
+
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "Good evening"},
+        {
+            "role": "assistant",
+            "content": "I can check current time, local system monitoring, web research, or host health.",
+        },
+    ]
+    assert _selection_context_for_turn(messages, "Is God real?") == ""
+
+    followup_messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "What's the weather in London today?"},
+        {"role": "assistant", "content": "Weather answer"},
+        {"role": "user", "content": "What about tomorrow?"},
+    ]
+    context = _selection_context_for_turn(followup_messages, "What about tomorrow?")
+    assert "weather in London" in context
+    assert "Weather answer" not in context
+
+
+def test_prompt_policy_leak_guard_detects_runtime_policy_but_not_normal_tool_discussion():
+    from al_agent.turn_support import _looks_like_prompt_policy_leak
+
+    assert _looks_like_prompt_policy_leak("### Agent Runtime Policy\nTools are explicitly typed and supplied through native tool-calling schemas.")
+    assert _looks_like_prompt_policy_leak("### Runtime contract\n- Answer the user's current request directly.")
+    assert not _looks_like_prompt_policy_leak("A tool call is a structured request to an external function.")

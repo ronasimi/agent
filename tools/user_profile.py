@@ -269,6 +269,69 @@ def get_user_prompt_context() -> str:
     return "\n".join(lines) + "\n"
 
 
+def get_relevant_user_prompt_context(user_text: str) -> str:
+    """Return only profile fields materially relevant to the current request.
+
+    The full profile is intentionally *not* injected into every turn.  Besides
+    saving prompt tokens, this prevents ordinary greetings or unrelated questions
+    from causing the model to volunteer the user's name, location, interests, or
+    other stored profile details without a reason.
+    """
+    text = " ".join(str(user_text or "").lower().split())
+    identity = get_user_identity()
+    prefs = get_user_preferences()
+    lines = ["\n### Relevant User Context"]
+
+    explicit_profile = bool(re.search(
+        r"\b(?:my profile|about me|what do you know about me|who am i|my identity|my preferences?)\b",
+        text,
+    ))
+    needs_location = bool(re.search(
+        r"\b(?:weather|forecast|near me|nearby|local(?: news| weather| forecast)?|around me)\b",
+        text,
+    ))
+    needs_timezone = bool(re.search(
+        r"\b(?:time|date|timezone|remind|reminder|schedule|calendar|today|tomorrow|tonight)\b",
+        text,
+    ))
+    research_request = bool(re.search(r"\b(?:research|study|investigate|deep dive)\b", text))
+
+    if explicit_profile:
+        if identity:
+            for key in ("name", "role", "timezone", "email"):
+                value = identity.get(key)
+                if value:
+                    lines.append(f"**{key.title()}**: {value}")
+            interests = identity.get("interests") or []
+            if interests:
+                lines.append(f"**Interests**: {', '.join(map(str, interests))}")
+        location = get_user_location()
+        if location:
+            lines.append(f"**Location**: {location}")
+    else:
+        if needs_location:
+            location = get_user_location()
+            if location:
+                lines.append(f"**Location**: {location}")
+        if needs_timezone and identity.get("timezone"):
+            lines.append(f"**Timezone**: {identity['timezone']}")
+        if research_request:
+            interests = identity.get("interests") or []
+            if interests:
+                lines.append(f"**Interests**: {', '.join(map(str, interests))}")
+
+    if prefs:
+        for category, items in prefs.items():
+            if not explicit_profile and category not in {"response", "research"}:
+                continue
+            if not explicit_profile and category == "research" and not research_request:
+                continue
+            for key, value in items.items():
+                lines.append(f"- {category}.{key} = {value}")
+
+    return "\n".join(lines) + "\n" if len(lines) > 1 else ""
+
+
 
 def get_onboarding_state() -> dict[str, Any]:
     """Return whether the first-run user-profile questionnaire has completed."""

@@ -69,3 +69,33 @@ def test_profile_tool_is_selected_for_profile_picture_followup_context():
         )
     }
     assert "set_profile_image" in names
+
+
+def test_relevant_profile_context_does_not_volunteer_identity_on_unrelated_turn(tmp_path, monkeypatch):
+    from tools import user_profile
+
+    db = str(tmp_path / "profile-relevance.db")
+    profile_dir = tmp_path / "profile"
+    monkeypatch.setattr(user_profile, "DB_PATH", db)
+    monkeypatch.setattr(user_profile, "PROFILE_DIR", profile_dir)
+    monkeypatch.setattr(user_profile, "PROFILE_IMAGE_PATH", profile_dir / "user_picture.png")
+    user_profile.init_user_profile_db()
+    user_profile.complete_onboarding_profile(
+        name="Ron", role="Developer", timezone="America/Toronto",
+        location="London, Ontario, Canada", interests=["Linux", "AI"], reset=True,
+    )
+
+    greeting = user_profile.get_relevant_user_prompt_context("Good evening")
+    assert "Ron" not in greeting and "London" not in greeting and "Linux" not in greeting
+    unrelated = user_profile.get_relevant_user_prompt_context("Is God real?")
+    assert "Ron" not in unrelated
+    assert "London" not in unrelated
+    assert "Linux" not in unrelated
+
+    weather = user_profile.get_relevant_user_prompt_context("What is the weather right now?")
+    assert "London, Ontario, Canada" in weather
+    assert "Ron" not in weather
+
+    explicit = user_profile.get_relevant_user_prompt_context("What do you know about me?")
+    assert "Ron" in explicit
+    assert "London, Ontario, Canada" in explicit

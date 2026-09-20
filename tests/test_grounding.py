@@ -193,3 +193,27 @@ def test_structured_weather_recipe_observation_satisfies_grounding():
         "weather in London Ontario next week", [obs], current_turn_id=40, now=now
     )
     assert report["grounded"] is True
+
+
+def test_simple_encyclopedic_definition_requires_current_turn_wikipedia_evidence():
+    import json
+    from tools.grounding import encyclopedic_lookup_query
+
+    req = "What is a shoggoth?"
+    assert encyclopedic_lookup_query(req) == "shoggoth"
+    assert requested_fact_types(req) == {"encyclopedic"}
+    assert requested_fact_types("Is God real?") == set()
+    assert requested_fact_types("What is love?") == set()
+
+    content = json.dumps({
+        "title": "Shoggoth",
+        "url": "https://en.wikipedia.org/wiki/Shoggoth",
+        "summary": "A shoggoth is a fictional monster in the Cthulhu Mythos.",
+    })
+    old = make_observation("wiki_search", content, turn_id=10, arguments={"query": "shoggoth"})
+    assert validate_fact_grounding(req, [old], current_turn_id=11)["grounded"] is False
+
+    current = make_observation("wiki_search", content, turn_id=11, arguments={"query": "shoggoth"})
+    report = validate_fact_grounding(req, [current], current_turn_id=11)
+    assert report["grounded"] is True
+    assert report["evidence"]["encyclopedic"] == ["wiki_search"]

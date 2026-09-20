@@ -67,3 +67,16 @@ def test_rich_output_escapes_html_in_tables_and_weather_lines():
     assert '<img src=x' not in html
     assert '&lt;script&gt;' in html
     assert '&lt;img src=x onerror=alert(1)&gt;' in html
+
+
+def test_tool_activity_is_grouped_and_collapsed_by_default():
+    root = Path(__file__).resolve().parents[1]
+    js = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
+    css = (root / "webui" / "static" / "style.css").read_text(encoding="utf-8")
+
+    assert "turn-activity" in js
+    assert "Activity" in js
+    assert "activity-body" in js
+    assert "wrap.open" not in js  # outer <details> stays collapsed unless the user opens it
+    assert ".turn-activity" in css
+    assert ".activity-count" in css

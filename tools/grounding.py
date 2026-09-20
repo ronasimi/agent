@@ -48,6 +48,15 @@ _NEWS_REQUEST_RE = re.compile(
     r"|\b(?:latest|top|local)\s+headlines?\b)",
     re.I,
 )
+_ENCYCLOPEDIC_REQUEST_RE = re.compile(
+    r"^\s*(what|who)\s+(?:is|are|was|were)\s+(?:(a|an|the)\s+)?(.{1,180}?)\s*[?!.]*$",
+    re.I,
+)
+_ENCYCLOPEDIC_EXCLUDE_RE = re.compile(
+    r"\b(?:your|my|our|today|tomorrow|current|latest|weather|forecast|time|date|timezone|"
+    r"temperature|price|cost|score|result|status|version|ip address|hostname)\b",
+    re.I,
+)
 _WEATHER_PRIMARY_RE = re.compile(r"\b(weather|forecast|current conditions?)\b", re.I)
 _WEATHER_DETAIL_RE = re.compile(
     r"(?:\btemperature\b|\btemp\b|\bhighs?\b|\blows?\b|\bhumidity\b|\bwind(?:s|y)?\b|"
@@ -76,7 +85,44 @@ def requested_fact_types(user_request: str, task_frame: dict[str, Any] | None = 
         result.add("news")
     if _WEB_FACT_REQUEST_RE.search(text) and not result:
         result.add("web_fact")
+    if not result and encyclopedic_lookup_query(text):
+        result.add("encyclopedic")
     return result
+
+
+def encyclopedic_lookup_query(user_request: str) -> str:
+    """Return the bounded subject of a simple encyclopedic definition request.
+
+    This deliberately excludes current/user-specific questions and arithmetic so
+    stable definitions such as ``What is a shoggoth?`` can be grounded without
+    turning philosophical questions such as ``Is God real?`` into fake fact
+    retrieval tasks.
+    """
+    text = " ".join(str(user_request or "").strip().split())
+    match = _ENCYCLOPEDIC_REQUEST_RE.match(text)
+    if not match:
+        return ""
+    interrogative = str(match.group(1) or "").lower()
+    article = str(match.group(2) or "").lower()
+    subject = re.sub(r"\s+", " ", str(match.group(3) or "")).strip(" \t\r\n?!.;:")
+    if not subject or len(subject) > 160 or len(subject.split()) > 12:
+        return ""
+    if _ENCYCLOPEDIC_EXCLUDE_RE.search(subject):
+        return ""
+    if re.search(r"\d\s*[+\-*/=]\s*\d", subject):
+        return ""
+    if subject.lower() in {"this", "that", "it", "there", "happening", "going on"}:
+        return ""
+    # Keep the automatic lookup narrow so conceptual/philosophical prompts such
+    # as "What is love?" remain normal conversation.  Indefinite definitions
+    # ("What is a shoggoth?"), named/acronym subjects, and "Who is ...?" are
+    # the high-value cases where small-model fabricated specifics are most costly.
+    if interrogative == "what" and article not in {"a", "an"}:
+        first = subject.split()[0] if subject.split() else ""
+        named = bool(first[:1].isupper()) or (len(first) >= 2 and first.isupper())
+        if not named:
+            return ""
+    return subject
 
 def _json_payload(text: str) -> Any:
     raw = str(text or "").strip()
@@ -148,6 +194,10 @@ def classify_fact_types(tool_name: str, content: str) -> set[str]:
         ):
             result.add("news")
             result.add("web_fact")
+    if name == "wiki_search":
+        payload = _json_payload(text)
+        if isinstance(payload, dict) and str(payload.get("summary") or "").strip():
+            result.add("encyclopedic")
     if name == "browse_url" and text.strip():
         lowered = text.lower()
         browse_error = re.search(r"\b(?:404 not found|403 forbidden|access denied|page not found)\b", lowered)
@@ -396,11 +446,12 @@ def grounding_metadata(tool_name: str, content: str, *, arguments: Any = None) -
     time_scope = ""
     source_url = ""
     discovered_urls: list[str] = []
-    if name in {"web_search", "news_search"}:
+    if name in {"web_search", "news_search", "wiki_search"}:
         target = str(args.get("query") or "")[:500]
-        discovered_urls = _urls_from_payload(text)
-        frame = derive_task_frame(target)
-        time_scope = str(frame.get("time_scope") or "")
+        if name != "wiki_search":
+            discovered_urls = _urls_from_payload(text)
+            frame = derive_task_frame(target)
+            time_scope = str(frame.get("time_scope") or "")
     elif name == "browse_url":
         source_url = _browse_source_url(text, args)
         target = source_url
@@ -466,6 +517,57 @@ def validate_fact_grounding(
             evidence["current_time"] = [str(item.get("tool") or "") for item in time_items[-2:]]
         else:
             missing.append("current_time")
+
+    if "encyclopedic" in required:
+        encyclopedia_items = [
+            item for item in usable
+            if str(item.get("tool") or "").lower() == "wiki_search"
+            and "encyclopedic" in _fact_types(item)
+            and (not current_turn_id or int(item.get("turn_id") or 0) == int(current_turn_id))
+        ]
+        if encyclopedia_items:
+            evidence["encyclopedic"] = ["wiki_search"]
+        else:
+            # Wikipedia is the preferred fast path, but a linked web discovery
+            # and verified page from the current turn is an acceptable fallback
+            # when the encyclopedia endpoint/package is unavailable.
+            turn_items = [
+                item for item in usable
+                if not current_turn_id or int(item.get("turn_id") or 0) == int(current_turn_id)
+            ]
+            subject = encyclopedic_lookup_query(user_request)
+            subject_terms = set(_frame_tokens(subject))
+            searches = []
+            for item in turn_items:
+                if str(item.get("tool") or "").lower() != "web_search":
+                    continue
+                query = str((item.get("arguments") or {}).get("query") or item.get("target") or "")
+                query_terms = set(_frame_tokens(query))
+                if not subject_terms or subject_terms.issubset(query_terms):
+                    searches.append(item)
+            browses = [
+                item for item in turn_items
+                if str(item.get("tool") or "").lower() == "browse_url" and "web_fact" in _fact_types(item)
+            ]
+            linked = False
+            for search in searches:
+                discovered = {_canonical_url(url) for url in (search.get("discovered_urls") or []) if url}
+                if not discovered:
+                    discovered = set(_urls_from_payload(str(search.get("evidence_preview") or search.get("content") or "")))
+                for browse in browses:
+                    source = _canonical_url(str(browse.get("source_url") or "")) or _browse_source_url(
+                        str(browse.get("evidence_preview") or browse.get("content") or ""),
+                        dict(browse.get("arguments") or {}),
+                    )
+                    if source and source in discovered:
+                        linked = True
+                        break
+                if linked:
+                    break
+            if linked:
+                evidence["encyclopedic"] = ["web_search", "browse_url"]
+            else:
+                missing.append("encyclopedic")
 
     generic_sources = {
         "host_state": {"host_snapshot", "pressure_snapshot", "process_snapshot", "filesystem_snapshot", "service_health"},

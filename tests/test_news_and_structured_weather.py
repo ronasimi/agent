@@ -107,3 +107,20 @@ def test_weather_right_now_uses_current_conditions_and_not_daily_table():
     assert "8.2 km/h NE" in rendered
     assert "| Date |" not in rendered
     assert "2026-09-20" not in rendered
+
+
+def test_encyclopedia_renderer_uses_only_structured_lookup_fields():
+    from tools.web import format_encyclopedia_result, is_simple_encyclopedic_request
+
+    content = json.dumps({
+        "title": "Shoggoth",
+        "url": "https://en.wikipedia.org/wiki/Shoggoth",
+        "summary": "Shoggoths are fictional creatures in the Cthulhu Mythos.",
+    })
+    rendered = format_encyclopedia_result(content)
+    assert "fictional creatures" in rendered
+    assert "Wikipedia" in rendered
+    assert "https://en.wikipedia.org/wiki/Shoggoth" in rendered
+    assert "Shadow over Mitten" not in rendered
+    assert is_simple_encyclopedic_request("What is a shoggoth?") is True
+    assert is_simple_encyclopedic_request("Is God real?") is False

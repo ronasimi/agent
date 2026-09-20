@@ -109,7 +109,7 @@ def news_search(
 
 
 def wiki_search(query: str = "") -> str:
-    """Search Wikipedia for encyclopedic background information."""
+    """Search Wikipedia for concise encyclopedic background information."""
     query = str(query).strip()
     if not query:
         return "Error: Missing required 'query' parameter."
@@ -117,9 +117,55 @@ def wiki_search(query: str = "") -> str:
         return "Error: Query is limited to 1000 characters."
     try:
         import wikipedia
-        return wikipedia.summary(query, sentences=4, auto_suggest=True)
+        page = wikipedia.page(query, auto_suggest=True, preload=False)
+        summary = wikipedia.summary(page.title, sentences=4, auto_suggest=False)
+        return json.dumps(
+            {
+                "title": str(page.title or query)[:300],
+                "url": str(page.url or "")[:1200],
+                "summary": str(summary or "")[:5000],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
     except Exception as exc:
         return f"Error: Wikipedia search failed: {exc}"
+
+
+def format_encyclopedia_result(content: str) -> str:
+    """Render only the structured fields returned by :func:`wiki_search`."""
+    try:
+        payload = json.loads(str(content or ""))
+    except (TypeError, json.JSONDecodeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    title = str(payload.get("title") or "").strip()
+    summary = str(payload.get("summary") or "").strip()
+    url = str(payload.get("url") or "").strip()
+    if not summary:
+        return ""
+    rendered = summary
+    if title and url.startswith(("http://", "https://")):
+        rendered += f"\n\nSource: Wikipedia — [{title}]({url})"
+    elif url.startswith(("http://", "https://")):
+        rendered += f"\n\nSource: Wikipedia — {url}"
+    return rendered
+
+
+def is_simple_encyclopedic_request(user_request: str) -> bool:
+    """Return whether a request only asks for a short definition/identity."""
+    from .grounding import encyclopedic_lookup_query
+
+    subject = encyclopedic_lookup_query(user_request)
+    if not subject:
+        return False
+    text = " ".join(str(user_request or "").lower().split())
+    return not re.search(
+        r"\b(?:compare|analy[sz]e|critic|debate|argument|history of|timeline|examples?|"
+        r"write|essay|report|deep dive|detailed|comprehensive|why|how)\b",
+        text,
+    )
 
 
 def browse_url(url: str = "") -> str:

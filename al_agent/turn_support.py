@@ -10,7 +10,7 @@ from tools import AVAILABLE_TOOLS_MAP, TOOL_METADATA, get_compacted_through_id, 
 from tools.context import build_active_messages, compaction_cutoff_id, estimate_messages_tokens, model_message
 from tools.loop_validator import tool_call_signature
 from tools.runtime import create_singleton_job
-from tools.task_requirements import TaskRequirementLedger
+from tools.task_requirements import TaskRequirementLedger, is_followup_request
 from tools.conversation_context import get_active_conversation_id
 from tools.executor import execute_registered_tool
 from .events import emit_event
@@ -71,6 +71,47 @@ def _parse_tool_calls(raw_calls: Any, allowed_names: set[str] | None = None) -> 
             errors.append(f"call {index}: malformed tool call: {exc}")
     return result, errors
 
+
+
+
+_PROMPT_LEAK_MARKERS = (
+    "agent runtime policy",
+    "### runtime contract",
+    "harness-enforced turn tool policy",
+    "the harness working-state block is the authoritative",
+    "tools are explicitly typed and supplied through native tool-calling schemas",
+)
+
+def _looks_like_prompt_policy_leak(content: str) -> bool:
+    """Detect accidental reproduction of hidden harness/system policy text.
+
+    This intentionally looks for distinctive policy phrases rather than generic
+    words such as ``system`` or ``tool`` so ordinary discussion is unaffected.
+    The check is deterministic and is used before a candidate answer is persisted
+    or surfaced as final output.
+    """
+    text = str(content or "")
+    if not text.strip():
+        return False
+    probe = re.sub(r"[`*_>#]+", " ", text[:2400]).lower()
+    probe = re.sub(r"\s+", " ", probe).strip()
+    return any(marker.replace("### ", "") in probe for marker in _PROMPT_LEAK_MARKERS)
+
+
+def _selection_context_for_turn(messages: list[dict[str, Any]], user_input: str) -> str:
+    """Return prior *user* intent only for genuine referential continuations.
+
+    Assistant prose is deliberately excluded.  Otherwise a prior answer that
+    casually mentions "system monitoring", "local environment", "web search",
+    or another capability can make those unrelated tools appear on the next turn.
+    """
+    if not is_followup_request(user_input):
+        return ""
+    return "\n".join(
+        str(item.get("content") or "")
+        for item in messages[-7:-1]
+        if item.get("role") == "user" and item.get("content")
+    )[-1800:]
 
 def _recover_textual_readonly_tool_call(content: str, allowed_names: set[str]) -> tuple[list[dict], str]:
     """Recover a narrowly formatted read-only pseudo tool call emitted as prose.
