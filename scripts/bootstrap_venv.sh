@@ -36,6 +36,7 @@ Activate it with:
 Or run repository scripts directly; host-side scripts that support the bootstrap
 will automatically re-exec with .venv/bin/python when the environment exists.
 
-Example:
+Examples:
   python scripts/benchmark_model_roles.py --runs 5 --report-runs 1
+  python scripts/soak_test_tools.py --duration 24h --workers 2 --mutating-mode isolated
 MSG

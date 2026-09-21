@@ -143,3 +143,59 @@ def test_network_classifier_recognizes_requests_dns_failures():
         "exception",
         "Max retries exceeded with url: /quote (Caused by NameResolutionError: failed to resolve host)",
     ) == "network"
+
+
+def test_declared_distribution_names_parses_requirements_specs(tmp_path):
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text(
+        "pyyaml\nollama>=0.5.2\ncryptography>=43,<47  # bounded\n\n# comment\n",
+        encoding="utf-8",
+    )
+    assert soak._declared_distribution_names(requirements) == ["pyyaml", "ollama", "cryptography"]
+
+
+def test_dependency_preflight_message_is_actionable():
+    message = soak._dependency_preflight_message(["pyyaml", "ollama"])
+    assert "pyyaml" in message
+    assert "ollama" in message
+    assert "bootstrap_venv.sh" in message
+    assert ".venv/bin/python" in message
+
+
+def test_controller_fails_cleanly_before_tool_import_when_python_deps_missing(monkeypatch, capsys):
+    monkeypatch.setattr(soak, "_preflight_repository_dependencies", lambda: (False, ["pyyaml"]))
+    args = soak.parse_args(["--duration", "1s", "--passes", "1"])
+    assert soak.controller_main(args) == 2
+    captured = capsys.readouterr()
+    assert "Missing Python package(s): pyyaml" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_maybe_reexec_uses_repo_venv_when_available(tmp_path, monkeypatch):
+    venv_python = tmp_path / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("", encoding="utf-8")
+    monkeypatch.setattr(soak, "VENV_PYTHON", venv_python)
+    monkeypatch.delenv("AGENT_VENV_REEXEC", raising=False)
+
+    called = {}
+
+    class ReexecCalled(RuntimeError):
+        pass
+
+    def fake_execve(path, argv, env):
+        called.update(path=path, argv=argv, env=env)
+        raise ReexecCalled
+
+    monkeypatch.setattr(soak.os, "execve", fake_execve)
+    try:
+        soak._maybe_reexec_in_repo_venv(["--duration", "1h"])
+    except ReexecCalled:
+        pass
+    else:
+        raise AssertionError("expected venv re-exec")
+
+    assert called["path"] == str(venv_python.resolve())
+    assert called["argv"][0] == str(venv_python.resolve())
+    assert called["argv"][-2:] == ["--duration", "1h"]
+    assert called["env"]["AGENT_VENV_REEXEC"] == "1"

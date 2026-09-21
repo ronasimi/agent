@@ -672,9 +672,10 @@ Use the project under the terms of the repository's license, if present.
 
 ### Long-running tool / primitive / recipe soak test
 
-Use `scripts/soak_test_tools.py` to repeatedly exercise the complete tool registry and compatibility recipes with per-call process isolation, timeout protection, latency/error metrics, periodic checkpoints, and a final Markdown/JSON/CSV report. A typical unattended run is:
+Use `scripts/soak_test_tools.py` to repeatedly exercise the complete tool registry and compatibility recipes with per-call process isolation, timeout protection, latency/error metrics, periodic checkpoints, and a final Markdown/JSON/CSV report. On a fresh clone/ZIP, run `./scripts/bootstrap_venv.sh` once first. The soak runner automatically re-execs under `.venv/bin/python`, so activation is optional. A typical unattended run is:
 
 ```bash
+./scripts/bootstrap_venv.sh   # first run only
 python scripts/soak_test_tools.py --duration 24h --workers 2 --mutating-mode isolated
 ```
 

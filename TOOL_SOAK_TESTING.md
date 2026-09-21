@@ -2,6 +2,18 @@
 
 `scripts/soak_test_tools.py` exercises the live tool registry and compatibility recipe catalog for extended periods. It is intended to catch intermittent provider failures, schema drift, hangs, slow primitives, missing host dependencies, recipe regressions, and tools that alternate between success and failure.
 
+## Python environment prerequisite
+
+From a fresh clone or extracted ZIP, bootstrap the repository-local Python environment once before starting the soak:
+
+```bash
+./scripts/bootstrap_venv.sh
+```
+
+You do **not** need to activate the virtual environment. When `.venv/bin/python` exists, `scripts/soak_test_tools.py` automatically re-executes itself with that interpreter. If the environment has not been bootstrapped, the runner now exits before importing the tool registry and prints the complete list of missing declared Python packages plus the bootstrap command instead of raising a raw `ModuleNotFoundError`.
+
+Missing OS utilities, provider connectivity, and credentials are intentionally **not** startup blockers; those remain per-tool soak results so they are visible in the success/error metrics.
+
 ## Recommended 24-hour run
 
 ```bash

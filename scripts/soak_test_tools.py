@@ -17,6 +17,7 @@ import argparse
 import base64
 import csv
 import fnmatch
+import importlib.metadata as importlib_metadata
 import json
 import math
 import os
@@ -41,8 +42,70 @@ from pathlib import Path
 from typing import Any, Iterable
 
 ROOT = Path(__file__).resolve().parents[1]
+VENV_PYTHON = ROOT / ".venv" / "bin" / "python"
+REQUIREMENTS_PATH = ROOT / "requirements.txt"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+
+def _maybe_reexec_in_repo_venv(argv: list[str] | None = None) -> None:
+    """Use the repo-local venv automatically when it has been bootstrapped."""
+    if os.environ.get("AGENT_VENV_REEXEC") == "1" or not VENV_PYTHON.is_file():
+        return
+    try:
+        current = Path(sys.executable).resolve()
+        venv_python = VENV_PYTHON.resolve()
+    except OSError:
+        return
+    if current == venv_python:
+        return
+    env = dict(os.environ)
+    env["AGENT_VENV_REEXEC"] = "1"
+    forwarded = list(sys.argv[1:] if argv is None else argv)
+    os.execve(str(venv_python), [str(venv_python), str(Path(__file__).resolve()), *forwarded], env)
+
+
+def _declared_distribution_names(path: Path = REQUIREMENTS_PATH) -> list[str]:
+    """Return distribution names declared in requirements.txt without needing packaging."""
+    if not path.is_file():
+        return []
+    names: list[str] = []
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or line.startswith(("-r ", "--requirement ", "-e ", "--editable ")):
+            continue
+        match = re.match(r"([A-Za-z0-9_.-]+)", line)
+        if match:
+            names.append(match.group(1))
+    return names
+
+
+def _missing_declared_dependencies(path: Path = REQUIREMENTS_PATH) -> list[str]:
+    missing: list[str] = []
+    for name in _declared_distribution_names(path):
+        try:
+            importlib_metadata.version(name)
+        except importlib_metadata.PackageNotFoundError:
+            missing.append(name)
+    return missing
+
+
+def _dependency_preflight_message(missing: list[str]) -> str:
+    bootstrap = ROOT / "scripts" / "bootstrap_venv.sh"
+    listed = ", ".join(missing) if missing else "an undeclared Python module"
+    return (
+        "Tool soak cannot start because the repository Python environment is incomplete.\n"
+        f"Missing Python package(s): {listed}\n\n"
+        "Bootstrap the repo-local environment once:\n"
+        f"  {bootstrap}\n\n"
+        "Then rerun the same command. scripts/soak_test_tools.py will automatically "
+        f"re-exec with {VENV_PYTHON} when it exists."
+    )
+
+
+def _preflight_repository_dependencies() -> tuple[bool, list[str]]:
+    missing = _missing_declared_dependencies()
+    return (not missing, missing)
 
 # Mutators that can be pointed at the audit DB/profile or confined to an audit
 # subdirectory under the workspace.  The remaining mutators are contract-only
@@ -1141,6 +1204,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def controller_main(args: argparse.Namespace) -> int:
+    ok, missing = _preflight_repository_dependencies()
+    if not ok:
+        print(_dependency_preflight_message(missing), file=sys.stderr)
+        return 2
+
     workspace = _workspace_root()
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     report_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else (workspace / "tool_soak_reports" / stamp)
@@ -1164,7 +1232,18 @@ def controller_main(args: argparse.Namespace) -> int:
     active_recipe_db = os.environ.get("AGENT_RECIPE_DB", "/app/memory/recipes.db")
     saved_recipes = [] if args.no_saved_recipes else read_saved_recipes_direct(active_recipe_db)
     os.environ.update({k: v for k, v in env.items() if k.startswith("AGENT_") or k == "TOOL_SOAK_ACTIVE"})
-    targets, inventory = discover_targets(saved_recipes=saved_recipes)
+    try:
+        targets, inventory = discover_targets(saved_recipes=saved_recipes)
+    except ModuleNotFoundError as exc:
+        missing_module = str(exc.name or "unknown")
+        print(
+            _dependency_preflight_message([missing_module])
+            + "\n\nThe missing import was raised while loading the live tool registry. "
+              "If bootstrap_venv.sh succeeds but this remains missing, add the owning "
+              "distribution to requirements.txt.",
+            file=sys.stderr,
+        )
+        return 2
     ids = _seed_isolated_state(env)
     inventory.update({
         "seed_state": ids, "mutating_mode": args.mutating_mode, "report_dir": str(report_dir),
@@ -1362,7 +1441,10 @@ def controller_main(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    _maybe_reexec_in_repo_venv(argv)
     if args._worker:
+        # Internal children inherit the already-validated controller interpreter.
+        # Avoid repeating distribution scans for every probe.
         return worker_main()
     return controller_main(args)
 
