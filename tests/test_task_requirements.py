@@ -193,3 +193,20 @@ def test_market_requirement_rejects_malformed_or_empty_result_provenance():
         result_metadata={"market_instruments": []},
     )
     assert ledger.status_for_tool("market_quote") != "satisfied"
+
+
+def test_news_current_scope_accepts_latest_query_and_empty_completed_retrieval():
+    from tools.task_requirements import TaskRequirementLedger
+
+    ledger = TaskRequirementLedger.from_request("what are the local headlines in London ON?")
+    ledger.record_tool(
+        "news_search", status="ok", reason="empty_result",
+        arguments={
+            "query": "London, Ontario, Canada local latest news",
+            "location": "London, Ontario, Canada",
+            "timelimit": "d",
+        },
+        result_text="[]",
+    )
+    assert ledger.status_for_tool("news_search") == "satisfied"
+    assert ledger.pending() == []

@@ -42,8 +42,8 @@ from tools.turn_policy import derive_turn_tool_policy
 from tools.user_profile import get_relevant_user_prompt_context, get_user_location
 from tools.weather import format_weather_recovery, is_simple_weather_request
 from tools.web import (
-    format_encyclopedia_result, format_news_results,
-    is_simple_encyclopedic_request, is_simple_headline_request,
+    format_encyclopedia_result, format_news_no_results, format_news_provider_error, format_news_results,
+    is_simple_encyclopedic_request, is_simple_headline_request, news_search_is_empty,
 )
 
 from .runtime_output import OperationStatus, log_perf_stats
@@ -365,6 +365,7 @@ def handle_user_turn(
         policy_leak_retries = 0
         last_weather_recovery_result: dict[str, Any] | None = None
         last_news_search_content = ""
+        last_news_search_attempt: dict[str, Any] = {}
         last_encyclopedia_content = ""
         last_market_quote_content = ""
         last_current_time_content = ""
@@ -655,7 +656,7 @@ def handle_user_turn(
 
         def _record_harness_recovery_tool(name: str, args: dict[str, Any], *, trigger: str) -> bool:
             """Execute one deterministic read-only evidence primitive before generation."""
-            nonlocal last_news_search_content, last_encyclopedia_content, last_market_quote_content, last_current_time_content, last_geocode_content
+            nonlocal last_news_search_content, last_news_search_attempt, last_encyclopedia_content, last_market_quote_content, last_current_time_content, last_geocode_content
             metadata = TOOL_METADATA.get(name, {})
             if (
                 name not in AVAILABLE_TOOLS_MAP
@@ -679,6 +680,11 @@ def handle_user_turn(
             success = bool(outcome.get("success"))
             status = str(outcome.get("status") or ("ok" if success else "error"))
             reason = str(outcome.get("reason") or ("ok" if success else "tool_error"))
+            if name == "news_search":
+                last_news_search_attempt = {
+                    "attempted": True, "success": success, "status": status,
+                    "reason": reason, "content": result_content,
+                }
             result_with_status = _tool_status_prefix(success, reason, status) + "\n" + result_content
             result_text, observation_id = _bounded_tool_result_with_ref(name, result_with_status)
             emit_event(
@@ -916,6 +922,37 @@ def handle_user_turn(
                 answer_first_visible_at = time.monotonic()
                 print(f"\nAgent: {deterministic}\n")
                 emit_event("assistant_final", content=deterministic, finalization=False, deterministic=True)
+                return
+
+        if required_fact_types == {"news"} and last_news_search_attempt.get("attempted"):
+            news_location = str(task_frame.get("entity") or default_location or "")
+            if last_news_search_attempt.get("success") and news_search_is_empty(last_news_search_attempt.get("content", "")):
+                deterministic = format_news_no_results(location=news_location)
+                assistant_reply = {"role": "assistant", "content": deterministic}
+                append_and_save(messages, assistant_reply)
+                if WORKING_STATE_ENABLED:
+                    WORKING_STATE.complete_turn(blocked=True)
+                answer_first_visible_at = time.monotonic()
+                print(f"\nAgent: {deterministic}\n")
+                emit_event(
+                    "assistant_final", content=deterministic, finalization=False, deterministic=True,
+                    blocked=True, reason="news_no_results",
+                )
+                return
+            if not last_news_search_attempt.get("success"):
+                deterministic = format_news_provider_error(
+                    str(last_news_search_attempt.get("content") or ""), location=news_location,
+                )
+                assistant_reply = {"role": "assistant", "content": deterministic}
+                append_and_save(messages, assistant_reply)
+                if WORKING_STATE_ENABLED:
+                    WORKING_STATE.complete_turn(blocked=True)
+                answer_first_visible_at = time.monotonic()
+                print(f"\nAgent: {deterministic}\n")
+                emit_event(
+                    "assistant_final", content=deterministic, finalization=False, deterministic=True,
+                    blocked=True, reason="news_provider_error",
+                )
                 return
 
         if required_fact_types == {"news"} and last_news_search_content and is_simple_headline_request(user_input):

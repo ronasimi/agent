@@ -19,19 +19,23 @@ This repository-wide audit covers the generated builtin manifest and the shared 
 5. **Recipe provenance requires successful execution.** Optional failures and skipped stages no longer count as successful source tools or satisfy requirements. Learned recipe traces contain only successful, non-skipped stages.
 6. **Negative diagnostics are valid observations.** A successful network probe that establishes DNS failure, connection refusal, or unreachability is not misclassified as a harness/tool execution failure.
 7. **Deterministic structured primitives fail closed on malformed output.** Grounding-sensitive JSON tools must return their expected top-level structure. Arbitrary non-empty text cannot satisfy host/network/repository/time/weather/market requirements.
-8. **Empty results are classified by tool semantics.** Legitimate empty diagnostics such as no journal entries, no mDNS services, no official packages, no neighbors, or no local subnets are preserved as observations, while search/geocode misses remain recoverable no-progress outcomes.
+8. **Empty results are classified by tool semantics.** Legitimate empty diagnostics such as no journal entries, no mDNS services, no official packages, no neighbors, or no local subnets are preserved as observations. `web_search`/geocode misses remain recoverable no-progress outcomes, while `news_search` performs its own bounded daily→weekly fallback and then treats a valid `[]` as a completed retrieval miss with no factual-news grounding.
 9. **Executed arguments are persisted.** Working state records schema-normalized arguments actually sent to a tool rather than the raw model proposal.
 10. **Recovery avoids blind duplicate retries.** Initial deterministic grounding recovery runs once and recomputes evidence after each recovery family instead of repeating the same provider call without a changed condition.
 11. **Explicit invalid time zones fail instead of silently changing scope.** `current_time` rejects an invalid requested IANA zone rather than falling back to the host/configured zone.
 12. **Shadowed primitives were removed.** Duplicate top-level network/process function definitions were deleted so the registered implementation is unambiguous and future fixes cannot land in dead code.
+13. **Explicit tool errors are classified before structured-success validation.** JSON-returning primitives that emit `Error: ...` are now recorded as provider/tool failures rather than mislabeled `malformed_structured_result`, preventing argument-churn retries after a clear terminal error.
+14. **Local-news recovery is bounded inside the primitive.** `news_search` no longer duplicates an already-scoped location in its query; DDGS `No results found` is normalized to an empty result, and a sparse daily result gets exactly one locality-heavy weekly fallback.
+15. **Ambiguous-city news is scope checked for explicit conflicts.** A result explicitly referring to another city-country pairing (for example `London, England`) cannot satisfy `London, Ontario, Canada` merely because `Ontario` appears elsewhere in the story.
+16. **News-only retrieval misses terminate deterministically.** After the bounded provider lookup returns no qualifying rows or a provider error, the harness reports that retrieval state directly instead of giving the main model repeated opportunities to mutate and retry the same search.
 
 ## Validation
 
-The audit added regressions for clipped market/page evidence, partial quote coverage, wrong encyclopedic subjects, current-time place/time-zone linkage, weather coordinate linkage, failed/skipped recipe provenance, malformed structured output, valid negative network diagnostics, and invalid IANA zones.
+The audit added regressions for clipped market/page evidence, partial quote coverage, wrong encyclopedic subjects, current-time place/time-zone linkage, weather coordinate linkage, failed/skipped recipe provenance, malformed structured output, valid negative network diagnostics, invalid IANA zones, DDGS empty-news exceptions, duplicate locality injection, ambiguous-city news conflicts, and explicit structured-tool error classification.
 
 Final validation in the audit environment:
 
-- `pytest`: 374 passed, 1 skipped
+- `pytest`: 380 passed, 1 skipped
 - `compileall`: passed
 - builtin manifest check: current (223 tools)
 - duplicate registered tool names: none

@@ -639,6 +639,13 @@ def _scope_matches(
     if scope.get("time_scope") and isinstance(arguments, dict) and "query" in arguments:
         expected = str(scope["time_scope"]).lower()
         temporal_tokens = [t for t in re.findall(r"[a-z0-9]+", expected) if len(t) > 2]
+        if scope.get("fact_type") == "news" and expected in {"current", "latest", "recent"}:
+            # The deterministic news query builder canonicalizes an unspecified
+            # current scope to ``latest``. Treat the ordinary current-news words
+            # as equivalent so a correctly scoped search is not left pending
+            # simply because the request said "current" and the query said
+            # "latest".
+            temporal_tokens = ["current", "latest", "recent", "today"]
         if temporal_tokens and not any(token in haystack for token in temporal_tokens):
             return False
     return True

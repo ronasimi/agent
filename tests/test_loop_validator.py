@@ -152,7 +152,9 @@ def test_tool_aware_empty_search_and_negative_diagnostics_are_distinguished():
     from tools.loop_validator import classify_tool_outcome
 
     assert classify_tool_outcome("[]", tool_name="web_search")["success"] is False
-    assert classify_tool_outcome("[]", tool_name="news_search")["success"] is False
+    news_empty = classify_tool_outcome("[]", tool_name="news_search")
+    assert news_empty["success"] is True
+    assert news_empty["reason"] == "empty_result"
     unreachable = '[{"target":"https://example.invalid","ok":false,"error":"timeout"}]'
     assert classify_tool_outcome(unreachable, tool_name="network_reachability")["success"] is True
     endpoint = '{"host":"example.invalid","port":443,"ok":false,"stage":"dns","error":"not found"}'
@@ -303,3 +305,13 @@ def test_valid_empty_structured_diagnostics_remain_successful():
     assert classify_tool_outcome(
         '{"subnets":[],"count":0}', tool_name="local_subnets"
     )["success"] is True
+
+
+def test_structured_tool_explicit_error_is_not_mislabeled_malformed():
+    from tools.loop_validator import classify_tool_outcome
+
+    outcome = classify_tool_outcome(
+        "Error: news search failed: provider timeout", tool_name="news_search"
+    )
+    assert outcome["success"] is False
+    assert outcome["reason"] == "tool_reported_error"

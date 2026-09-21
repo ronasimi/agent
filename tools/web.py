@@ -12,6 +12,83 @@ from .netutil import fetch_text
 from .task_requirements import canonicalize_location, is_implementation_request
 
 _TRACKING_SEARCH_HOSTS = {"googleadservices.com", "www.googleadservices.com"}
+_NO_NEWS_RESULTS_RE = re.compile(r"\bno results found\b", re.I)
+_LOCATION_COUNTRY_TERMS = {
+    "canada": {"canada"},
+    "united kingdom": {"united kingdom", "uk", "england", "scotland", "wales", "northern ireland"},
+    "australia": {"australia"},
+    "new zealand": {"new zealand"},
+}
+
+
+def _ddgs_news_rows(client, **kwargs) -> list[dict]:
+    """Return DDGS news rows, treating the provider's empty-result exception as [].
+
+    DDGS may raise ``No results found`` instead of returning an empty iterable.
+    That is a successful zero-row retrieval, not malformed tool output. Other
+    provider/transport failures still propagate to the normal error path.
+    """
+    try:
+        return list(client.news(**kwargs))
+    except Exception as exc:
+        if _NO_NEWS_RESULTS_RE.search(str(exc or "")):
+            return []
+        raise
+
+
+def _news_effective_query(query: str, location: str) -> str:
+    """Add missing locality terms exactly once instead of duplicating them."""
+    base = " ".join(str(query or "").split())
+    canonical = canonicalize_location(location)
+    if canonical:
+        qtokens = set(re.findall(r"[a-z0-9]+", base.lower()))
+        location_tokens = {
+            token for token in re.findall(r"[a-z0-9]+", canonical.lower())
+            if len(token) > 1
+        }
+        if location_tokens and not location_tokens.issubset(qtokens):
+            base = f"{canonical} {base}".strip()
+    if not re.search(r"\b(?:news|headlines?|stories?)\b", base, re.I):
+        base = f"{base} news".strip()
+    return base[:1000]
+
+
+def _news_retry_query(location: str) -> str:
+    """Build one locality-heavy fallback query for a sparse daily news index."""
+    canonical = canonicalize_location(location)
+    segments = [segment.strip() for segment in canonical.split(",") if segment.strip()]
+    if not segments:
+        return "local news"
+    quoted = " ".join(f'"{segment}"' for segment in segments[:3])
+    return f"{quoted} local news"[:1000]
+
+
+def _has_conflicting_city_qualifier(haystack: str, city: str, country: str, qualifiers: set[str]) -> bool:
+    """Reject an ambiguous city explicitly tied to another country/region."""
+    city_phrase = r"\s+".join(re.escape(token) for token in re.findall(r"[a-z0-9]+", city.lower()))
+    if not city_phrase or not country:
+        return False
+    requested_after_city = {
+        token for token in qualifiers | _LOCATION_COUNTRY_TERMS.get(country, {country})
+        if token
+    }
+    conflicting = set().union(*(terms for name, terms in _LOCATION_COUNTRY_TERMS.items() if name != country))
+    normalized = re.sub(r"[^a-z0-9]+", " ", haystack.lower()).strip()
+    if not normalized:
+        return False
+    requested_pattern = re.compile(
+        rf"\b{city_phrase}\b(?:\s+\w+){{0,3}}\s+(?:"
+        + "|".join(re.escape(term) for term in sorted(requested_after_city, key=len, reverse=True))
+        + r")\b",
+        re.I,
+    ) if requested_after_city else None
+    conflict_pattern = re.compile(
+        rf"\b{city_phrase}\b(?:\s+\w+){{0,3}}\s+(?:"
+        + "|".join(re.escape(term) for term in sorted(conflicting, key=len, reverse=True))
+        + r")\b",
+        re.I,
+    ) if conflicting else None
+    return bool(conflict_pattern and conflict_pattern.search(normalized) and not (requested_pattern and requested_pattern.search(normalized)))
 
 def _search_result_url_allowed(value: str) -> bool:
     """Drop obvious ad/tracking redirect results before they reach the model."""
@@ -85,9 +162,7 @@ def news_search(
         limit = 8
     region = str(region or "ca-en").strip()[:24] or "ca-en"
     location = canonicalize_location(location)
-    effective_query = query
-    if location:
-        effective_query = f"{location} local news {query}"[:1000]
+    effective_query = _news_effective_query(query, location)
 
     def compact_rows(items: list[dict]) -> list[dict]:
         compact: list[dict] = []
@@ -109,9 +184,10 @@ def news_search(
     try:
         from ddgs import DDGS
         client = DDGS()
-        results = list(client.news(
-            query=effective_query, region=region, timelimit=(window or None), max_results=max(limit * 2, limit + 4)
-        ))
+        results = _ddgs_news_rows(
+            client, query=effective_query, region=region, timelimit=(window or None),
+            max_results=max(limit * 2, limit + 4),
+        )
         compact = compact_rows(results)
         if location:
             compact = _location_scoped_news_rows(compact, location, limit=limit)
@@ -119,12 +195,10 @@ def news_search(
             # broader time window and a shorter, more locality-heavy query; never
             # fall through to unrelated global headlines.
             if not compact and window in {"", "d"}:
-                retry = list(client.news(
-                    query=f"{location} local news",
-                    region=region,
-                    timelimit="w",
+                retry = _ddgs_news_rows(
+                    client, query=_news_retry_query(location), region=region, timelimit="w",
                     max_results=max(limit * 2, limit + 4),
-                ))
+                )
                 compact = _location_scoped_news_rows(compact_rows(retry), location, limit=limit)
         return json.dumps(compact[:limit], ensure_ascii=False, indent=2)
     except Exception as exc:
@@ -159,6 +233,9 @@ def _location_scoped_news_rows(rows: list[dict], location: str, *, limit: int = 
         url = str(item.get("url") or "")
         haystack = " ".join((title, snippet, source, url)).lower()
         tokens = set(re.findall(r"[a-z0-9]+", haystack))
+        city_name = segments[0] if segments else ""
+        if _has_conflicting_city_qualifier(haystack, city_name, country, qualifier_tokens):
+            continue
         city_match = bool(city_tokens) and city_tokens.issubset(tokens)
         if not city_match:
             continue
@@ -266,6 +343,35 @@ def is_simple_headline_request(user_request: str) -> bool:
     if not re.search(r"\b(?:news|headlines?)\b", text) or is_implementation_request(user_request):
         return False
     return not re.search(r"\b(?:why|explain|analy[sz]e|compare|impact|opinion|summari[sz]e .*story|details? about)\b", text)
+
+
+def news_search_is_empty(content: str) -> bool:
+    """Return True only for a valid structured zero-row news result."""
+    try:
+        payload = json.loads(str(content or ""))
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return isinstance(payload, list) and not payload
+
+
+def format_news_no_results(*, location: str = "") -> str:
+    """Render a bounded retrieval miss without claiming that no news exists."""
+    canonical = canonicalize_location(location)
+    where = f" for **{canonical}**" if canonical else ""
+    return (
+        f"I couldn't find any qualifying current local headlines{where} in the news provider's bounded search. "
+        "I won't substitute unrelated or wrong-location stories."
+    )
+
+
+def format_news_provider_error(content: str, *, location: str = "") -> str:
+    """Render one terminal provider failure for a news-only fact request."""
+    canonical = canonicalize_location(location)
+    where = f" for **{canonical}**" if canonical else ""
+    detail = str(content or "").strip()
+    detail = re.sub(r"^Error:\s*", "", detail, flags=re.I)[:240]
+    suffix = f" ({detail})" if detail else ""
+    return f"I couldn't retrieve current local headlines{where} because the news provider failed{suffix}."
 
 
 def format_news_results(content: str, *, limit: int = 6, location: str = "") -> str:

@@ -133,6 +133,21 @@ def classify_tool_outcome(
     lowered = text.lower().lstrip()
     name = str(tool_name or "")
 
+    # Recognize explicit textual control/status prefixes before enforcing a
+    # structured success schema. Otherwise a legitimate ``Error: ...`` emitted
+    # by a JSON-returning primitive is mislabeled as ``malformed_structured_result``
+    # and can send the model into argument-tweaking retries. Tool-specific valid
+    # empty states take precedence over the generic ``error:`` prefix.
+    for prefix in _VALID_EMPTY_RESULT_PREFIXES.get(name, ()):
+        if lowered.startswith(prefix):
+            return {"success": True, "status": "ok", "reason": "empty_result", "fingerprint": result_fingerprint(text)}
+    if lowered.startswith("error: reminder backend unavailable:"):
+        return {"success": False, "status": "error", "reason": "tool_unavailable", "fingerprint": result_fingerprint(text)}
+    if lowered.startswith(_ERROR_PREFIXES):
+        return {"success": False, "status": "error", "reason": "tool_reported_error", "fingerprint": result_fingerprint(text)}
+    if lowered.startswith(_SOFT_FAILURE_PREFIXES):
+        return {"success": False, "status": "error", "reason": "no_progress_result", "fingerprint": result_fingerprint(text)}
+
     # A few read tools have deterministic empty/invalid-result shapes that otherwise
     # look like successful JSON/text. Mark only retrieval failures as no-progress;
     # diagnostic tools may legitimately return negative states (for example ok=false
@@ -146,6 +161,13 @@ def classify_tool_outcome(
                 and str(item.get("title") or "").strip()
                 and str(item.get("url") or "").startswith(("http://", "https://"))
             ] if isinstance(payload, list) else []
+            # The news primitive already performs its one bounded broader-window
+            # fallback internally. A valid [] therefore means "provider returned
+            # no qualifying headlines", which is a completed observation rather
+            # than a malformed/failing invocation. It still carries no news fact
+            # grounding, so callers may only report the retrieval miss.
+            if name == "news_search" and isinstance(payload, list) and not payload:
+                return {"success": True, "status": "ok", "reason": "empty_result", "fingerprint": result_fingerprint(text)}
             if not valid_rows:
                 return {"success": False, "status": "error", "reason": "no_progress_result", "fingerprint": result_fingerprint(text)}
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -173,10 +195,6 @@ def classify_tool_outcome(
             pass
     if name == "browse_url" and "the page returned no readable text content." in lowered:
         return {"success": False, "status": "error", "reason": "no_progress_result", "fingerprint": result_fingerprint(text)}
-    for prefix in _VALID_EMPTY_RESULT_PREFIXES.get(name, ()):
-        if lowered.startswith(prefix):
-            return {"success": True, "status": "ok", "reason": "empty_result", "fingerprint": result_fingerprint(text)}
-
     if name in (_JSON_LIST_RESULT_TOOLS | _JSON_DICT_RESULT_TOOLS):
         try:
             structured = json.loads(text)
@@ -217,8 +235,6 @@ def classify_tool_outcome(
         except (TypeError, ValueError, json.JSONDecodeError):
             pass
 
-    if lowered.startswith("error: reminder backend unavailable:"):
-        return {"success": False, "status": "error", "reason": "tool_unavailable", "fingerprint": result_fingerprint(text)}
     if lowered.startswith(_PARTIAL_PREFIXES):
         # Execution tools reporting a non-zero exit code may contain useful
         # diagnostic stdout, but the requested action did not succeed. Do not
@@ -226,10 +242,6 @@ def classify_tool_outcome(
         if name in {"execute_shell", "execute_python", "install_package"}:
             return {"success": False, "status": "error", "reason": "nonzero_exit", "fingerprint": result_fingerprint(text)}
         return {"success": True, "status": "partial", "reason": "nonzero_with_output", "fingerprint": result_fingerprint(text)}
-    if lowered.startswith(_ERROR_PREFIXES):
-        return {"success": False, "status": "error", "reason": "tool_reported_error", "fingerprint": result_fingerprint(text)}
-    if lowered.startswith(_SOFT_FAILURE_PREFIXES):
-        return {"success": False, "status": "error", "reason": "no_progress_result", "fingerprint": result_fingerprint(text)}
     return {"success": True, "status": "ok", "reason": "ok", "fingerprint": result_fingerprint(text)}
 
 

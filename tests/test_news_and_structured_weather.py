@@ -3,7 +3,10 @@ import json
 from tools.grounding import make_observation, requested_fact_types, validate_fact_grounding
 from tools.weather import format_weather_recovery, is_simple_weather_request
 from tools.task_requirements import build_news_query, derive_task_frame
-from tools.web import _location_scoped_news_rows, format_news_results, is_simple_headline_request
+from tools.web import (
+    _location_scoped_news_rows, format_news_no_results, format_news_results,
+    is_simple_headline_request, news_search, news_search_is_empty,
+)
 
 
 def test_latest_headlines_require_news_grounding():
@@ -32,6 +35,69 @@ def test_news_search_observation_satisfies_latest_headlines():
     report = validate_fact_grounding(req, [obs], current_turn_id=7, task_frame=frame)
     assert report["grounded"] is True
     assert report["evidence"]["news"] == ["news_search"]
+
+
+
+
+def test_news_search_no_results_exception_becomes_one_bounded_empty_observation(monkeypatch):
+    import sys
+    import types
+
+    calls = []
+
+    class FakeDDGS:
+        def news(self, **kwargs):
+            calls.append(dict(kwargs))
+            raise RuntimeError("No results found.")
+
+    monkeypatch.setitem(sys.modules, "ddgs", types.SimpleNamespace(DDGS=FakeDDGS))
+    content = news_search(
+        query="London, Ontario, Canada local latest news",
+        location="London, Ontario, Canada",
+        timelimit="d",
+        region="ca-en",
+        max_results=8,
+    )
+    assert json.loads(content) == []
+    assert news_search_is_empty(content) is True
+    # One daily lookup plus exactly one broader weekly fallback; no model-driven
+    # argument churn is necessary after this primitive returns.
+    assert len(calls) == 2
+    assert calls[0]["timelimit"] == "d"
+    assert calls[1]["timelimit"] == "w"
+    assert calls[0]["query"].lower().count("london") == 1
+
+
+def test_news_search_non_empty_provider_failure_remains_explicit_error(monkeypatch):
+    import sys
+    import types
+
+    class FakeDDGS:
+        def news(self, **_kwargs):
+            raise TimeoutError("provider timed out")
+
+    monkeypatch.setitem(sys.modules, "ddgs", types.SimpleNamespace(DDGS=FakeDDGS))
+    content = news_search(query="local headlines", location="London, Ontario, Canada")
+    assert content.startswith("Error: news search failed:")
+    assert "provider timed out" in content
+
+
+def test_location_scoped_news_filter_rejects_london_england_false_positive():
+    rows = [{
+        "date": "2026-09-16T11:02:00+00:00",
+        "title": "Cricket is growing in Canada. How these girls from Ontario are making that happen",
+        "url": "https://www.cbc.ca/kidsnews/post/cricket-is-growing-in-canada",
+        "snippet": "A group of girls from Ontario visited London, England, to learn more about cricket.",
+        "source": "CBC.ca",
+    }]
+    assert _location_scoped_news_rows(rows, "London, Ontario, Canada") == []
+
+
+def test_news_empty_renderer_reports_retrieval_miss_without_claiming_no_news_exists():
+    rendered = format_news_no_results(location="London ON")
+    assert "London, Ontario, Canada" in rendered
+    assert "couldn't find" in rendered
+    assert "no local news exists" not in rendered.lower()
 
 
 def test_news_renderer_only_uses_returned_rows():
