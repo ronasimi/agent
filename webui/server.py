@@ -105,7 +105,8 @@ async def security_headers(request, call_next):
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; "
-        "style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+        "style-src 'self' https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net data:; "
+        "script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
     )
     # This is a localhost-first development UI.  Avoid stale browser assets after
     # rebuilding the application; otherwise CSS/JS changes can appear to be missing.

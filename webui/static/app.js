@@ -59,6 +59,8 @@ async function loadSlashCommands(){
 }
 
 function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function mdiIcon(name,fallback='',extraClass=''){const extra=extraClass?` ${esc(extraClass)}`:'';return `<span class="mdi mdi-${esc(name)} mdi-ui${extra}" data-fallback="${esc(fallback)}" aria-hidden="true"></span>`;}
+function setButtonIcon(button,name,fallback=''){if(button)button.innerHTML=mdiIcon(name,fallback);}
 function safeLink(url){try{const u=new URL(url,location.origin);return ['http:','https:'].includes(u.protocol)?u.href:'#';}catch{return '#';}}
 function renderMarkdown(text){return RichOutput.renderMarkdown(text);}
 function clearTurnStatus(){
@@ -95,7 +97,7 @@ function ensureActivityGroup(){
   if(activityGroup?.isConnected)return activityGroup;
   removeEmptyChat();
   const wrap=document.createElement('details');wrap.className='turn-activity';
-  wrap.innerHTML='<summary><span class="activity-chevron">›</span><span class="activity-label">Activity</span><span class="activity-count">0</span></summary><div class="activity-body"></div>';
+  wrap.innerHTML=`<summary><span class="activity-chevron">${mdiIcon('chevron-right','›')}</span><span class="activity-label">Activity</span><span class="activity-count">0</span></summary><div class="activity-body"></div>`;
   messagesEl.appendChild(wrap);activityGroup=wrap;activityCount=0;return wrap;
 }
 function bumpActivity(){activityCount++;const count=activityGroup?.querySelector('.activity-count');if(count)count.textContent=String(activityCount);}
@@ -106,8 +108,8 @@ function renderEmptyChat(){
 }
 async function copyMessage(button,bubble){
   const text=String(bubble.dataset.raw||bubble.textContent||'');
-  try{await navigator.clipboard.writeText(text);button.textContent='✓';button.title='Copied';}catch{button.textContent='!';button.title='Copy failed';}
-  setTimeout(()=>{button.textContent='⧉';button.title='Copy message';},1000);
+  try{await navigator.clipboard.writeText(text);setButtonIcon(button,'check','✓');button.title='Copied';}catch{setButtonIcon(button,'alert-circle-outline','!');button.title='Copy failed';}
+  setTimeout(()=>{setButtonIcon(button,'content-copy','⧉');button.title='Copy message';},1000);
 }
 function messageContent(content){return content&&typeof content==='object'?{text:content,attachments:[]}:RichOutput.extractWorkspaceAttachments(String(content??''));}
 function renderMessageMedia(bubble,items){
@@ -117,7 +119,7 @@ function renderMessageMedia(bubble,items){
 function addMessage(role,content,{forceScroll=false,media=[]}={}){
   removeEmptyChat();if(role==='user')resetActivityGroup();
   const parsed=messageContent(content);const display=parsed.text;
-  const el=document.createElement('div');el.className=`message ${role}`;el.innerHTML='<div class="message-body"><div class="message-media"></div><div class="bubble"></div><div class="message-actions"><button type="button" title="Copy message" aria-label="Copy message">⧉</button></div></div>';
+  const el=document.createElement('div');el.className=`message ${role}`;el.innerHTML=`<div class="message-body"><div class="message-media"></div><div class="bubble"></div><div class="message-actions"><button type="button" title="Copy message" aria-label="Copy message">${mdiIcon('content-copy','⧉')}</button></div></div>`;
   const bubble=el.querySelector('.bubble');bubble.dataset.raw=typeof content==='string'?content:JSON.stringify(content??'');if(role==='assistant')bubble.innerHTML=renderMarkdown(display);else bubble.textContent=typeof display==='string'?display:JSON.stringify(display);
   if(!display)bubble.classList.add('attachment-only');
   el.querySelector('.message-actions button').onclick=event=>copyMessage(event.currentTarget,bubble);
@@ -128,7 +130,7 @@ function appendAssistant(content){
   const parsed=messageContent(assistantNode.dataset.raw);assistantNode.innerHTML=renderMarkdown(parsed.text);renderMessageMedia(assistantNode,parsed.attachments);scrollBottom();
 }
 function resetAssistantStream(){if(assistantNode){assistantNode.closest('.message')?.remove();assistantNode=null;}}
-function addTool(name,status,content){const group=ensureActivityGroup();const wrap=document.createElement('details');wrap.className='tool-card';const badgeClass=['ok','error','partial','history'].includes(status)?status:'history';wrap.innerHTML=`<summary>${esc(name)} <span class="badge ${badgeClass}">${esc(status)}</span></summary><pre></pre>`;wrap.querySelector('pre').textContent=content||'';group.querySelector('.activity-body').appendChild(wrap);bumpActivity();scrollBottom();}
+function addTool(name,status,content){const group=ensureActivityGroup();const wrap=document.createElement('details');wrap.className='tool-card';const badgeClass=['ok','error','partial','history'].includes(status)?status:'history';wrap.innerHTML=`<summary><span class="tool-chevron">${mdiIcon('chevron-right','›')}</span><span>${esc(name)}</span><span class="badge ${badgeClass}">${esc(status)}</span></summary><pre></pre>`;wrap.querySelector('pre').textContent=content||'';group.querySelector('.activity-body').appendChild(wrap);bumpActivity();scrollBottom();}
 function addValidator(e){const group=ensureActivityGroup();const el=document.createElement('div');el.className='validator';const recipe=e.suggested_recipe?` · recipe: ${e.suggested_recipe}`:'';const label=e.validator==='grounding'?'Grounding validator':'Fast validator';const missing=Array.isArray(e.missing_fact_types)&&e.missing_fact_types.length?` · missing: ${e.missing_fact_types.join(', ')}`:'';el.textContent=`${label}: ${e.decision||'—'}${e.diagnosis?' · '+e.diagnosis:''}${missing}${e.suggested_tool?' · '+e.suggested_tool:''}${recipe}`;group.querySelector('.activity-body').appendChild(el);bumpActivity();scrollBottom();}
 function recipeSuggestionId(e){
   const candidate=String(e?.candidate?.candidate_id||'').replace(/[^A-Za-z0-9_.:-]/g,'').slice(0,80);
@@ -151,7 +153,7 @@ function addRecipeSuggestion(e,{restore=false}={}){
   if(!candidate)return null;
   const existing=recipeCards.get(candidate.id);if(existing?.isConnected){applyRecipeDecision(existing,candidate.decision);return existing;}
   const el=document.createElement('section');el.className='recipe-suggestion';el.dataset.recipeSuggestionId=candidate.id;
-  el.innerHTML=`<div class="recipe-suggestion-text">${esc(candidate.message)}</div><div class="recipe-suggestion-footer"><div class="recipe-suggestion-actions" role="group" aria-label="Save this recipe?"><button type="button" class="recipe-vote recipe-vote-up" data-decision="up" aria-pressed="false" title="Save recipe"><span aria-hidden="true">👍</span><span class="sr-only">Save recipe</span></button><button type="button" class="recipe-vote recipe-vote-down" data-decision="down" aria-pressed="false" title="Do not save recipe"><span aria-hidden="true">👎</span><span class="sr-only">Do not save recipe</span></button></div><div class="recipe-suggestion-status" role="status" aria-live="polite"></div></div>`;
+  el.innerHTML=`<div class="recipe-suggestion-text">${esc(candidate.message)}</div><div class="recipe-suggestion-footer"><div class="recipe-suggestion-actions" role="group" aria-label="Save this recipe?"><button type="button" class="recipe-vote recipe-vote-up" data-decision="up" aria-pressed="false" title="Save recipe">${mdiIcon('thumb-up-outline','👍')}<span class="sr-only">Save recipe</span></button><button type="button" class="recipe-vote recipe-vote-down" data-decision="down" aria-pressed="false" title="Do not save recipe">${mdiIcon('thumb-down-outline','👎')}<span class="sr-only">Do not save recipe</span></button></div><div class="recipe-suggestion-status" role="status" aria-live="polite"></div></div>`;
   el.querySelectorAll('.recipe-vote').forEach(button=>button.addEventListener('click',()=>{const decision=button.dataset.decision;if(el.dataset.decision===decision)return;const updated=recipeDecisionStore.decide(candidate.id,decision);if(!updated)return;applyRecipeDecision(el,decision);submitRecipeDecision(updated,decision);}));
   applyRecipeDecision(el,candidate.decision);messagesEl.appendChild(el);recipeCards.set(candidate.id,el);scrollBottom();return el;
 }
@@ -178,7 +180,7 @@ async function addArtifact(item,{container=messagesEl,dedupe=true}={}){
   const card=document.createElement('section');card.className=`artifact-card${container!==messagesEl?' inline-artifact':''}`;card.dataset.artifactPath=path;
   const size=item?.size!=null?formatSize(Number(item.size)):'';
   const meta=size?`${size} · ${kind}`:kind;
-  card.innerHTML=`<div class="artifact-head"><div class="artifact-file-icon">${fileIcon({type:'file',name})}</div><div class="artifact-title"><strong title="${esc(name)}">${esc(name)}</strong><span>${esc(meta)}</span></div><div class="artifact-actions"><a href="${artifactUrl(item)}" target="_blank" rel="noopener" title="Open">Open</a><a class="artifact-download" href="${artifactUrl(item,true)}" download title="Download">↓ Download</a></div></div><div class="artifact-preview"></div>`;
+  card.innerHTML=`<div class="artifact-head"><div class="artifact-file-icon">${fileIcon({type:'file',name})}</div><div class="artifact-title"><strong title="${esc(name)}">${esc(name)}</strong><span>${esc(meta)}</span></div><div class="artifact-actions"><a href="${artifactUrl(item)}" target="_blank" rel="noopener" title="Open">${mdiIcon('open-in-new','↗')}<span>Open</span></a><a class="artifact-download" href="${artifactUrl(item,true)}" download title="Download">${mdiIcon('download','↓')}<span>Download</span></a></div></div><div class="artifact-preview"></div>`;
   const preview=card.querySelector('.artifact-preview');
   container.appendChild(card);if(dedupe&&container===messagesEl)artifactCards.set(path,card);scrollBottom();
   if(kind==='image')preview.innerHTML=`<a href="${artifactUrl(item)}" target="_blank" rel="noopener"><img src="${artifactUrl(item)}" alt="Preview of ${esc(name)}" loading="lazy"></a>`;
@@ -197,7 +199,7 @@ function addProfileMedia({container=messagesEl,dedupe=true}={}){
   if(dedupe&&artifactCards.has(key)){const existing=artifactCards.get(key);for(const link of existing.querySelectorAll('a'))link.href=url;const img=existing.querySelector('img');if(img)img.src=url;return existing;}
   removeEmptyChat();
   const card=document.createElement('section');card.className=`artifact-card${container!==messagesEl?' inline-artifact':''}`;card.dataset.artifactPath=key;
-  card.innerHTML=`<div class="artifact-head"><div class="artifact-file-icon">▧</div><div class="artifact-title"><strong>Current profile picture</strong><span>image</span></div><div class="artifact-actions"><a href="${url}" target="_blank" rel="noopener" title="Open">Open</a><a class="artifact-download" href="${url}" download="profile-picture.png" title="Download">↓ Download</a></div></div><div class="artifact-preview"><a href="${url}" target="_blank" rel="noopener"><img src="${url}" alt="Current profile picture" loading="lazy"></a></div>`;
+  card.innerHTML=`<div class="artifact-head"><div class="artifact-file-icon">${mdiIcon('image-outline','▧')}</div><div class="artifact-title"><strong>Current profile picture</strong><span>image</span></div><div class="artifact-actions"><a href="${url}" target="_blank" rel="noopener" title="Open">${mdiIcon('open-in-new','↗')}<span>Open</span></a><a class="artifact-download" href="${url}" download="profile-picture.png" title="Download">${mdiIcon('download','↓')}<span>Download</span></a></div></div><div class="artifact-preview"><a href="${url}" target="_blank" rel="noopener"><img src="${url}" alt="Current profile picture" loading="lazy"></a></div>`;
   container.appendChild(card);if(dedupe&&container===messagesEl)artifactCards.set(key,card);scrollBottom();return card;
 }
 function addMedia(refs,{container=messagesEl,dedupe=true}={}){for(const ref of(refs||[])){const item=ref&&typeof ref==='object'?ref:{path:String(ref||'')};const value=String(item.path||item.reference||'');if(value==='profile-image://current'){addProfileMedia({container,dedupe});continue;}if(!value.startsWith('/app/workspace/'))continue;void addArtifact({...item,path:value,name:item.name||value.split('/').pop(),preview_kind:item.preview_kind||artifactKindFromPath(value)},{container,dedupe});}scrollBottom();}
@@ -288,8 +290,8 @@ function renderConversationList(){
     const wrap=document.createElement('div');wrap.className='recent-conversation';wrap.dataset.conversationId=row.id;
     const title=displayConversationTitle(row);
     const btn=document.createElement('button');btn.type='button';btn.className='recent-item';btn.dataset.panel='chat';btn.dataset.conversationId=row.id;btn.classList.toggle('active',row.id===activeConversationId);btn.title=title;btn.innerHTML=`<span>${esc(title)}</span>`;btn.onclick=()=>activateConversation(row.id);
-    const more=document.createElement('button');more.type='button';more.className='recent-more';more.title='Conversation options';more.setAttribute('aria-label',`Options for ${title}`);more.textContent='⋯';
-    const menu=document.createElement('div');menu.className='conversation-menu';menu.innerHTML='<button type="button" class="conversation-rename">Rename</button><button type="button" class="recent-delete">Delete</button>';
+    const more=document.createElement('button');more.type='button';more.className='recent-more';more.title='Conversation options';more.setAttribute('aria-label',`Options for ${title}`);more.innerHTML=mdiIcon('dots-horizontal','⋯');
+    const menu=document.createElement('div');menu.className='conversation-menu';menu.innerHTML=`<button type="button" class="conversation-rename">${mdiIcon('pencil-outline','✎')}<span>Rename</span></button><button type="button" class="recent-delete">${mdiIcon('delete-outline','×')}<span>Delete</span></button>`;
     more.onclick=e=>{e.preventDefault();e.stopPropagation();const opening=!menu.classList.contains('open');closeConversationMenus();menu.classList.toggle('open',opening);};
     menu.querySelector('.conversation-rename').onclick=async e=>{e.stopPropagation();closeConversationMenus();try{await renameSavedConversation(row);}catch(err){console.error(err);window.alert(err.message||String(err));}};
     menu.querySelector('.recent-delete').onclick=async e=>{e.stopPropagation();closeConversationMenus();try{await deleteSavedConversation(row);}catch(err){console.error(err);window.alert(err.message||String(err));}};
@@ -311,11 +313,11 @@ async function loadState(conversationId=activeConversationId){const cid=String(c
 async function loadJobs(){const rows=await api('/api/jobs');$('#jobsView').innerHTML=rows.length?rows.map(j=>`<div class="data-card"><strong>${esc(j.title)}</strong><div class="muted">${esc(j.job_type)} · ${esc(j.status)} · ${esc(j.id).slice(0,8)}</div>${j.error?`<pre>${esc(j.error)}</pre>`:''}</div>`).join(''):'<div class="muted">No jobs.</div>';}
 async function loadReminders(){const rows=await api('/api/reminders');$('#remindersView').innerHTML=rows.length?rows.map(r=>`<div class="data-card"><strong>${esc(r.title)}</strong><div class="muted">${esc(r.when_iso)} · ${esc(r.repeat_mode)} · ${esc(r.status)}</div><div>${esc(r.message||'')}</div></div>`).join(''):'<div class="muted">No reminders.</div>';}
 
-function fileIcon(item){if(item.type==='directory')return '▰';const ext=(item.name.split('.').pop()||'').toLowerCase();if(['png','jpg','jpeg','webp','gif'].includes(ext))return '▧';if(ext==='pdf')return '▤';if(['md','txt','log'].includes(ext))return '▥';if(['py','js','ts','sh','yaml','yml','json','toml'].includes(ext))return '⌘';if(['zip','gz','tar','7z'].includes(ext))return '◇';return '□';}
+function fileIcon(item){if(item.type==='directory')return mdiIcon('folder','▰');const ext=(item.name.split('.').pop()||'').toLowerCase();if(['png','jpg','jpeg','webp','gif'].includes(ext))return mdiIcon('file-image-outline','▧');if(ext==='pdf')return mdiIcon('file-pdf-box','▤');if(['md','txt','log'].includes(ext))return mdiIcon('file-document-outline','▥');if(['py','js','ts','sh','yaml','yml','json','toml'].includes(ext))return mdiIcon('file-code-outline','⌘');if(['zip','gz','tar','7z'].includes(ext))return mdiIcon('folder-zip-outline','◇');return mdiIcon('file-outline','□');}
 function formatSize(n){if(n==null)return 'Folder';if(n<1024)return `${n} B`;if(n<1048576)return `${(n/1024).toFixed(n<10240?1:0)} KB`;if(n<1073741824)return `${(n/1048576).toFixed(1)} MB`;return `${(n/1073741824).toFixed(1)} GB`;}
 function fileHref(item,download=false){return `/api/files/${encodePath(item.relative)}${download?'?download=true':''}`;}
 function attachWorkspaceFile(item){if(item.type!=='file')return;if(!attachments.some(a=>a.path===item.path))attachments.push({name:item.name,path:item.path,media:item.media,text:item.text});renderAttachments();promptEl.focus();}
-function renderWorkspace(){const q=$('#workspaceFilter').value.trim().toLowerCase();const rows=workspaceRows.filter(x=>!q||x.name.toLowerCase().includes(q));$('#workspaceList').innerHTML=rows.length?rows.map((item,i)=>`<div class="workspace-item ${item.type==='directory'?'workspace-folder':''}" data-i="${i}" data-path="${esc(item.relative)}"><div class="workspace-icon">${fileIcon(item)}</div><div><div class="workspace-name" title="${esc(item.name)}">${esc(item.name)}</div><div class="workspace-meta">${item.type==='directory'?'Folder':formatSize(item.size)}</div></div><div class="workspace-actions">${item.type==='file'?`<button class="workspace-attach" title="Attach to message">＋</button><button class="workspace-open-file" title="Open">↗</button><button class="workspace-download" title="Download">↓</button>`:'<button class="workspace-open-folder" title="Open folder">›</button>'}</div></div>`).join(''):'<div class="workspace-empty">No matching files.</div>';
+function renderWorkspace(){const q=$('#workspaceFilter').value.trim().toLowerCase();const rows=workspaceRows.filter(x=>!q||x.name.toLowerCase().includes(q));$('#workspaceList').innerHTML=rows.length?rows.map((item,i)=>`<div class="workspace-item ${item.type==='directory'?'workspace-folder':''}" data-i="${i}" data-path="${esc(item.relative)}"><div class="workspace-icon">${fileIcon(item)}</div><div><div class="workspace-name" title="${esc(item.name)}">${esc(item.name)}</div><div class="workspace-meta">${item.type==='directory'?'Folder':formatSize(item.size)}</div></div><div class="workspace-actions">${item.type==='file'?`<button class="workspace-attach" title="Attach to message" aria-label="Attach to message">${mdiIcon('paperclip','＋')}</button><button class="workspace-open-file" title="Open" aria-label="Open file">${mdiIcon('open-in-new','↗')}</button><button class="workspace-download" title="Download" aria-label="Download file">${mdiIcon('download','↓')}</button>`:`<button class="workspace-open-folder" title="Open folder" aria-label="Open folder">${mdiIcon('chevron-right','›')}</button>`}</div></div>`).join(''):'<div class="workspace-empty">No matching files.</div>';
   [...$('#workspaceList').querySelectorAll('.workspace-item')].forEach((el)=>{const original=workspaceRows.find(x=>x.relative===el.dataset.path);if(!original)return;el.querySelector('.workspace-name').onclick=()=>original.type==='directory'?loadWorkspace(original.relative):window.open(fileHref(original),'_blank','noopener');const a=el.querySelector('.workspace-attach');if(a)a.onclick=(e)=>{e.stopPropagation();attachWorkspaceFile(original);};const o=el.querySelector('.workspace-open-file');if(o)o.onclick=(e)=>{e.stopPropagation();window.open(fileHref(original),'_blank','noopener');};const d=el.querySelector('.workspace-download');if(d)d.onclick=(e)=>{e.stopPropagation();window.open(fileHref(original,true),'_blank','noopener');};const f=el.querySelector('.workspace-open-folder');if(f)f.onclick=(e)=>{e.stopPropagation();loadWorkspace(original.relative);};});
 }
 async function loadWorkspace(path=workspacePath){try{const data=await api(`/api/workspace?path=${encodeURIComponent(path||'')}`);workspacePath=data.path||'';workspaceRows=data.items||[];$('#workspacePath').textContent='/' + workspacePath;$('#workspaceBack').disabled=!workspacePath;$('#workspaceBack').dataset.parent=data.parent??'';$('#workspaceFoot').textContent=`${workspaceRows.length}${data.truncated?'+':''} item${workspaceRows.length===1?'':'s'}${data.truncated?` · showing first ${data.limit}`:''}`;renderWorkspace();}catch(e){$('#workspaceList').innerHTML=`<div class="workspace-empty">${esc(e.message)}</div>`;}}
@@ -429,7 +431,7 @@ async function uploadWorkspaceFiles(files){
   }
   setStatus('Ready');await loadWorkspace(workspacePath);
 }
-function renderAttachments(){$('#attachments').innerHTML=attachments.map((a,i)=>`<span class="attachment-chip">${esc(a.name)} <button data-i="${i}" aria-label="Remove">×</button></span>`).join('');$('#attachments').querySelectorAll('button').forEach(b=>b.onclick=()=>{attachments.splice(Number(b.dataset.i),1);renderAttachments();});}
+function renderAttachments(){$('#attachments').innerHTML=attachments.map((a,i)=>`<span class="attachment-chip">${esc(a.name)} <button data-i="${i}" aria-label="Remove attachment">${mdiIcon('close','×')}</button></span>`).join('');$('#attachments').querySelectorAll('button').forEach(b=>b.onclick=()=>{attachments.splice(Number(b.dataset.i),1);renderAttachments();});}
 
 function submitChatMessage(text,mediaItems=[],{recordHistory=true,clearComposer=true,deferUntilIdle=false}={}){
   const content=String(text||'').trim();const items=Array.from(mediaItems||[]).filter(item=>item&&item.path);
@@ -460,14 +462,14 @@ $('#scrollLatest').addEventListener('click',()=>scrollBottom(true));
 $('#newChat').addEventListener('click',async()=>{if(activeTurn)return;await createFreshConversation();await Promise.all([loadConversations(),loadHistory(),loadState()]);showPanel('chat');promptEl.focus();});
 $('#refresh').addEventListener('click',()=>Promise.all([loadHistory(),loadState(),loadJobs(),loadReminders(),loadWorkspace(workspacePath)]));
 async function copyEntireChat(){
-  const button=$('#copyChat');const original=button.textContent;
+  const button=$('#copyChat');const original=button.innerHTML;
   try{
     const response=await fetch(`/api/history/export?${conversationQuery()}`);if(!response.ok)throw new Error(await response.text());const text=await response.text();
     if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(text);
     else{const area=document.createElement('textarea');area.value=text;area.style.position='fixed';area.style.opacity='0';document.body.appendChild(area);area.select();document.execCommand('copy');area.remove();}
-    button.textContent='✓';button.title='Copied chat history';
-  }catch(e){console.error('Copy chat history failed',e);button.textContent='!';button.title='Copy failed';}
-  finally{setTimeout(()=>{button.textContent=original;button.title='Copy entire chat history';},1200);}
+    setButtonIcon(button,'check','✓');button.title='Copied chat history';
+  }catch(e){console.error('Copy chat history failed',e);setButtonIcon(button,'alert-circle-outline','!');button.title='Copy failed';}
+  finally{setTimeout(()=>{button.innerHTML=original;button.title='Copy entire chat history';},1200);}
 }
 $('#copyChat').addEventListener('click',copyEntireChat);
 document.querySelectorAll('[data-panel]').forEach(btn=>btn.onclick=()=>{showPanel(btn.dataset.panel);if(window.matchMedia('(max-width: 760px)').matches)toggleLeftSidebar(false);});

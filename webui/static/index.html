@@ -7,6 +7,7 @@
   <title>Al Agent</title>
   <link rel="icon" type="image/x-icon" href="/static/assets/favicon.ico" />
   <link rel="icon" type="image/png" sizes="32x32" href="/static/assets/favicon.png" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/css/materialdesignicons.min.css" referrerpolicy="no-referrer" />
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
@@ -17,31 +18,31 @@
           <img class="brand-logo" src="/static/assets/agent-logo.png" alt="Al Agent logo" />
           <span class="brand-name">Al Agent</span>
         </div>
-        <button id="collapseSidebar" class="ghost-icon desktop-only" title="Collapse sidebar" aria-label="Collapse sidebar" aria-expanded="true">◫</button>
+        <button id="collapseSidebar" class="ghost-icon desktop-only" title="Collapse sidebar" aria-label="Collapse sidebar" aria-expanded="true"><span class="mdi mdi-arrow-collapse-left mdi-ui" data-fallback="◫" aria-hidden="true"></span></button>
       </div>
 
       <button id="newChat" class="sidebar-action">
-        <span class="side-icon">✎</span><span>New chat</span>
+        <span class="side-icon mdi mdi-square-edit-outline mdi-ui" data-fallback="✎" aria-hidden="true"></span><span>New chat</span>
       </button>
       <button id="searchChat" class="sidebar-action">
-        <span class="side-icon">⌕</span><span>Search</span>
+        <span class="side-icon mdi mdi-magnify mdi-ui" data-fallback="⌕" aria-hidden="true"></span><span>Search</span>
       </button>
       <div id="conversationSearch" class="conversation-search hidden">
-        <span aria-hidden="true">⌕</span>
+        <span class="mdi mdi-magnify mdi-ui" data-fallback="⌕" aria-hidden="true"></span>
         <input id="conversationSearchInput" type="search" placeholder="Search chats" autocomplete="off" aria-label="Search conversations" />
-        <button id="conversationSearchClose" type="button" aria-label="Close conversation search">×</button>
+        <button id="conversationSearchClose" type="button" aria-label="Close conversation search"><span class="mdi mdi-close mdi-ui" data-fallback="×" aria-hidden="true"></span></button>
       </div>
       <button id="profileSetup" class="sidebar-action">
-        <span class="side-icon">◎</span><span>Profile setup</span>
+        <span class="side-icon mdi mdi-account-circle-outline mdi-ui" data-fallback="◎" aria-hidden="true"></span><span>Profile setup</span>
       </button>
       <button id="connectionsSetup" class="sidebar-action">
-        <span class="side-icon">⌁</span><span>Connections</span>
+        <span class="side-icon mdi mdi-link-variant mdi-ui" data-fallback="⌁" aria-hidden="true"></span><span>Connections</span>
       </button>
 
       <nav class="nav" aria-label="Agent views">
-        <button class="nav-item" data-panel="state"><span class="side-icon">◈</span><span>Working state</span></button>
-        <button class="nav-item" data-panel="jobs"><span class="side-icon">◷</span><span>Jobs</span></button>
-        <button class="nav-item" data-panel="reminders"><span class="side-icon">⌁</span><span>Reminders</span></button>
+        <button class="nav-item" data-panel="state"><span class="side-icon mdi mdi-view-dashboard-outline mdi-ui" data-fallback="◈" aria-hidden="true"></span><span>Working state</span></button>
+        <button class="nav-item" data-panel="jobs"><span class="side-icon mdi mdi-briefcase-outline mdi-ui" data-fallback="◷" aria-hidden="true"></span><span>Jobs</span></button>
+        <button class="nav-item" data-panel="reminders"><span class="side-icon mdi mdi-bell-outline mdi-ui" data-fallback="◷" aria-hidden="true"></span><span>Reminders</span></button>
       </nav>
 
       <div class="sidebar-section-title">Recents</div>
@@ -61,8 +62,8 @@
     <main class="main">
       <header class="topbar">
         <div class="topbar-left">
-          <button id="mobileSidebar" class="ghost-icon mobile-only" title="Menu" aria-label="Menu" aria-expanded="false">☰</button>
-          <button id="sidebarExpand" class="ghost-icon desktop-sidebar-expand hidden" title="Expand sidebar" aria-label="Expand sidebar" aria-expanded="false">☷</button>
+          <button id="mobileSidebar" class="ghost-icon mobile-only" title="Menu" aria-label="Menu" aria-expanded="false"><span class="mdi mdi-menu mdi-ui" data-fallback="☰" aria-hidden="true"></span></button>
+          <button id="sidebarExpand" class="ghost-icon desktop-sidebar-expand hidden" title="Expand sidebar" aria-label="Expand sidebar" aria-expanded="false"><span class="mdi mdi-menu-open mdi-ui" data-fallback="☷" aria-hidden="true"></span></button>
           <div class="panel-heading" aria-label="Current view">
             <img class="panel-logo" src="/static/assets/agent-logo.png" alt="Al Agent logo" />
             <span id="panelTitle">Al Agent</span>
@@ -70,27 +71,27 @@
         </div>
         <div class="topbar-actions">
           <button id="workspaceToggle" class="top-action" title="Toggle files in workspace" aria-expanded="false" aria-controls="workspaceDrawer">
-            <span>⇧</span><span class="top-action-label">Files in workspace</span>
+            <span class="mdi mdi-folder-outline mdi-ui" data-fallback="⇧" aria-hidden="true"></span><span class="top-action-label">Files in workspace</span>
           </button>
-          <button id="refresh" class="ghost-icon" title="Refresh" aria-label="Refresh">↻</button>
-          <button id="copyChat" class="ghost-icon" title="Copy entire chat history" aria-label="Copy entire chat history">⧉</button>
+          <button id="refresh" class="ghost-icon" title="Refresh" aria-label="Refresh"><span class="mdi mdi-refresh mdi-ui" data-fallback="↻" aria-hidden="true"></span></button>
+          <button id="copyChat" class="ghost-icon" title="Copy entire chat history" aria-label="Copy entire chat history"><span class="mdi mdi-content-copy mdi-ui" data-fallback="⧉" aria-hidden="true"></span></button>
         </div>
       </header>
 
       <section id="chatPanel" class="panel chat-panel">
         <div id="messages" class="messages"></div>
-        <button id="scrollLatest" class="scroll-latest hidden" type="button" title="Scroll to latest" aria-label="Scroll to latest">↓</button>
+        <button id="scrollLatest" class="scroll-latest hidden" type="button" title="Scroll to latest" aria-label="Scroll to latest"><span class="mdi mdi-arrow-down mdi-ui" data-fallback="↓" aria-hidden="true"></span></button>
         <div class="composer-wrap">
           <div class="composer-inner">
             <div id="attachments" class="attachments"></div>
             <div id="slashMenu" class="slash-menu hidden" role="listbox" aria-label="Slash commands"></div>
             <form id="composer" class="composer" aria-label="Chat composer">
-              <button id="composerAddFile" class="attach circle-button" type="button" title="Add files" aria-label="Add files">＋</button>
+              <button id="composerAddFile" class="attach circle-button" type="button" title="Add files" aria-label="Add files"><span class="mdi mdi-plus mdi-ui" data-fallback="＋" aria-hidden="true"></span></button>
               <input id="fileInput" class="hidden-file-input" type="file" multiple />
               <textarea id="prompt" rows="1" placeholder="Ask anything" aria-controls="slashMenu" aria-autocomplete="list" aria-expanded="false"></textarea>
               <label class="think-toggle" title="Ask the main model to reason longer"><input id="thinking" type="checkbox" /><span>Think</span></label>
-              <button id="send" type="submit" class="send circle-button" title="Send" aria-label="Send">↑</button>
-              <button id="stop" type="button" class="stop circle-button hidden" title="Stop" aria-label="Stop">■</button>
+              <button id="send" type="submit" class="send circle-button" title="Send" aria-label="Send"><span class="mdi mdi-arrow-up mdi-ui" data-fallback="↑" aria-hidden="true"></span></button>
+              <button id="stop" type="button" class="stop circle-button hidden" title="Stop" aria-label="Stop"><span class="mdi mdi-stop mdi-ui" data-fallback="■" aria-hidden="true"></span></button>
               <div id="composerDropHint" class="composer-drop-hint" aria-hidden="true">Drop files here to attach</div>
             </form>
             <div class="hint"><span>Local models can make mistakes. Verify important results.</span><span class="history-hint">↑/↓ history · Shift+Enter newline</span></div>
@@ -115,14 +116,14 @@
           <strong>Files in workspace</strong>
           <div class="muted small">/app/workspace</div>
         </div>
-        <button id="workspaceClose" class="ghost-icon" aria-label="Close files in workspace">×</button>
+        <button id="workspaceClose" class="ghost-icon" aria-label="Close files in workspace"><span class="mdi mdi-close mdi-ui" data-fallback="×" aria-hidden="true"></span></button>
       </div>
       <div class="workspace-tools">
-        <button id="workspaceBack" class="ghost-icon" title="Parent folder">←</button>
+        <button id="workspaceBack" class="ghost-icon" title="Parent folder"><span class="mdi mdi-arrow-left mdi-ui" data-fallback="←" aria-hidden="true"></span></button>
         <div id="workspacePath" class="workspace-path">/</div>
-        <button id="workspaceAddFile" class="workspace-add-file" type="button" title="Upload files to this workspace folder">＋ <span>Add file</span></button>
+        <button id="workspaceAddFile" class="workspace-add-file" type="button" title="Upload files to this workspace folder"><span class="mdi mdi-file-plus-outline mdi-ui" data-fallback="＋" aria-hidden="true"></span><span>Add file</span></button>
         <input id="workspaceFileInput" class="hidden-file-input" type="file" multiple />
-        <button id="workspaceRefresh" class="ghost-icon" title="Refresh workspace">↻</button>
+        <button id="workspaceRefresh" class="ghost-icon" title="Refresh workspace"><span class="mdi mdi-refresh mdi-ui" data-fallback="↻" aria-hidden="true"></span></button>
       </div>
       <div class="workspace-filter-wrap">
         <input id="workspaceFilter" type="search" placeholder="Filter files" autocomplete="off" />
@@ -135,7 +136,7 @@
     <form id="onboardingForm">
       <header class="onboarding-head">
         <div><h2 id="oobeTitle">Set up Al Agent</h2><p id="oobeSubtitle">Personalize your local assistant.</p></div>
-        <button id="oobeClose" class="dialog-close" type="button" aria-label="Close setup">×</button>
+        <button id="oobeClose" class="dialog-close" type="button" aria-label="Close setup"><span class="mdi mdi-close mdi-ui" data-fallback="×" aria-hidden="true"></span></button>
       </header>
       <div class="onboarding-steps" aria-label="Setup progress">
         <div class="oobe-step-marker active" data-oobe-marker="profile"><span>1</span><strong>Profile</strong></div>
@@ -165,8 +166,8 @@
           <p>Search and read Gmail, calendars, and events when you ask. Al Agent cannot send mail or change either service.</p>
         </div>
         <div class="capability-grid">
-          <article class="capability-card"><div class="capability-icon">M</div><div><strong>Gmail</strong><p>Search messages and read bounded message bodies. Attachments are not downloaded.</p><code>gmail.readonly</code></div></article>
-          <article class="capability-card"><div class="capability-icon calendar">31</div><div><strong>Calendar</strong><p>List calendars and inspect schedules and event details.</p><code>calendar.readonly</code></div></article>
+          <article class="capability-card"><div class="capability-icon"><span class="mdi mdi-email-outline mdi-ui" data-fallback="M" aria-hidden="true"></span></div><div><strong>Gmail</strong><p>Search messages and read bounded message bodies. Attachments are not downloaded.</p><code>gmail.readonly</code></div></article>
+          <article class="capability-card"><div class="capability-icon calendar"><span class="mdi mdi-calendar-month-outline mdi-ui" data-fallback="31" aria-hidden="true"></span></div><div><strong>Calendar</strong><p>List calendars and inspect schedules and event details.</p><code>calendar.readonly</code></div></article>
         </div>
         <details class="oauth-guide">
           <summary>Google Cloud setup</summary>
@@ -196,7 +197,7 @@
       </section>
 
       <section id="oobeStepFinish" class="oobe-panel oobe-finish hidden" data-oobe-panel="finish">
-        <div class="finish-mark">✓</div>
+        <div class="finish-mark"><span class="mdi mdi-check mdi-ui" data-fallback="✓" aria-hidden="true"></span></div>
         <h3>You’re ready</h3>
         <p>Your profile is set. Google Workspace remains optional and can be managed from <strong>Connections</strong> at any time.</p>
         <div id="oobeFinishStatus" class="finish-status"></div>
@@ -210,6 +211,7 @@
   <script src="/static/command_history.js"></script>
   <script src="/static/rich_output.js"></script>
   <script src="/static/interaction_state.js"></script>
+  <script src="/static/mdi_support.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

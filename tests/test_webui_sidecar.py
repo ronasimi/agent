@@ -35,8 +35,35 @@ def test_webui_module_entrypoint_honors_environment(monkeypatch):
 
 
 def test_webui_static_assets_exist():
-    for name in ("index.html", "style.css", "command_history.js", "rich_output.js", "interaction_state.js", "app.js"):
+    for name in ("index.html", "style.css", "mdi_support.js", "command_history.js", "rich_output.js", "interaction_state.js", "app.js"):
         assert (Path("webui/static") / name).is_file()
+
+
+def test_webui_uses_pictogrammers_mdi_icons_with_resilient_fallback():
+    root = Path(__file__).resolve().parents[1]
+    html = (root / "webui" / "static" / "index.html").read_text(encoding="utf-8")
+    js = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
+    css = (root / "webui" / "static" / "style.css").read_text(encoding="utf-8")
+    support = (root / "webui" / "static" / "mdi_support.js").read_text(encoding="utf-8")
+    server = (root / "webui" / "server.py").read_text(encoding="utf-8")
+
+    assert "@mdi/font@7.4.47/css/materialdesignicons.min.css" in html
+    for icon in (
+        "mdi-square-edit-outline",
+        "mdi-magnify",
+        "mdi-account-circle-outline",
+        "mdi-bell-outline",
+        "mdi-folder-outline",
+        "mdi-content-copy",
+    ):
+        assert icon in html
+    assert "function mdiIcon" in js
+    assert "file-image-outline" in js
+    assert "data-fallback" in html
+    assert "document.fonts.load" in support
+    assert "html.mdi-ready .mdi-ui::before" in css
+    assert "style-src 'self' https://cdn.jsdelivr.net" in server
+    assert "font-src 'self' https://cdn.jsdelivr.net data:" in server
 
 
 def test_frontend_event_context_routes_events():
@@ -166,7 +193,8 @@ def test_generated_artifact_preview_ui_and_event_contract_exist():
     assert "/api/pdf-preview/{path:path}" in server
     assert "artifact_created" in js
     assert "addArtifact" in js
-    assert "↓ Download" in js
+    assert "mdiIcon('download','↓')" in js
+    assert "mdiIcon('open-in-new','↗')" in js
     assert ".artifact-card" in css
     assert ".artifact-preview" in css
 
