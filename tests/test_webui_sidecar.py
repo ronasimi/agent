@@ -475,3 +475,25 @@ def test_sidebar_reopen_targets_clicked_conversation_and_highlights_only_it():
     assert "cid!==activeConversationId" in js
     assert "b.dataset.conversationId===activeConversationId" in js
     assert "document.querySelectorAll('.nav-item,.recent-item')" not in js
+
+
+def test_health_endpoint_reports_current_model_roles_without_removed_micro_role():
+    from webui import server
+
+    payload = server.health()
+    assert payload["ok"] is True
+    assert payload["main_model"] == server.agent_runtime.MODEL
+    assert payload["fast_model"] == server.agent_runtime.FAST_MODEL
+    assert payload["context"] == server.agent_runtime.MAX_CTX
+    assert payload["report_model"] == str(server.agent_runtime.AGENT_CFG.get("report_model") or "")
+    assert "micro_model" not in payload
+
+
+def test_webui_health_failure_isolated_from_chat_bootstrap():
+    root = Path(__file__).resolve().parents[1]
+    js = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "async function loadHealth()" in js
+    assert "Health load failed" in js
+    assert "Promise.allSettled([loadTheme(),loadHealth(),loadSlashCommands(),loadJobs(),loadReminders(),loadWorkspace('')])" in js
+    assert "Promise.allSettled([loadHistory(),loadState()])" in js

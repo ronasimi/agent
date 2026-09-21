@@ -179,11 +179,18 @@ def commands() -> list[dict[str, Any]]:
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
+    """Return the configured model roles used by the browser status footer.
+
+    Keep this endpoint limited to stable runtime/configuration fields.  The old
+    ``MICRO_MODEL`` role was removed from the harness, but a stale reference
+    here made the entire endpoint return HTTP 500 and left the sidebar model
+    summary at its placeholder values.
+    """
     return {
         "ok": True,
         "main_model": agent_runtime.MODEL,
         "fast_model": agent_runtime.FAST_MODEL,
-        "micro_model": agent_runtime.MICRO_MODEL,
+        "report_model": str(agent_runtime.AGENT_CFG.get("report_model") or ""),
         "context": agent_runtime.MAX_CTX,
         "working_state": agent_runtime.WORKING_STATE_ENABLED,
     }

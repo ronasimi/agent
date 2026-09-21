@@ -205,7 +205,23 @@ function encodePath(path){return String(path||'').split('/').filter(Boolean).map
 async function api(path,opts={}){const r=await fetch(path,opts);if(!r.ok){const raw=await r.text();let message=raw||`Request failed (${r.status})`;try{const parsed=JSON.parse(raw);message=parsed?.detail?.message||parsed?.detail||message;}catch{}throw new Error(String(message));}return r.json();}
 function cssVar(name,value){document.documentElement.style.setProperty(name,value);}
 async function loadTheme(){try{const t=await api('/api/theme');const c=t.colors||{};const map={foreground:'--xr-foreground',background:'--xr-background',cursorColor:'--xr-cursor'};for(const[k,v]of Object.entries(map))if(c[k])cssVar(v,c[k]);for(let i=0;i<16;i++)if(c[`color${i}`])cssVar(`--xr-color${i}`,c[`color${i}`]);}catch(e){console.warn('Theme load failed',e);}}
-async function loadHealth(){const h=await api('/api/health');$('#mainModel').textContent=h.main_model;$('#fastModel').textContent=h.fast_model;$('#contextSize').textContent=(h.context/1024).toFixed(0)+'K';}
+async function loadHealth(){
+  const main=$('#mainModel'),fast=$('#fastModel'),context=$('#contextSize');
+  try{
+    const h=await api('/api/health');
+    const mainName=String(h.main_model||'Unknown model'),fastName=String(h.fast_model||'Unknown fast model');
+    const contextTokens=Number(h.context);
+    main.textContent=mainName;main.title=`Main model: ${mainName}`;
+    fast.textContent=fastName;fast.title=`Fast model: ${fastName}`;
+    context.textContent=Number.isFinite(contextTokens)&&contextTokens>0?`${Math.round(contextTokens/1024)}K`:'—';
+    context.title=Number.isFinite(contextTokens)&&contextTokens>0?`${contextTokens.toLocaleString()} token context`:'Context size unavailable';
+    return h;
+  }catch(e){
+    main.textContent='Model status unavailable';main.title='Unable to load /api/health';
+    fast.textContent='—';fast.title='';context.textContent='—';context.title='';
+    console.warn('Health load failed',e);return null;
+  }
+}
 function refreshProfileImage(){const avatar=document.querySelector('.agent-avatar'),img=$('#userProfileImage');if(!avatar||!img)return;img.onload=()=>avatar.classList.add('has-image');img.onerror=()=>avatar.classList.remove('has-image');img.src=`/api/profile-image?v=${Date.now()}`;}
 function conversationQuery(conversationId=activeConversationId){return `conversation_id=${encodeURIComponent(conversationId)}`;}
 function displayConversationTitle(row){const title=String(row?.title||'').trim();return !title||title==='New conversation'||title==='Current conversation'?'New chat':title;}
@@ -549,18 +565,26 @@ window.addEventListener('resize',()=>{
 });
 refreshProfileImage();
 async function bootstrapWebUi(){
-  await Promise.all([loadTheme(),loadHealth(),loadSlashCommands(),loadJobs(),loadReminders(),loadWorkspace('')]);
+  // Sidebar metadata and secondary panels must never prevent chat startup. A
+  // failed health/jobs/reminders request used to reject this Promise and abort
+  // conversation restoration + WebSocket setup entirely.
+  await Promise.allSettled([loadTheme(),loadHealth(),loadSlashCommands(),loadJobs(),loadReminders(),loadWorkspace('')]);
   const restored=readActiveConversation();
   if(restored)setActiveConversation(restored,{persist:false});
-  let rows=await loadConversations();
-  if(!activeConversationId||!rows.some(row=>row.id===activeConversationId)){
-    if(rows.length)setActiveConversation(rows[0].id);
-    else await createFreshConversation();
-    rows=await loadConversations();
-  }else setActiveConversation(activeConversationId);
-  await Promise.all([loadHistory(),loadState()]);
+  try{
+    let rows=await loadConversations();
+    if(!activeConversationId||!rows.some(row=>row.id===activeConversationId)){
+      if(rows.length)setActiveConversation(rows[0].id);
+      else await createFreshConversation();
+      rows=await loadConversations();
+    }else setActiveConversation(activeConversationId);
+  }catch(err){
+    console.error('Conversation index load failed',err);
+    if(!activeConversationId)setActiveConversation('default');
+  }
+  await Promise.allSettled([loadHistory(),loadState()]);
   showPanel('chat');
   connect();
   await checkOnboarding();
 }
-bootstrapWebUi().catch(err=>{console.error('Web UI bootstrap failed',err);setStatus('Startup failed','error');connect();});
+bootstrapWebUi().catch(err=>{console.error('Web UI bootstrap failed',err);setStatus('Startup failed','error');if(!socket||socket.readyState===WebSocket.CLOSED)connect();});
