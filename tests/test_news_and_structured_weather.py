@@ -42,6 +42,7 @@ def test_news_search_observation_satisfies_latest_headlines():
 def test_news_search_no_results_exception_becomes_one_bounded_empty_observation(monkeypatch):
     import sys
     import types
+    import tools.web as web_tools
 
     calls = []
 
@@ -51,6 +52,7 @@ def test_news_search_no_results_exception_becomes_one_bounded_empty_observation(
             raise RuntimeError("No results found.")
 
     monkeypatch.setitem(sys.modules, "ddgs", types.SimpleNamespace(DDGS=FakeDDGS))
+    monkeypatch.setattr(web_tools, "_google_news_rss_rows", lambda *args, **kwargs: [])
     content = news_search(
         query="London, Ontario, Canada local latest news",
         location="London, Ontario, Canada",
@@ -60,23 +62,23 @@ def test_news_search_no_results_exception_becomes_one_bounded_empty_observation(
     )
     assert json.loads(content) == []
     assert news_search_is_empty(content) is True
-    # One daily lookup plus exactly one broader weekly fallback; no model-driven
-    # argument churn is necessary after this primitive returns.
-    assert len(calls) == 2
+    # Exactly one DDGS lookup; provider fallback stays internal and bounded.
+    assert len(calls) == 1
     assert calls[0]["timelimit"] == "d"
-    assert calls[1]["timelimit"] == "w"
     assert calls[0]["query"].lower().count("london") == 1
 
 
 def test_news_search_non_empty_provider_failure_remains_explicit_error(monkeypatch):
     import sys
     import types
+    import tools.web as web_tools
 
     class FakeDDGS:
         def news(self, **_kwargs):
             raise TimeoutError("provider timed out")
 
     monkeypatch.setitem(sys.modules, "ddgs", types.SimpleNamespace(DDGS=FakeDDGS))
+    monkeypatch.setattr(web_tools, "_google_news_rss_rows", lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError("rss timed out")))
     content = news_search(query="local headlines", location="London, Ontario, Canada")
     assert content.startswith("Error: news search failed:")
     assert "provider timed out" in content
@@ -236,3 +238,92 @@ def test_encyclopedia_renderer_uses_only_structured_lookup_fields():
     assert "Shadow over Mitten" not in rendered
     assert is_simple_encyclopedic_request("What is a shoggoth?") is True
     assert is_simple_encyclopedic_request("Is God real?") is False
+
+
+def test_news_search_uses_independent_rss_fallback_without_model_retry(monkeypatch):
+    import sys
+    import types
+    import tools.web as web_tools
+
+    ddgs_calls = []
+    rss_calls = []
+
+    class FakeDDGS:
+        def news(self, **kwargs):
+            ddgs_calls.append(dict(kwargs))
+            raise RuntimeError("No results found.")
+
+    def fake_rss(query, **kwargs):
+        rss_calls.append((query, dict(kwargs)))
+        return [{
+            "date": "Sun, 21 Sep 2026 10:00:00 GMT",
+            "title": "London council approves housing plan - CTV News London",
+            "url": "https://news.google.com/rss/articles/example",
+            "snippet": "London, Ontario council approved the plan.",
+            "source": "CTV News London",
+        }]
+
+    monkeypatch.setitem(sys.modules, "ddgs", types.SimpleNamespace(DDGS=FakeDDGS))
+    monkeypatch.setattr(web_tools, "_google_news_rss_rows", fake_rss)
+    content = news_search(
+        query="London, Ontario, Canada local latest news",
+        location="London, Ontario, Canada",
+        timelimit="d",
+        region="ca-en",
+    )
+    rows = json.loads(content)
+    assert len(rows) == 1
+    assert rows[0]["source"] == "CTV News London"
+    assert len(ddgs_calls) == 1
+    assert len(rss_calls) == 1
+    assert rss_calls[0][1]["timelimit"] == "w"
+
+
+def test_google_news_rss_parser_returns_structured_rows(monkeypatch):
+    import tools.web as web_tools
+
+    xml = """<?xml version='1.0' encoding='UTF-8'?>
+    <rss><channel><item>
+      <title>Example headline - Example News</title>
+      <link>https://news.google.com/rss/articles/abc</link>
+      <pubDate>Sun, 21 Sep 2026 10:00:00 GMT</pubDate>
+      <source url='https://example.com'>Example News</source>
+      <description><![CDATA[<p>Example summary</p>]]></description>
+    </item></channel></rss>"""
+
+    monkeypatch.setattr(web_tools, "fetch_text", lambda *args, **kwargs: (args[0], "application/xml", xml))
+    rows = web_tools._google_news_rss_rows("latest news", region="ca-en", timelimit="d")
+    assert rows == [{
+        "date": "Sun, 21 Sep 2026 10:00:00 GMT",
+        "title": "Example headline - Example News",
+        "url": "https://news.google.com/rss/articles/abc",
+        "snippet": "Example summary",
+        "source": "Example News",
+    }]
+
+
+def test_general_headlines_do_not_inherit_previous_local_news_scope():
+    from tools.task_requirements import is_task_continuation
+
+    previous = derive_task_frame(
+        "what are the latest local headlines?",
+        default_location="London, Ontario, Canada",
+    )
+    request = "what are the latest headlines?"
+    assert is_task_continuation(request, previous) is False
+    frame = derive_task_frame(request, {}, default_location="London, Ontario, Canada")
+    assert frame == {"intent": "news", "time_scope": "latest"}
+    assert build_news_query(request, frame, "London, Ontario, Canada") == "latest news"
+
+
+def test_news_topic_is_not_misclassified_as_location():
+    frame = derive_task_frame("latest AI headlines", default_location="London, Ontario, Canada")
+    assert frame == {"intent": "news", "time_scope": "latest"}
+    assert build_news_query("latest AI headlines", frame, "London, Ontario, Canada") == "ai latest news"
+
+
+def test_generic_news_empty_renderer_is_not_localized():
+    rendered = format_news_no_results()
+    assert "current headlines" in rendered
+    assert "local headlines" not in rendered
+    assert "London" not in rendered

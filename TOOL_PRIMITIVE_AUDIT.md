@@ -42,3 +42,17 @@ Final validation in the audit environment:
 - duplicate top-level primitive functions: none
 
 The audit environment does not provide the real `ollama` and `ddgs` Python packages. Minimal import stubs were used only to allow repository tests that do not exercise those external services to collect; those stubs are **not** included in this repository.
+
+## News search scope and provider fallback hardening (2026-09-21)
+
+Additional regressions discovered after the bounded-news change were corrected:
+
+- A fresh generic request such as `latest headlines` no longer inherits the previous turn's local-news city.
+- `default_location` is used for news only when the current request is explicitly local/deictic; it no longer silently localizes general news.
+- Common topical phrases such as `AI headlines`, `Business news`, and `Technology news` are not classified as geographic locations from capitalization alone.
+- General news queries are normalized to compact provider queries such as `latest news`; topical requests retain their topic.
+- `news_search` now has one bounded provider fallback: DDGS first, then Google News RSS. A local daily miss broadens only the RSS fallback to one week.
+- General-news no-result/provider-error messages no longer claim the request was local.
+- Recovery remains inside the primitive, so the model cannot enter a query-rewording loop.
+
+Regression coverage includes prior-local -> generic-news scope reset, topical-vs-location parsing, DDGS empty/error behavior, RSS parsing/fallback, and deterministic rendering.

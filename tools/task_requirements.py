@@ -173,6 +173,14 @@ _NEWS_GENERIC_TOKENS = {
     "latest", "local", "me", "near", "news", "of", "please", "recent", "show", "stories",
     "story", "tell", "the", "today", "todays", "top", "what", "whats",
 }
+# High-frequency news subjects that are commonly capitalized at the start of a
+# sentence or written as acronyms.  They must not be mistaken for a city merely
+# because the old parser used capitalization as a geographic heuristic.
+_NEWS_TOPIC_HINTS = {
+    "ai", "artificial intelligence", "business", "climate", "crypto", "cryptocurrency",
+    "economy", "energy", "entertainment", "finance", "gaming", "health", "markets",
+    "politics", "science", "sports", "tech", "technology", "world",
+}
 
 
 def is_implementation_request(user_text: str) -> bool:
@@ -330,13 +338,20 @@ def _looks_like_location_candidate(value: str) -> bool:
     raw = str(value or "").strip(" ,")
     if not raw or len(raw.split()) > 8:
         return False
+    normalized = re.sub(r"\s+", " ", raw).strip().lower()
     lower_words = [word.lower().rstrip(".") for word in re.findall(r"[A-Za-z]+", raw)]
+    if normalized in _NEWS_TOPIC_HINTS:
+        return False
     if any(word in _CANADIAN_PROVINCES or word in _COUNTRY_ALIASES for word in lower_words):
         return True
-    if any(name in raw.lower() for name in _CANADIAN_PROVINCE_NAMES) or "," in raw:
+    if any(name in normalized for name in _CANADIAN_PROVINCE_NAMES) or "," in raw:
         return True
-    # Preserve case from the request: a capitalized place is much less likely to
-    # be a topical phrase such as "news in technology".
+    # Acronyms such as AI are overwhelmingly more likely to be topics than
+    # locations.  For ordinary proper names retain the useful lightweight
+    # heuristic (Toronto news, New York headlines) while the topic guard above
+    # catches common title-cased subjects such as Business or Technology.
+    if raw.isupper() and len(raw) <= 6:
+        return False
     return bool(re.search(r"(?:^|\s)[A-Z][A-Za-z'-]+", raw))
 
 
@@ -366,7 +381,15 @@ def _extract_news_entity(
                 return candidate
     lower = value.lower()
     if previous and str(previous.get("intent") or "") == "news":
-        if re.search(r"\b(?:local|nearby|there|same (?:place|area|city|location))\b", lower) or not _news_topic_terms(value):
+        # Carry a prior locality only when the current turn is explicitly
+        # deictic/referential.  A complete generic request such as "latest
+        # headlines" starts a fresh general-news scope instead of inheriting
+        # London (or any other prior city).
+        inherit_location = bool(
+            re.search(r"\b(?:local|nearby|near me|around me|there|same (?:place|area|city|location))\b", lower)
+            or re.match(r"^(?:what about|and|also)\b", lower)
+        )
+        if inherit_location:
             prior = str(previous.get("entity") or "").strip()
             if prior:
                 return prior
@@ -388,18 +411,27 @@ def _news_topic_terms(text: str, entity: str = "") -> list[str]:
 
 
 def build_news_query(user_text: str, frame: dict[str, Any] | None = None, default_location: str = "") -> str:
-    """Build a search-engine query whose locality cannot be lost in prose."""
+    """Build a compact news query without inventing geographic scope.
+
+    ``default_location`` is used only for an explicitly local/deictic request.
+    A plain request such as ``latest headlines`` is intentionally general even
+    when the user profile contains a home city.
+    """
     resolved = dict(frame or {})
-    entity = canonicalize_location(str(resolved.get("entity") or default_location or ""))
     raw = " ".join(str(user_text or "").strip().split())
-    if not entity:
-        return raw[:1000]
+    entity = canonicalize_location(str(resolved.get("entity") or ""))
+    if not entity and re.search(r"\b(?:local|nearby|near me|around me)\b", raw, re.I):
+        entity = canonicalize_location(default_location)
     topics = _news_topic_terms(raw, entity)
-    topical = (" " + " ".join(topics)) if topics else ""
     time_scope = str(resolved.get("time_scope") or "latest").strip().lower()
     if time_scope in {"", "current", "recent"}:
         time_scope = "latest"
-    return f"{entity} local{topical} {time_scope} news"[:1000]
+    topical = (" " + " ".join(topics)) if topics else ""
+    if entity:
+        return f"{entity} local{topical} {time_scope} news"[:1000]
+    if topics:
+        return f"{' '.join(topics)} {time_scope} news"[:1000]
+    return f"{time_scope} news"[:1000]
 
 
 def news_region_for_frame(frame: dict[str, Any] | None = None, default_location: str = "") -> str:
@@ -501,10 +533,10 @@ def is_task_continuation(user_text: str, previous_frame: dict[str, Any] | None =
         return False
     if previous_intent == "news" and previous.get("entity") and not current.get("entity"):
         lower = str(user_text or "").lower()
-        return bool(
-            re.search(r"\b(?:local|nearby|there|same (?:place|area|city|location))\b", lower)
-            or not _news_topic_terms(user_text)
-        )
+        return bool(re.search(
+            r"\b(?:local|nearby|near me|around me|there|same (?:place|area|city|location))\b",
+            lower,
+        ))
     if previous_intent == "weather" and previous.get("entity") and not current.get("entity"):
         return True
     if previous_intent == "current_time" and previous.get("entity") and not current.get("entity"):

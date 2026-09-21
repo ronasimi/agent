@@ -146,6 +146,10 @@ def test_local_news_followup_inherits_location_but_topical_news_does_not():
         "London, Ontario, Canada local latest news"
     )
     assert is_task_continuation("What are the latest AI headlines?", first) is False
+    assert is_task_continuation("What are the latest headlines?", first) is False
+    general = derive_task_frame("What are the latest headlines?", {}, default_location="London, Ontario, Canada")
+    assert general == {"intent": "news", "time_scope": "latest"}
+    assert build_news_query("What are the latest headlines?", general, "London, Ontario, Canada") == "latest news"
 
 
 def test_market_requirement_ledger_uses_returned_rows_not_requested_arguments():

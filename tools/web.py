@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import json
 import re
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
+from xml.etree import ElementTree as ET
 
 import requests
 from bs4 import BeautifulSoup
@@ -20,6 +21,71 @@ _LOCATION_COUNTRY_TERMS = {
     "new zealand": {"new zealand"},
 }
 
+
+_GOOGLE_NEWS_LOCALES = {
+    "ca-en": ("en-CA", "CA", "CA:en"),
+    "us-en": ("en-US", "US", "US:en"),
+    "uk-en": ("en-GB", "GB", "GB:en"),
+    "au-en": ("en-AU", "AU", "AU:en"),
+}
+_GENERIC_NEWS_QUERY_TOKENS = {
+    "latest", "recent", "current", "today", "todays", "top", "news", "headline",
+    "headlines", "story", "stories",
+}
+
+
+def _is_generic_news_query(query: str) -> bool:
+    tokens = {token.lower() for token in re.findall(r"[A-Za-z0-9]+", str(query or ""))}
+    return bool(tokens) and tokens.issubset(_GENERIC_NEWS_QUERY_TOKENS)
+
+
+def _google_news_rss_rows(
+    query: str, *, region: str = "ca-en", timelimit: str = "d", max_results: int = 8,
+) -> list[dict]:
+    """Fetch a bounded Google News RSS fallback independent of DDGS.
+
+    The fallback exists to keep ``news_search`` useful when DDGS's news backend
+    is sparse, rate-limited, or temporarily unavailable.  Generic headline
+    requests use the regional top-stories feed; topical/local requests use the
+    RSS search endpoint with a bounded ``when:`` qualifier.
+    """
+    locale, gl, ceid = _GOOGLE_NEWS_LOCALES.get(str(region or "").lower(), _GOOGLE_NEWS_LOCALES["ca-en"])
+    params = {"hl": locale, "gl": gl, "ceid": ceid}
+    if _is_generic_news_query(query):
+        url = "https://news.google.com/rss?" + urlencode(params)
+    else:
+        suffix = {"d": "1d", "w": "7d", "m": "30d"}.get(str(timelimit or "").lower(), "")
+        rss_query = " ".join(str(query or "").split())
+        if suffix and not re.search(r"\bwhen:\S+", rss_query, re.I):
+            rss_query = f"{rss_query} when:{suffix}".strip()
+        url = "https://news.google.com/rss/search?" + urlencode({"q": rss_query, **params})
+    _final_url, _content_type, body = fetch_text(
+        url, timeout=6.0, max_bytes=1024 * 1024,
+        allowed_types={"application/xml", "text/xml", "application/rss+xml", "text/plain"},
+    )
+    root = ET.fromstring(body)
+    rows: list[dict] = []
+    seen_urls: set[str] = set()
+    for item in root.findall(".//item"):
+        title = " ".join(str(item.findtext("title") or "").split())
+        link = str(item.findtext("link") or "").strip()
+        if not title or not _search_result_url_allowed(link) or link in seen_urls:
+            continue
+        seen_urls.add(link)
+        source_node = item.find("source")
+        source = " ".join(str(source_node.text if source_node is not None else "").split())
+        description = str(item.findtext("description") or "")
+        snippet = BeautifulSoup(description, "html.parser").get_text(" ", strip=True)[:1200]
+        rows.append({
+            "date": str(item.findtext("pubDate") or "")[:80],
+            "title": title[:500],
+            "url": link,
+            "snippet": snippet,
+            "source": source[:200],
+        })
+        if len(rows) >= max(1, min(int(max_results), 24)):
+            break
+    return rows
 
 def _ddgs_news_rows(client, **kwargs) -> list[dict]:
     """Return DDGS news rows, treating the provider's empty-result exception as [].
@@ -147,7 +213,14 @@ def news_search(
     region: str = "ca-en",
     max_results: int = 8,
 ) -> str:
-    """Search current news and return bounded, optionally location-scoped headlines."""
+    """Search current news with bounded provider fallback.
+
+    DDGS is attempted first.  If it yields no qualifying rows (or fails), one
+    Google News RSS retrieval is used; sparse local daily requests broaden that
+    fallback to one week.  All recovery stays inside this
+    primitive, so the model never needs to churn near-duplicate ``news_search``
+    calls.
+    """
     query = str(query).strip()
     if not query:
         return "Error: Missing required 'query' parameter."
@@ -176,33 +249,56 @@ def news_search(
                 "date": str(item.get("date", "") or "")[:80],
                 "title": str(item.get("title", "") or "")[:500],
                 "url": url,
-                "snippet": str(item.get("body", "") or "")[:1200],
+                "snippet": str(item.get("body", item.get("snippet", "")) or "")[:1200],
                 "source": str(item.get("source", "") or "")[:200],
             })
         return compact
 
+    completed_provider = False
+    provider_errors: list[str] = []
+    compact: list[dict] = []
     try:
         from ddgs import DDGS
         client = DDGS()
-        results = _ddgs_news_rows(
-            client, query=effective_query, region=region, timelimit=(window or None),
-            max_results=max(limit * 2, limit + 4),
+        try:
+            results = _ddgs_news_rows(
+                client, query=effective_query, region=region, timelimit=(window or None),
+                max_results=max(limit * 2, limit + 4),
+            )
+            completed_provider = True
+            compact = compact_rows(results)
+            if location:
+                compact = _location_scoped_news_rows(compact, location, limit=limit)
+        except Exception as exc:
+            provider_errors.append(f"DDGS: {exc}")
+
+    except Exception as exc:
+        provider_errors.append(f"DDGS unavailable: {exc}")
+
+    if compact:
+        return json.dumps(compact[:limit], ensure_ascii=False, indent=2)
+
+    # Independent fallback: Google News RSS.  For a local daily request use the
+    # same one-week ceiling as the sparse-index recovery; generic/topical news
+    # keeps the user's requested window.
+    rss_window = "w" if location and window in {"", "d"} else window
+    try:
+        rss_rows = _google_news_rss_rows(
+            effective_query, region=region, timelimit=rss_window, max_results=max(limit * 2, limit + 4),
         )
-        compact = compact_rows(results)
+        completed_provider = True
+        compact = compact_rows(rss_rows)
         if location:
             compact = _location_scoped_news_rows(compact, location, limit=limit)
-            # A one-day index can be sparse for smaller cities. Retry once with a
-            # broader time window and a shorter, more locality-heavy query; never
-            # fall through to unrelated global headlines.
-            if not compact and window in {"", "d"}:
-                retry = _ddgs_news_rows(
-                    client, query=_news_retry_query(location), region=region, timelimit="w",
-                    max_results=max(limit * 2, limit + 4),
-                )
-                compact = _location_scoped_news_rows(compact_rows(retry), location, limit=limit)
-        return json.dumps(compact[:limit], ensure_ascii=False, indent=2)
     except Exception as exc:
-        return f"Error: news search failed: {exc}"
+        provider_errors.append(f"Google News RSS: {exc}")
+
+    if compact:
+        return json.dumps(compact[:limit], ensure_ascii=False, indent=2)
+    if completed_provider:
+        return "[]"
+    detail = "; ".join(provider_errors)[:700] or "all providers failed"
+    return f"Error: news search failed: {detail}"
 
 
 def _location_scoped_news_rows(rows: list[dict], location: str, *, limit: int = 8) -> list[dict]:
@@ -357,21 +453,26 @@ def news_search_is_empty(content: str) -> bool:
 def format_news_no_results(*, location: str = "") -> str:
     """Render a bounded retrieval miss without claiming that no news exists."""
     canonical = canonicalize_location(location)
-    where = f" for **{canonical}**" if canonical else ""
+    if canonical:
+        return (
+            f"I couldn't find any qualifying current local headlines for **{canonical}** in the news provider's bounded search. "
+            "I won't substitute unrelated or wrong-location stories."
+        )
     return (
-        f"I couldn't find any qualifying current local headlines{where} in the news provider's bounded search. "
-        "I won't substitute unrelated or wrong-location stories."
+        "I couldn't find any qualifying current headlines in the news provider's bounded search. "
+        "I won't invent or substitute stale results."
     )
 
 
 def format_news_provider_error(content: str, *, location: str = "") -> str:
     """Render one terminal provider failure for a news-only fact request."""
     canonical = canonicalize_location(location)
-    where = f" for **{canonical}**" if canonical else ""
     detail = str(content or "").strip()
     detail = re.sub(r"^Error:\s*", "", detail, flags=re.I)[:240]
     suffix = f" ({detail})" if detail else ""
-    return f"I couldn't retrieve current local headlines{where} because the news provider failed{suffix}."
+    if canonical:
+        return f"I couldn't retrieve current local headlines for **{canonical}** because the news provider failed{suffix}."
+    return f"I couldn't retrieve current headlines because the news provider failed{suffix}."
 
 
 def format_news_results(content: str, *, limit: int = 6, location: str = "") -> str:

@@ -784,7 +784,7 @@ def handle_user_turn(
             # list headlines.
             report = grounding_report()
             if "news" in set(report.get("missing_fact_types") or []):
-                news_location = str(task_frame.get("entity") or default_location or "")
+                news_location = str(task_frame.get("entity") or "")
                 news_query = build_news_query(user_input, task_frame, default_location)
                 region = news_region_for_frame(task_frame, default_location)
                 _record_harness_recovery_tool(
@@ -925,7 +925,7 @@ def handle_user_turn(
                 return
 
         if required_fact_types == {"news"} and last_news_search_attempt.get("attempted"):
-            news_location = str(task_frame.get("entity") or default_location or "")
+            news_location = str(task_frame.get("entity") or "")
             if last_news_search_attempt.get("success") and news_search_is_empty(last_news_search_attempt.get("content", "")):
                 deterministic = format_news_no_results(location=news_location)
                 assistant_reply = {"role": "assistant", "content": deterministic}
