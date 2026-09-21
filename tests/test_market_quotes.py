@@ -36,6 +36,71 @@ def test_market_quote_observation_must_cover_all_requested_instruments():
     assert report2["evidence"]["market_price"] == ["market_quote"]
 
 
+def test_market_quote_grounding_survives_working_state_preview_clipping(tmp_path, monkeypatch):
+    from tools import working_state
+
+    monkeypatch.setattr(working_state, "DB_PATH", str(tmp_path / "market-state.db"))
+    store = working_state.WorkingStateStore(limits={"evidence_preview_chars": 180})
+    store.begin_turn(
+        turn_id=12,
+        objective="What is the current price of brent crude and WTI?",
+        rolling_summary="",
+        recalled_context="",
+        recent_messages=[],
+        policy_note="",
+        tool_schemas=[],
+        task_frame=derive_task_frame("What is the current price of brent crude and WTI?"),
+    )
+    payload = json.dumps({"quotes": [
+        {
+            "instrument": "brent", "symbol": "BZ=F", "price": 97.43,
+            "source_url": "https://example.invalid/" + ("b" * 400),
+        },
+        {
+            "instrument": "wti", "symbol": "CL=F", "price": 93.95,
+            "source_url": "https://example.invalid/" + ("w" * 400),
+        },
+    ], "errors": []})
+    store.record_tool_result(
+        tool_name="market_quote",
+        arguments={"instruments": ["BZ=F", "CL=F"]},
+        status="ok",
+        reason="ok",
+        result_text=payload,
+        fingerprint="market-quote",
+    )
+    observation = store.load()["verified_observations"][0]
+    assert "market_instruments" in observation
+    assert set(observation["market_instruments"]) == {"brent", "wti"}
+    assert len(observation["evidence_preview"]) <= 180
+
+    request = "What is the current price of brent crude and WTI?"
+    report = validate_fact_grounding(
+        request,
+        [observation],
+        current_turn_id=12,
+        task_frame=derive_task_frame(request),
+    )
+    assert report["grounded"] is True
+    assert report["evidence"]["market_price"] == ["market_quote"]
+
+
+def test_clipped_legacy_multi_quote_is_not_grounded_from_arguments_alone():
+    request = "What is the current price of brent crude and WTI?"
+    frame = derive_task_frame(request)
+    observation = {
+        "tool": "market_quote",
+        "status": "ok",
+        "fact_types": ["market_price"],
+        "arguments": {"instruments": ["BZ=F", "CL=F"]},
+        "evidence_preview": '{"quotes":[{"instrument":"brent","price":97.43} …[clipped]…',
+        "turn_id": 12,
+    }
+    report = validate_fact_grounding(request, [observation], current_turn_id=12, task_frame=frame)
+    assert report["grounded"] is False
+    assert report["missing_fact_types"] == ["market_price"]
+
+
 def test_market_renderer_is_deterministic_and_preserves_provider_values():
     payload = json.dumps({"quotes": [
         {

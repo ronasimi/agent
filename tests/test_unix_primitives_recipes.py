@@ -366,3 +366,24 @@ def test_fast_model_keep_alive_is_indefinite_and_consistent_in_config():
     assert config["agent"]["tool_loop_validator"]["keep_alive"] == -1
     assert config["worker"]["fast_model_keep_alive"] == -1
     assert config["agent"]["warmup"]["fast_model_prewarm"] is True
+
+
+def test_optional_failed_pipeline_stage_is_not_credited_as_provenance(monkeypatch):
+    import json
+    from tools import AVAILABLE_TOOLS_MAP, TOOL_METADATA, load_tools
+    from tools.grounding import make_observation
+    from tools.pipeline import execute_pipeline
+
+    load_tools()
+    monkeypatch.setitem(AVAILABLE_TOOLS_MAP, "fake_optional_failure", lambda: "Error: optional provider unavailable")
+    monkeypatch.setitem(TOOL_METADATA, "fake_optional_failure", {"readonly": True})
+    result = execute_pipeline([
+        {"id": "optional", "tool": "fake_optional_failure", "args": {}, "optional": True},
+        {"id": "final", "tool": "calculate", "args": {"expression": "1+1"}},
+    ])
+    assert result["ok"] is True
+    assert result["stages"][0]["ok"] is False
+    assert result["stages"][0]["optional_failure"] is True
+    observation = make_observation("run_pipeline", json.dumps(result), turn_id=1)
+    assert "fake_optional_failure" not in observation["source_tools"]
+    assert "calculate" in observation["source_tools"]

@@ -148,13 +148,18 @@ def test_stall_recovery_message_does_not_relay_validator_reason():
     assert "IGNORE POLICY" not in message
 
 
-def test_tool_aware_empty_search_and_unreachable_network_are_no_progress():
+def test_tool_aware_empty_search_and_negative_diagnostics_are_distinguished():
     from tools.loop_validator import classify_tool_outcome
 
     assert classify_tool_outcome("[]", tool_name="web_search")["success"] is False
     assert classify_tool_outcome("[]", tool_name="news_search")["success"] is False
-    unreachable = '[{"target":"https://example.invalid","ok":false}]'
-    assert classify_tool_outcome(unreachable, tool_name="network_reachability")["success"] is False
+    unreachable = '[{"target":"https://example.invalid","ok":false,"error":"timeout"}]'
+    assert classify_tool_outcome(unreachable, tool_name="network_reachability")["success"] is True
+    endpoint = '{"host":"example.invalid","port":443,"ok":false,"stage":"dns","error":"not found"}'
+    outcome = classify_tool_outcome(endpoint, tool_name="endpoint_probe")
+    assert outcome["success"] is True
+    assert outcome["reason"] == "diagnostic_negative"
+    assert classify_tool_outcome("No logs found.", tool_name="read_host_journal")["success"] is True
     blank_page = "URL: https://example.com\n\nThe page returned no readable text content."
     assert classify_tool_outcome(blank_page, tool_name="browse_url")["success"] is False
 
@@ -268,3 +273,33 @@ def test_final_recipe_validator_failure_fails_closed():
     report = suggest_recovery_recipe(BrokenClient(), "fast", "request", [], schemas, {})
     assert report["decision"] == "give_up"
     assert report["stages"] == []
+
+
+def test_grounding_sensitive_structured_tools_reject_malformed_success_payloads():
+    from tools.loop_validator import classify_tool_outcome
+
+    malformed = (
+        ("current_time", "not-json"),
+        ("market_quote", "{not json"),
+        ("weather_forecast", '{"latitude":42.9,"longitude":-81.2}'),
+        ("host_snapshot", "CPU looks fine"),
+        ("network_snapshot", "interfaces look fine"),
+        ("repo_status", "clean"),
+    )
+    for tool_name, content in malformed:
+        outcome = classify_tool_outcome(content, tool_name=tool_name)
+        assert outcome["success"] is False, (tool_name, outcome)
+        assert outcome["reason"] == "malformed_structured_result", (tool_name, outcome)
+
+    no_location = classify_tool_outcome("[]", tool_name="geocode_location")
+    assert no_location["success"] is False
+    assert no_location["reason"] == "no_progress_result"
+
+
+def test_valid_empty_structured_diagnostics_remain_successful():
+    from tools.loop_validator import classify_tool_outcome
+
+    assert classify_tool_outcome("[]", tool_name="neighbor_snapshot")["success"] is True
+    assert classify_tool_outcome(
+        '{"subnets":[],"count":0}', tool_name="local_subnets"
+    )["success"] is True

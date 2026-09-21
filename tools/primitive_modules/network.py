@@ -11,16 +11,6 @@ def interface_list() -> str:
         s=stats.get(name); out.append({"name":name,"up":bool(s.isup) if s else None,"mtu":s.mtu if s else None,"addresses":[{"family":str(a.family),"address":a.address,"netmask":a.netmask} for a in addrs.get(name,[])]})
     return _json(out)
 
-def neighbor_list(limit: int = 100) -> str:
-    """Return ARP/NDP neighbors through the existing structured network primitive."""
-    from ..network_diagnostics import neighbor_snapshot
-    return neighbor_snapshot(limit)
-
-def socket_list(limit: int = 150, state: str = "") -> str:
-    """Return active/listening sockets through the existing structured connection primitive."""
-    from ..network_diagnostics import connection_snapshot
-    return connection_snapshot(limit,state)
-
 def resolve_host(host: str, record_type: str = "any") -> str:
     """Resolve a hostname to bounded IPv4/IPv6 address records."""
     try:
@@ -37,16 +27,6 @@ def route_lookup(target: str) -> str:
         if proc.returncode:return f"Error: route lookup failed: {(proc.stderr or proc.stdout).strip()}"
         return _json(json.loads(proc.stdout))
     except Exception as exc:return f"Error: route_lookup failed: {exc}"
-
-def tcp_connect(host: str, port: int, timeout: float = 5.0) -> str:
-    """Resolve and attempt a bounded TCP connection."""
-    from ..network_diagnostics import endpoint_probe
-    return endpoint_probe(host,int(port),False,float(timeout))
-
-def tls_handshake(host: str, port: int = 443, timeout: float = 5.0) -> str:
-    """Perform DNS, TCP, and TLS handshake for one endpoint."""
-    from ..network_diagnostics import endpoint_probe
-    return endpoint_probe(host,int(port),True,float(timeout))
 
 def http_request(url: str, method: str = "HEAD", timeout: float = 8.0, allow_private: bool = False) -> str:
     """Perform one bounded HTTP GET/HEAD request after SSRF-safe URL validation."""
@@ -75,11 +55,6 @@ def udp_probe(host: str, port: int, timeout: float = 2.0) -> str:
         s=socket.socket(family,socktype,proto); s.settimeout(max(.2,min(float(timeout),5.0))); started=time.monotonic(); s.connect(sockaddr); s.send(b""); local=s.getsockname(); elapsed=round((time.monotonic()-started)*1000,1); s.close()
         return _json({"host":host,"port":int(port),"sent":True,"local":local,"elapsed_ms":elapsed,"note":"UDP send success does not establish application-level reachability."})
     except Exception as exc:return f"Error: udp_probe failed: {exc}"
-
-def trace_route(target: str, max_hops: int = 20, probes: int = 3) -> str:
-    """Return a bounded structured network path using the existing MTR implementation."""
-    from ..network_diagnostics import network_path
-    return network_path(target,max_hops,probes)
 
 def route_list(limit: int = 200) -> str:
     """Return the bounded kernel route table as structured JSON."""

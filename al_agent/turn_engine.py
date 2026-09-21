@@ -390,18 +390,29 @@ def handle_user_turn(
             if WORKING_STATE_ENABLED or status not in {"ok", "partial"}:
                 return
             local_grounding_observations.append(
-                make_observation(tool_name, content, status=status, at=utc_now(), turn_id=current_turn_id, arguments=arguments)
+                make_observation(tool_name, content, status=status, at=utc_now(), turn_id=current_turn_id, arguments=arguments, task_frame=task_frame)
             )
 
         def record_recipe_stage_requirements(result: Any, *, reason: str) -> None:
             if not isinstance(result, dict):
                 return
             for stage_summary in result.get("stages") or []:
-                if not isinstance(stage_summary, dict) or not stage_summary.get("ok"):
+                if (
+                    not isinstance(stage_summary, dict)
+                    or stage_summary.get("ok") is not True
+                    or bool(stage_summary.get("skipped"))
+                ):
                     continue
                 stage_tool = str(stage_summary.get("tool") or "")
                 if stage_tool:
-                    requirement_ledger.record_tool(stage_tool, status="ok", reason=reason, arguments=stage_summary.get("args"))
+                    stage_status = str(stage_summary.get("status") or "ok")
+                    grounding_meta = stage_summary.get("grounding")
+                    if not isinstance(grounding_meta, dict):
+                        grounding_meta = {}
+                    requirement_ledger.record_tool(
+                        stage_tool, status=stage_status, reason=reason, arguments=stage_summary.get("args"),
+                        result_metadata=grounding_meta,
+                    )
 
         def note_missing_grounding(report: dict[str, Any], trigger: str) -> None:
             missing = list(report.get("missing_fact_types") or [])
@@ -621,11 +632,14 @@ def handle_user_turn(
                         trace = [
                             {
                                 "tool": str(stage.get("tool") or ""),
-                                "args": dict(stage.get("args") or {}),
+                                "args": dict(stage.get("args") or {}) if isinstance(stage.get("args"), dict) else {},
                                 "success": True,
                                 "readonly": True,
                             }
-                            for stage in report.get("stages") or []
+                            for stage in result.get("stages") or []
+                            if isinstance(stage, dict)
+                            and stage.get("ok") is True
+                            and not bool(stage.get("skipped"))
                         ]
                         fallback_recipe_candidate = maybe_create_recipe_candidate(
                             user_input, trace, RECIPE_MIN_STAGES,
@@ -1598,7 +1612,9 @@ def handle_user_turn(
                 if WORKING_STATE_ENABLED:
                     WORKING_STATE.record_tool_result(
                         tool_name=name,
-                        arguments=raw_args,
+                        # Persist the arguments that were actually executed after
+                        # schema normalization, not the model's raw proposal.
+                        arguments=args if isinstance(args, dict) else raw_args,
                         status=outcome_status,
                         reason=reason,
                         result_text=result_content,

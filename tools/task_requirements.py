@@ -6,6 +6,7 @@ a pre-final completeness gate; it does not infer conclusions from tool output.
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -573,14 +574,16 @@ def _scope_text(arguments: Any, result_text: str = "") -> str:
     return (args + " " + str(result_text or "")).lower()
 
 
-def _scope_matches(scope: dict[str, Any], arguments: Any, result_text: str = "") -> bool:
+def _scope_matches(
+    scope: dict[str, Any], arguments: Any, result_text: str = "", result_metadata: dict[str, Any] | None = None
+) -> bool:
     if not scope:
         return True
     # Scope metadata is a strengthening of the runtime contract.  Older callers
     # and persisted observations may not provide arguments/result text; treat
     # missing provenance as unknown rather than as a mismatched target.  New
     # execution paths always pass both, so wrong-target successes are rejected.
-    if arguments in (None, {}, "") and not str(result_text or "").strip():
+    if arguments in (None, {}, "") and not str(result_text or "").strip() and not result_metadata:
         return True
     haystack = _scope_text(arguments, result_text)
     target = str(scope.get("target") or "").lower().rstrip(".")
@@ -596,11 +599,43 @@ def _scope_matches(scope: dict[str, Any], arguments: Any, result_text: str = "")
     # the stricter search->browse provenance check.
     instruments = [str(item).lower() for item in (scope.get("instruments") or []) if str(item)]
     if instruments:
-        actual = []
-        if isinstance(arguments, dict):
-            actual = [str(item).lower() for item in (arguments.get("instruments") or []) if str(item)]
-        if actual and not all(item in actual for item in instruments):
+        expected = set(extract_market_instruments(" ".join(instruments)) or instruments)
+        returned: set[str] = set()
+        metadata = dict(result_metadata or {})
+        if metadata.get("market_instruments") is not None:
+            returned.update(extract_market_instruments(" ".join(str(item) for item in (metadata.get("market_instruments") or []))))
+            if not expected.issubset(returned):
+                return False
+        elif str(result_text or "").strip():
+            try:
+                payload = json.loads(str(result_text))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = None
+            if isinstance(payload, dict) and isinstance(payload.get("quotes"), list):
+                for row in payload.get("quotes") or []:
+                    if not isinstance(row, dict) or not isinstance(row.get("price"), (int, float)):
+                        continue
+                    for value in (row.get("instrument"), row.get("symbol")):
+                        returned.update(extract_market_instruments(str(value or "")))
+                # When provider rows are available they, not requested call args,
+                # prove coverage. This prevents a partial multi-asset response
+                # from prematurely satisfying the requirement ledger.
+                if not expected.issubset(returned):
+                    return False
+            else:
+                returned = set()
+        if not returned and (str(result_text or "").strip() or metadata):
+            # Modern execution supplied result provenance but it did not prove any
+            # numeric quote rows. Never fall back to requested call arguments: a
+            # malformed/empty provider response cannot satisfy market scope.
             return False
+        if not returned and not str(result_text or "").strip() and not metadata:
+            # Legacy caller fallback when no result provenance was supplied.
+            actual = []
+            if isinstance(arguments, dict):
+                actual = extract_market_instruments(" ".join(str(item) for item in (arguments.get("instruments") or [])))
+            if actual and not expected.issubset(set(actual)):
+                return False
     if scope.get("time_scope") and isinstance(arguments, dict) and "query" in arguments:
         expected = str(scope["time_scope"]).lower()
         temporal_tokens = [t for t in re.findall(r"[a-z0-9]+", expected) if len(t) > 2]
@@ -716,7 +751,7 @@ class TaskRequirementLedger:
 
     def record_tool(
         self, tool_name: str, *, status: str, reason: str = "", fingerprint: str = "",
-        arguments: Any = None, result_text: str = "",
+        arguments: Any = None, result_text: str = "", result_metadata: dict[str, Any] | None = None,
     ) -> None:
         tool_name = str(tool_name or "")
         targets = {tool_name}
@@ -730,7 +765,7 @@ class TaskRequirementLedger:
                 item.attempts += 1
             item.last_reason = str(reason or "")[:120]
             item.fingerprint = str(fingerprint or "")[:32]
-            scoped = _scope_matches(item.scope, arguments, result_text)
+            scoped = _scope_matches(item.scope, arguments, result_text, result_metadata)
             if status == "ok" and scoped:
                 item.status = "satisfied"
             elif status == "partial" and scoped:

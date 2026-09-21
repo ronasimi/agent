@@ -146,6 +146,129 @@ def _json_payload(text: str) -> Any:
     return None
 
 
+def _canonical_market_instruments(values: Any) -> set[str]:
+    """Normalize persisted market names/symbols to the harness canonical names."""
+    result: set[str] = set()
+    for value in values or []:
+        raw = str(value or "").strip()
+        if not raw:
+            continue
+        canonical = extract_market_instruments(raw)
+        if canonical:
+            result.update(canonical)
+        else:
+            result.add(raw.lower())
+    return result
+
+
+def _market_quote_instruments(content: str) -> list[str]:
+    """Return instruments that actually have numeric quotes in provider output.
+
+    This is deliberately derived from the full tool result before working-state
+    evidence is clipped.  A multi-instrument quote payload is commonly longer
+    than the evidence preview budget, so reparsing the preview later is not a
+    reliable proof that every requested instrument was returned.
+    """
+    payload = _json_payload(content)
+    if not isinstance(payload, dict):
+        return []
+    found: set[str] = set()
+    for row in payload.get("quotes") or []:
+        if not isinstance(row, dict) or not isinstance(row.get("price"), (int, float)):
+            continue
+        values = [row.get("instrument"), row.get("symbol")]
+        found.update(_canonical_market_instruments(values))
+    return sorted(found)
+
+
+def _content_terms(text: str, *, limit: int = 512) -> list[str]:
+    """Return bounded exact lexical proof derived from the full observation.
+
+    These terms are persisted for validator use only and are not rendered into
+    the model prompt.  They let scope checks survive evidence-preview clipping
+    without storing another copy of the raw page/tool output.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for token in re.findall(r"[A-Za-z0-9]+", str(text or "").lower()):
+        if len(token) <= 2 or token in seen:
+            continue
+        seen.add(token)
+        result.append(token)
+        if len(result) >= max(64, int(limit)):
+            break
+    return result
+
+
+def _geocode_candidates(content: str) -> list[dict[str, Any]]:
+    payload = _json_payload(content)
+    if not isinstance(payload, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in payload[:10]:
+        if not isinstance(item, dict):
+            continue
+        try:
+            lat = float(item.get("latitude"))
+            lon = float(item.get("longitude"))
+        except (TypeError, ValueError):
+            continue
+        rows.append({
+            "name": str(item.get("name") or "")[:160],
+            "admin1": str(item.get("admin1") or "")[:120],
+            "admin2": str(item.get("admin2") or "")[:120],
+            "country": str(item.get("country") or "")[:120],
+            "country_code": str(item.get("country_code") or "")[:12],
+            "timezone": str(item.get("timezone") or "")[:80],
+            "latitude": lat,
+            "longitude": lon,
+        })
+    return rows
+
+
+def _coordinates_from_weather(content: str, arguments: dict[str, Any]) -> dict[str, float]:
+    payload = _json_payload(content)
+    lat = payload.get("latitude") if isinstance(payload, dict) else None
+    lon = payload.get("longitude") if isinstance(payload, dict) else None
+    if lat is None:
+        lat = arguments.get("latitude")
+    if lon is None:
+        lon = arguments.get("longitude")
+    try:
+        return {"latitude": float(lat), "longitude": float(lon)}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _time_proof(content: str) -> dict[str, Any]:
+    payload = _json_payload(content)
+    if not isinstance(payload, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for key in ("timezone", "timezone_abbreviation", "utc_offset", "date", "time", "local", "utc"):
+        value = payload.get(key)
+        if value not in (None, ""):
+            result[key] = str(value)[:160]
+    if isinstance(payload.get("unix_timestamp"), int):
+        result["unix_timestamp"] = int(payload["unix_timestamp"])
+    return result
+
+
+def _proof(item: dict[str, Any]) -> dict[str, Any]:
+    value = item.get("grounding_proof")
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _coordinates_close(left: dict[str, Any], right: dict[str, Any], *, tolerance: float = 0.05) -> bool:
+    try:
+        return (
+            abs(float(left.get("latitude")) - float(right.get("latitude"))) <= tolerance
+            and abs(float(left.get("longitude")) - float(right.get("longitude"))) <= tolerance
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 def is_weather_bearing(content: str) -> bool:
     """Conservatively detect whether an observation actually carries weather data."""
     text = str(content or "")
@@ -174,22 +297,34 @@ def _recipe_stages(content: str) -> set[str]:
     return {
         str(item.get("tool") or "")
         for item in stages
-        if isinstance(item, dict) and item.get("ok", True)
+        if isinstance(item, dict)
+        and item.get("ok") is True
+        and not bool(item.get("skipped"))
     }
 
 
 def classify_fact_types(tool_name: str, content: str) -> set[str]:
-    """Classify fact types carried by one successful observation."""
+    """Classify fact types carried by one successful observation.
+
+    Grounding-sensitive deterministic tools must satisfy their structured output
+    contract. Arbitrary non-empty text is not evidence merely because it came
+    from a tool whose name normally carries a fact type.
+    """
     name = str(tool_name or "").strip().lower()
     text = str(content or "")
+    payload = _json_payload(text)
     result: set[str] = set()
-    if name == "current_time" and re.search(r"\d{1,4}[-/:T ]\d{1,2}|timezone|utc|local", text, re.I):
+    if name == "current_time" and isinstance(payload, dict) and all(
+        str(payload.get(key) or "").strip() for key in ("utc", "local", "timezone")
+    ):
         result.add("current_time")
-    if name in {"host_snapshot", "pressure_snapshot", "process_snapshot", "filesystem_snapshot", "service_health"} and text.strip():
+    if name in {"host_snapshot", "pressure_snapshot", "process_snapshot", "filesystem_snapshot", "service_health"} and isinstance(payload, dict):
         result.add("host_state")
-    if name in {"network_snapshot", "neighbor_snapshot", "connection_snapshot", "local_subnets", "scan_subnet", "network_reachability", "dns_diagnose", "network_path", "endpoint_probe", "http_probe"} and text.strip():
+    network_dict_tools = {"network_snapshot", "connection_snapshot", "local_subnets", "scan_subnet", "dns_diagnose", "network_path", "endpoint_probe", "http_probe"}
+    network_list_tools = {"neighbor_snapshot", "network_reachability"}
+    if (name in network_dict_tools and isinstance(payload, dict)) or (name in network_list_tools and isinstance(payload, list)):
         result.add("network_state")
-    if name in {"repo_status", "repo_diff", "repo_checks", "git_status", "git_diff"} and text.strip():
+    if name in {"repo_status", "repo_diff", "repo_checks", "git_status", "git_diff"} and isinstance(payload, dict):
         result.add("repository_state")
     if name == "news_search":
         payload = _json_payload(text)
@@ -231,9 +366,10 @@ def make_observation(
     at: str = "",
     turn_id: int = 0,
     arguments: Any = None,
+    task_frame: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create the minimal provenance record used by the grounding validator."""
-    meta = grounding_metadata(tool_name, content, arguments=arguments)
+    meta = grounding_metadata(tool_name, content, arguments=arguments, task_frame=task_frame)
     return {
         "tool": str(tool_name or ""),
         "status": str(status or ""),
@@ -412,15 +548,30 @@ def _observation_matches_frame(item: dict[str, Any], frame: dict[str, Any], *, l
         str(item.get("target") or ""),
         json.dumps(item.get("arguments") or {}, ensure_ascii=False, default=str),
         str(item.get("source_url") or ""),
+        # Legacy migration fallback. Modern observations also persist exact
+        # lexical proof from the full untruncated result below.
         str(item.get("evidence_preview") or item.get("content") or ""),
     ]).lower()
+    proof = _proof(item)
+    proof_terms = {str(token).lower() for token in (proof.get("content_terms") or proof.get("scope_terms") or []) if token}
+    # Exact frame-bound scope values are captured from the full result at
+    # ingestion time and survive any evidence-preview clipping.
+    proof_terms.update(_frame_tokens(proof.get("scope_entity") or ""))
+    proof_terms.update(_frame_tokens(proof.get("scope_time") or ""))
+    observed_terms = set(_frame_tokens(haystack)) | proof_terms
     entity_tokens = _frame_tokens(entity)
     tool_name = str(item.get("tool") or "").lower()
     # For browse_url, ``target`` is the source URL and is not semantic location
-    # metadata. New observations carry arguments; old persisted browse rows often
-    # have only a source URL and remain migration-compatible.
-    has_scope_metadata = bool(item.get("arguments")) or bool(item.get("target") and tool_name != "browse_url")
-    if entity_tokens and not all(token in haystack for token in entity_tokens):
+    # metadata. New observations carry arguments/proof; old persisted browse rows
+    # often have only a source URL and remain migration-compatible.
+    has_scope_metadata = (
+        bool(item.get("arguments"))
+        or bool(proof.get("scope_entity"))
+        or bool(proof.get("scope_time"))
+        or bool(proof.get("scope_terms"))
+        or bool(item.get("target") and tool_name != "browse_url")
+    )
+    if entity_tokens and not all(token in observed_terms for token in entity_tokens):
         # Search->browse linkage proves provenance, not identity. A modern browse
         # observation must still carry the requested location/entity; otherwise a
         # result for another city in the same region could satisfy the gate.
@@ -429,7 +580,7 @@ def _observation_matches_frame(item: dict[str, Any], frame: dict[str, Any], *, l
             return False
     if time_scope and time_scope not in {"current", "now"}:
         temporal = _frame_tokens(time_scope)
-        if temporal and not all(token in haystack for token in temporal):
+        if temporal and not all(token in observed_terms for token in temporal):
             if not linked_search and has_scope_metadata:
                 return False
     return True
@@ -465,8 +616,19 @@ def _news_observation_matches_frame(item: dict[str, Any], frame: dict[str, Any])
     return bool(scope_tokens)
 
 
-def grounding_metadata(tool_name: str, content: str, *, arguments: Any = None) -> dict[str, Any]:
-    """Return compact scope/provenance metadata safe to persist with evidence."""
+def grounding_metadata(
+    tool_name: str,
+    content: str,
+    *,
+    arguments: Any = None,
+    task_frame: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return compact scope/provenance metadata safe to persist with evidence.
+
+    ``task_frame`` is optional because tests/legacy callers may construct
+    observations out of band. Runtime working-state ingestion supplies it so
+    scope proof can be derived from the *full* result before preview clipping.
+    """
     name = str(tool_name or "").strip().lower()
     text = str(content or "")
     args = _compact_arguments(arguments)
@@ -486,15 +648,50 @@ def grounding_metadata(tool_name: str, content: str, *, arguments: Any = None) -
     time_scope = ""
     source_url = ""
     discovered_urls: list[str] = []
+    market_instruments: list[str] = []
+    proof: dict[str, Any] = {}
     if name in {"web_search", "news_search", "wiki_search"}:
         target = str(args.get("query") or "")[:500]
         if name != "wiki_search":
             discovered_urls = _urls_from_payload(text)
             frame = derive_task_frame(target)
             time_scope = str(frame.get("time_scope") or "")
+        else:
+            payload = _json_payload(text)
+            if isinstance(payload, dict):
+                proof["title"] = str(payload.get("title") or "")[:300]
     elif name == "browse_url":
         source_url = _browse_source_url(text, args)
         target = source_url
+        # Runtime ingestion knows the current task frame. Persist exact matched
+        # scope values from the full body so a requested city/time appearing late
+        # in a long page cannot be lost when the human-readable preview is clipped.
+        frame = dict(task_frame or {})
+        entity = str(frame.get("entity") or "").strip()
+        entity_tokens = set(_frame_tokens(entity))
+        full_terms = set(_frame_tokens(text))
+        if entity_tokens and entity_tokens.issubset(full_terms):
+            proof["scope_entity"] = entity[:240]
+        time_value = str(frame.get("time_scope") or "").strip().lower()
+        temporal = set(_frame_tokens(time_value))
+        if temporal and temporal.issubset(full_terms):
+            proof["scope_time"] = time_value[:120]
+        # Keep a small lexical fallback for legacy/out-of-band observations that
+        # do not have a task frame. It is validator-only and never prompt-rendered.
+        proof["content_terms"] = _content_terms(text)
+    elif name == "geocode_location":
+        target = str(args.get("query") or "")[:500]
+        proof["geocode_candidates"] = _geocode_candidates(text)
+    elif name == "current_time":
+        proof["time"] = _time_proof(text)
+    elif name == "market_quote":
+        market_instruments = _market_quote_instruments(text)
+        proof["market_instruments"] = list(market_instruments)
+    elif name == "weather_forecast":
+        proof["coordinates"] = _coordinates_from_weather(text, args)
+        payload = _json_payload(text)
+        if isinstance(payload, dict) and payload.get("timezone"):
+            proof["timezone"] = str(payload.get("timezone") or "")[:80]
     elif recipe_like:
         target = _weather_query_from_recipe(text)[:500]
         frame = derive_task_frame(target)
@@ -505,6 +702,8 @@ def grounding_metadata(tool_name: str, content: str, *, arguments: Any = None) -
             verification = payload["result"].get("verification")
             verification_text = verification if isinstance(verification, str) else json.dumps(verification, ensure_ascii=False, default=str)
             source_url = _browse_source_url(verification_text, {})
+        if target:
+            proof["scope_terms"] = _content_terms(target, limit=256)
     else:
         for key in ("url", "target", "name", "host", "query"):
             if args.get(key):
@@ -519,7 +718,113 @@ def grounding_metadata(tool_name: str, content: str, *, arguments: Any = None) -
         "time_scope": time_scope,
         "source_url": source_url,
         "discovered_urls": discovered_urls,
+        "market_instruments": market_instruments,
+        "grounding_proof": proof,
     }
+
+
+def _explicit_evidence_reuse_request(user_request: str) -> bool:
+    text = " ".join(str(user_request or "").lower().split())
+    return bool(re.search(
+        r"\b(?:without re-?running|without running again|previous (?:result|results|output|data|check)|"
+        r"earlier (?:result|results|output|data|check)|based on (?:that|those|the previous)|"
+        r"same (?:result|results|data|check)|reuse (?:that|those|the previous)|from before)\b",
+        text,
+    ))
+
+
+def _turn_scoped_items(
+    items: list[dict[str, Any]], current_turn_id: int, *, allow_carried: bool = False
+) -> list[dict[str, Any]]:
+    if not current_turn_id or allow_carried:
+        return list(items)
+    return [item for item in items if int(item.get("turn_id") or 0) == int(current_turn_id)]
+
+
+def _encyclopedic_observation_matches_subject(item: dict[str, Any], subject: str) -> bool:
+    subject_tokens = set(_frame_tokens(subject))
+    if not subject_tokens:
+        return True
+    args = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
+    proof = _proof(item)
+    explicit_scope = " ".join((
+        str(args.get("query") or item.get("target") or ""),
+        str(proof.get("title") or ""),
+    )).strip()
+    if explicit_scope:
+        # Modern observations must match structured request/result scope. Do not
+        # let an incidental mention in a long summary validate a wrong lookup.
+        return subject_tokens.issubset(set(_frame_tokens(explicit_scope)))
+    # Migration fallback for observations persisted before query/title metadata.
+    legacy = str(item.get("evidence_preview") or item.get("content") or "")
+    return subject_tokens.issubset(set(_frame_tokens(legacy)))
+
+
+def _browse_contains_subject(item: dict[str, Any], subject: str) -> bool:
+    tokens = set(_frame_tokens(subject))
+    if not tokens:
+        return True
+    proof = _proof(item)
+    observed = {str(x).lower() for x in (proof.get("content_terms") or []) if x}
+    observed.update(_frame_tokens(proof.get("scope_entity") or ""))
+    if tokens.issubset(observed):
+        return True
+    # Legacy migration fallback.
+    return tokens.issubset(set(_frame_tokens(str(item.get("evidence_preview") or item.get("content") or ""))))
+
+
+def _geocode_matches_entity(item: dict[str, Any], entity: str) -> bool:
+    entity_tokens = set(_frame_tokens(entity))
+    if not entity_tokens:
+        return True
+    args = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
+    target_tokens = set(_frame_tokens(str(args.get("query") or item.get("target") or "")))
+    return entity_tokens.issubset(target_tokens)
+
+
+def _linked_geocode_candidate(
+    geocodes: list[dict[str, Any]], frame: dict[str, Any], *, coordinates: dict[str, Any] | None = None, timezone_name: str = ""
+) -> bool:
+    entity = str(frame.get("entity") or "").strip()
+    if not entity:
+        return True
+    for item in geocodes:
+        if not _geocode_matches_entity(item, entity):
+            continue
+        candidates = _proof(item).get("geocode_candidates") or []
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            if coordinates and _coordinates_close(candidate, coordinates):
+                return True
+            if timezone_name and str(candidate.get("timezone") or "").lower() == str(timezone_name).lower():
+                return True
+    return False
+
+
+def _current_time_matches_frame(
+    item: dict[str, Any], frame: dict[str, Any], geocodes: list[dict[str, Any]]
+) -> bool:
+    entity = str(frame.get("entity") or "").strip()
+    if not entity:
+        return True
+    time_meta = _proof(item).get("time") or {}
+    timezone_name = str(time_meta.get("timezone") or "")
+    direct_terms = set(_frame_tokens(timezone_name))
+    entity_terms = set(_frame_tokens(entity))
+    if entity_terms and entity_terms.issubset(direct_terms):
+        return True
+    return _linked_geocode_candidate(geocodes, frame, timezone_name=timezone_name)
+
+
+def _weather_api_matches_frame(
+    item: dict[str, Any], frame: dict[str, Any], geocodes: list[dict[str, Any]]
+) -> bool:
+    if _observation_matches_frame(item, frame):
+        return True
+    coords = _proof(item).get("coordinates") or {}
+    return bool(coords and _linked_geocode_candidate(geocodes, frame, coordinates=coords))
+
 
 def validate_fact_grounding(
     user_request: str,
@@ -550,9 +855,19 @@ def validate_fact_grounding(
     observed = sorted({fact for item in usable for fact in _fact_types(item)})
     missing: list[str] = []
     evidence: dict[str, list[str]] = {}
+    allow_carried = _explicit_evidence_reuse_request(user_request)
+    turn_usable = _turn_scoped_items(usable, current_turn_id, allow_carried=allow_carried)
+    current_geocodes = [
+        item for item in turn_usable
+        if str(item.get("tool") or "").lower() == "geocode_location"
+    ]
 
     if "current_time" in required:
-        time_items = [item for item in usable if "current_time" in _fact_types(item)]
+        time_items = [
+            item for item in turn_usable
+            if "current_time" in _fact_types(item)
+            and _current_time_matches_frame(item, frame, current_geocodes)
+        ]
         if time_items:
             evidence["current_time"] = [str(item.get("tool") or "") for item in time_items[-2:]]
         else:
@@ -563,7 +878,8 @@ def validate_fact_grounding(
             item for item in usable
             if str(item.get("tool") or "").lower() == "wiki_search"
             and "encyclopedic" in _fact_types(item)
-            and (not current_turn_id or int(item.get("turn_id") or 0) == int(current_turn_id))
+            and item in turn_usable
+            and _encyclopedic_observation_matches_subject(item, encyclopedic_lookup_query(user_request))
         ]
         if encyclopedia_items:
             evidence["encyclopedic"] = ["wiki_search"]
@@ -571,10 +887,7 @@ def validate_fact_grounding(
             # Wikipedia is the preferred fast path, but a linked web discovery
             # and verified page from the current turn is an acceptable fallback
             # when the encyclopedia endpoint/package is unavailable.
-            turn_items = [
-                item for item in usable
-                if not current_turn_id or int(item.get("turn_id") or 0) == int(current_turn_id)
-            ]
+            turn_items = list(turn_usable)
             subject = encyclopedic_lookup_query(user_request)
             subject_terms = set(_frame_tokens(subject))
             searches = []
@@ -599,7 +912,7 @@ def validate_fact_grounding(
                         str(browse.get("evidence_preview") or browse.get("content") or ""),
                         dict(browse.get("arguments") or {}),
                     )
-                    if source and source in discovered:
+                    if source and source in discovered and _browse_contains_subject(browse, subject):
                         linked = True
                         break
                 if linked:
@@ -618,7 +931,7 @@ def validate_fact_grounding(
         if fact_type not in required:
             continue
         matches = [
-            item for item in usable
+            item for item in turn_usable
             if fact_type in _fact_types(item)
             and str(item.get("tool") or "").lower() in allowed_tools
         ]
@@ -628,10 +941,7 @@ def validate_fact_grounding(
             missing.append(fact_type)
 
     if "news" in required:
-        turn_items = [
-            item for item in usable
-            if not current_turn_id or int(item.get("turn_id") or 0) == int(current_turn_id)
-        ]
+        turn_items = list(turn_usable)
         matches = [
             item for item in turn_items
             if str(item.get("tool") or "").lower() == "news_search" and "news" in _fact_types(item)
@@ -643,27 +953,37 @@ def validate_fact_grounding(
             missing.append("news")
 
     if "market_price" in required:
-        turn_items = [
-            item for item in usable
-            if not current_turn_id or int(item.get("turn_id") or 0) == int(current_turn_id)
-        ]
-        expected = set(str(item).lower() for item in (frame.get("instruments") or extract_market_instruments(user_request)) if str(item))
+        turn_items = list(turn_usable)
+        expected = _canonical_market_instruments(frame.get("instruments") or extract_market_instruments(user_request))
         matches = []
         for item in turn_items:
             if str(item.get("tool") or "").lower() != "market_quote" or "market_price" not in _fact_types(item):
                 continue
+            # Prefer compact structured scope captured from the *full* provider
+            # payload before the evidence preview is bounded. This survives
+            # working-state clipping and proves returned rows, unlike call args.
+            actual = _canonical_market_instruments(item.get("market_instruments") or [])
+            if actual:
+                if expected and not expected.issubset(actual):
+                    continue
+                matches.append(item)
+                continue
             payload = _json_payload(str(item.get("content") or item.get("evidence_preview") or ""))
             if not isinstance(payload, dict):
-                # Runtime observations may keep the original result outside content;
-                # arguments still prove the requested scope for legacy callers.
+                # Legacy observations did not persist returned instrument scope.
+                # Arguments are acceptable only for a single requested asset:
+                # with multiple assets they cannot prove a partial provider
+                # response actually contained every requested quote.
                 args = dict(item.get("arguments") or {})
-                actual_args = {str(x).lower() for x in (args.get("instruments") or []) if str(x)}
-                if expected and actual_args and not expected.issubset(actual_args):
+                actual_args = _canonical_market_instruments(args.get("instruments") or [])
+                if len(expected) != 1 or not actual_args or not expected.issubset(actual_args):
                     continue
                 matches.append(item)
                 continue
             rows = [row for row in (payload.get("quotes") or []) if isinstance(row, dict) and isinstance(row.get("price"), (int, float))]
-            actual = {str(row.get("instrument") or "").lower() for row in rows}
+            actual = _canonical_market_instruments(
+                [value for row in rows for value in (row.get("instrument"), row.get("symbol"))]
+            )
             if expected and not expected.issubset(actual):
                 continue
             matches.append(item)
@@ -673,10 +993,7 @@ def validate_fact_grounding(
             missing.append("market_price")
 
     if "web_fact" in required:
-        turn_items = [
-            item for item in usable
-            if not current_turn_id or int(item.get("turn_id") or 0) == int(current_turn_id)
-        ]
+        turn_items = list(turn_usable)
         explicit_urls = {
             _canonical_url(url) for url in re.findall(r"https?://[^\s<>\"']+", str(user_request or ""), flags=re.I)
         }
@@ -736,12 +1053,7 @@ def validate_fact_grounding(
             missing.append("web_fact")
 
     if "weather" in required:
-        current = [
-            item for item in usable
-            if current_turn_id and int(item.get("turn_id") or 0) == int(current_turn_id)
-        ]
-        if not current_turn_id:
-            current = usable
+        current = _turn_scoped_items(usable, current_turn_id, allow_carried=False)
         current_weather = [item for item in current if "weather" in _fact_types(item)]
         current_search = [
             item for item in current_weather
@@ -754,7 +1066,11 @@ def validate_fact_grounding(
         ]
         current_api = [
             item for item in current_weather
-            if _weather_api_observation(item) and _observation_matches_frame(item, frame)
+            if _weather_api_observation(item)
+            and _weather_api_matches_frame(item, frame, [
+                geo for geo in current
+                if str(geo.get("tool") or "").lower() == "geocode_location"
+            ])
         ]
 
         linked_pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []

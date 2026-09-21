@@ -62,6 +62,41 @@ _PARTIAL_PREFIXES = (
     "partial:",
 )
 
+# These tools intentionally encode a negative diagnostic outcome as structured
+# data (for example connection refused / DNS failure). The tool invocation still
+# succeeded and the negative state is often the fact the user requested.
+_STRUCTURED_NEGATIVE_DIAGNOSTIC_TOOLS = {
+    "endpoint_probe", "http_probe", "tcp_connect", "tls_handshake",
+}
+
+# Empty/negative text from these tools is a completed observation, not an
+# execution failure. Search/memory misses remain no-progress because callers can
+# usually recover by changing the query/source.
+_VALID_EMPTY_RESULT_PREFIXES = {
+    "read_host_journal": ("no logs found",),
+    "scan_mdns": ("no mdns services discovered",),
+    "search_packages": ("no official packages found",),
+    "scan_subnet": ("error: no active hosts discovered",),
+}
+
+# Deterministic primitives whose successful contract is structured JSON.  If one
+# of these returns malformed/unexpected top-level data, treating arbitrary text
+# as success can satisfy a requirement while leaving the grounding layer with no
+# usable evidence.  Negative diagnostic states are still valid JSON and remain
+# successful observations.
+_JSON_LIST_RESULT_TOOLS = {
+    "web_search", "news_search", "geocode_location", "neighbor_snapshot",
+    "network_reachability",
+}
+_JSON_DICT_RESULT_TOOLS = {
+    "wiki_search", "market_quote", "current_time", "weather_forecast",
+    "host_snapshot", "pressure_snapshot", "process_snapshot",
+    "filesystem_snapshot", "service_health", "network_snapshot",
+    "connection_snapshot", "local_subnets", "scan_subnet", "dns_diagnose",
+    "network_path", "endpoint_probe", "http_probe",
+    "repo_status", "repo_diff", "repo_checks", "git_status", "git_diff",
+}
+
 
 def tool_call_signature(call: dict[str, Any]) -> str:
     """Return a stable signature used to reject repeated recovery calls."""
@@ -98,28 +133,86 @@ def classify_tool_outcome(
     lowered = text.lower().lstrip()
     name = str(tool_name or "")
 
-    # A few read tools have deterministic empty-result shapes that otherwise
-    # look like successful JSON/text. Mark only those known shapes as no-progress
-    # so three fruitless tries reach the fast validator instead of looping.
-    if name in {"web_search", "news_search"} and text.strip() == "[]":
-        return {"success": False, "status": "error", "reason": "no_progress_result", "fingerprint": result_fingerprint(text)}
-    if name == "browse_url" and "the page returned no readable text content." in lowered:
-        return {"success": False, "status": "error", "reason": "no_progress_result", "fingerprint": result_fingerprint(text)}
-    if name == "network_reachability" and text.startswith("["):
+    # A few read tools have deterministic empty/invalid-result shapes that otherwise
+    # look like successful JSON/text. Mark only retrieval failures as no-progress;
+    # diagnostic tools may legitimately return negative states (for example ok=false
+    # when an endpoint is unreachable) and those remain useful evidence.
+    if name in {"web_search", "news_search"} and text.startswith("["):
         try:
             payload = json.loads(text)
-            if isinstance(payload, list) and payload and all(isinstance(item, dict) and item.get("ok") is False for item in payload):
+            valid_rows = [
+                item for item in payload
+                if isinstance(item, dict)
+                and str(item.get("title") or "").strip()
+                and str(item.get("url") or "").startswith(("http://", "https://"))
+            ] if isinstance(payload, list) else []
+            if not valid_rows:
                 return {"success": False, "status": "error", "reason": "no_progress_result", "fingerprint": result_fingerprint(text)}
         except (TypeError, ValueError, json.JSONDecodeError):
             pass
+    if name == "wiki_search" and text.startswith("{"):
+        try:
+            payload = json.loads(text)
+            if isinstance(payload, dict) and not str(payload.get("summary") or "").strip():
+                return {"success": False, "status": "error", "reason": "no_progress_result", "fingerprint": result_fingerprint(text)}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    if name == "market_quote" and text.startswith("{"):
+        try:
+            payload = json.loads(text)
+            quotes = payload.get("quotes") if isinstance(payload, dict) else None
+            numeric = [
+                item for item in (quotes or [])
+                if isinstance(item, dict) and isinstance(item.get("price"), (int, float))
+            ]
+            if not numeric:
+                return {"success": False, "status": "error", "reason": "no_progress_result", "fingerprint": result_fingerprint(text)}
+            if isinstance(payload, dict) and payload.get("errors"):
+                return {"success": True, "status": "partial", "reason": "partial_result", "fingerprint": result_fingerprint(text)}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    if name == "browse_url" and "the page returned no readable text content." in lowered:
+        return {"success": False, "status": "error", "reason": "no_progress_result", "fingerprint": result_fingerprint(text)}
+    for prefix in _VALID_EMPTY_RESULT_PREFIXES.get(name, ()):
+        if lowered.startswith(prefix):
+            return {"success": True, "status": "ok", "reason": "empty_result", "fingerprint": result_fingerprint(text)}
+
+    if name in (_JSON_LIST_RESULT_TOOLS | _JSON_DICT_RESULT_TOOLS):
+        try:
+            structured = json.loads(text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            structured = None
+        expected_type = list if name in _JSON_LIST_RESULT_TOOLS else dict
+        if not isinstance(structured, expected_type):
+            return {"success": False, "status": "error", "reason": "malformed_structured_result", "fingerprint": result_fingerprint(text)}
+        if name == "current_time" and not all(str(structured.get(key) or "").strip() for key in ("utc", "local", "timezone")):
+            return {"success": False, "status": "error", "reason": "malformed_structured_result", "fingerprint": result_fingerprint(text)}
+        if name == "geocode_location":
+            valid_locations = [
+                row for row in structured
+                if isinstance(row, dict)
+                and isinstance(row.get("latitude"), (int, float))
+                and isinstance(row.get("longitude"), (int, float))
+            ]
+            if not valid_locations:
+                return {"success": False, "status": "error", "reason": "no_progress_result", "fingerprint": result_fingerprint(text)}
+        if name == "weather_forecast" and not (
+            isinstance(structured.get("daily"), dict)
+            and isinstance(structured.get("latitude"), (int, float))
+            and isinstance(structured.get("longitude"), (int, float))
+        ):
+            return {"success": False, "status": "error", "reason": "malformed_structured_result", "fingerprint": result_fingerprint(text)}
 
     # Tools that return JSON can expose a top-level error without using a string
     # prefix.  Only inspect the top level so untrusted nested data is not treated
-    # as harness control information.
+    # as harness control information. Structured connectivity probes are an
+    # exception: ok=false + error describes the observed endpoint state.
     if text.startswith("{"):
         try:
             payload = json.loads(text)
             if isinstance(payload, dict) and payload.get("error"):
+                if name in _STRUCTURED_NEGATIVE_DIAGNOSTIC_TOOLS and payload.get("ok") is False:
+                    return {"success": True, "status": "ok", "reason": "diagnostic_negative", "fingerprint": result_fingerprint(text)}
                 return {"success": False, "status": "error", "reason": "tool_reported_error", "fingerprint": result_fingerprint(text)}
         except (TypeError, ValueError, json.JSONDecodeError):
             pass

@@ -3,15 +3,6 @@ from __future__ import annotations
 from .common import *  # noqa: F403
 from .common import _json, _bounded_int, _safe_workspace, _source_text, _load_json, _get_path
 
-def list_processes(limit: int = 100) -> str:
-    """Return a bounded process list with PID, CPU, RSS, state, and name."""
-    rows=[]
-    for p in psutil.process_iter(["pid","name","status","cpu_percent","memory_info"]):
-        try:
-            info=p.info; rows.append({"pid":info["pid"],"name":info.get("name") or "","state":info.get("status") or "","cpu_percent":info.get("cpu_percent") or 0.0,"rss_mb":round((info.get("memory_info").rss if info.get("memory_info") else 0)/1048576,1)})
-        except (psutil.NoSuchProcess,psutil.AccessDenied): pass
-    return _json(rows[:_bounded_int(limit,1,500)])
-
 def process_info(pid: int) -> str:
     """Return bounded metadata for one process PID."""
     try:

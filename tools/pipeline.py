@@ -95,6 +95,7 @@ def _serialize_size(parsed: Any) -> tuple[str, int]:
 def execute_pipeline(stages: list[dict[str, Any]], parameters: dict[str, Any] | None = None) -> dict[str, Any]:
     from . import AVAILABLE_TOOLS_MAP, TOOL_METADATA
     from .loop_validator import classify_tool_outcome
+    from .grounding import grounding_metadata
     from .tool_registry import normalize_arguments
     from .executor import execute_registered_tool
 
@@ -138,6 +139,10 @@ def execute_pipeline(stages: list[dict[str, Any]], parameters: dict[str, Any] | 
             stage_results = []
             stage_args: list[dict[str, Any]] = []
             stage_size = 0
+            stage_ok = True
+            stage_status = "ok"
+            optional_failures = 0
+            stage_grounding: list[dict[str, Any]] = []
             for item in items:
                 invocations += 1
                 if invocations > MAX_INVOCATIONS:
@@ -149,6 +154,9 @@ def execute_pipeline(stages: list[dict[str, Any]], parameters: dict[str, Any] | 
                     result = execute_registered_tool(tool, args)
                 except Exception as exc:
                     if stage.get("optional"):
+                        stage_ok = False
+                        stage_status = "error"
+                        optional_failures += 1
                         parsed = {"ok": False, "error": str(exc), "optional_failure": True}
                     else:
                         return {"ok": False, "error": f"stage {idx} ({tool}) failed: {exc}", "stages": summaries}
@@ -159,8 +167,20 @@ def execute_pipeline(stages: list[dict[str, Any]], parameters: dict[str, Any] | 
                         else json.dumps(result, ensure_ascii=False, default=str)
                     )
                     outcome = classify_tool_outcome(raw_for_status, tool_name=tool)
+                    invocation_status = str(outcome.get("status") or ("ok" if outcome.get("success") else "error"))
+                    if invocation_status == "partial" and stage_status == "ok":
+                        stage_status = "partial"
+                    meta = grounding_metadata(tool, raw_for_status, arguments=args)
+                    stage_grounding.append({
+                        key: meta.get(key)
+                        for key in ("fact_types", "target", "time_scope", "source_url", "market_instruments")
+                        if meta.get(key) not in (None, "", [], {})
+                    })
                     if not bool(outcome.get("success")):
                         if stage.get("optional"):
+                            stage_ok = False
+                            stage_status = "error"
+                            optional_failures += 1
                             parsed = {
                                 "ok": False,
                                 "error": raw_for_status[:2000],
@@ -182,8 +202,11 @@ def execute_pipeline(stages: list[dict[str, Any]], parameters: dict[str, Any] | 
 
             outputs[sid] = stage_results if foreach_spec is not None else stage_results[0]
             summaries.append({
-                "id": sid, "tool": tool, "ok": True, "calls": len(stage_results), "size": stage_size,
+                "id": sid, "tool": tool, "ok": stage_ok, "status": stage_status,
+                "calls": len(stage_results), "size": stage_size,
                 "args": stage_args[0] if len(stage_args) == 1 else stage_args,
+                "grounding": stage_grounding[0] if len(stage_grounding) == 1 else stage_grounding,
+                **({"optional_failure": True, "failed_calls": optional_failures} if optional_failures else {}),
             })
         except Exception as exc:
             return {"ok": False, "error": f"stage {idx} ({tool}) resolution failed: {exc}", "stages": summaries}

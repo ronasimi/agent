@@ -86,3 +86,8 @@ def test_system_policy_forbids_stale_clock_inference():
 def test_runtime_services_mount_host_localtime():
     compose = Path("docker-compose.yml").read_text(encoding="utf-8")
     assert compose.count("/etc/localtime:/etc/localtime:ro") >= 2
+
+
+def test_current_time_rejects_invalid_explicit_timezone_instead_of_falling_back():
+    result = current_time("Invalid/Not_A_Zone")
+    assert result.startswith("Error: unknown IANA timezone")

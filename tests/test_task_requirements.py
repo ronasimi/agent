@@ -146,3 +146,50 @@ def test_local_news_followup_inherits_location_but_topical_news_does_not():
         "London, Ontario, Canada local latest news"
     )
     assert is_task_continuation("What are the latest AI headlines?", first) is False
+
+
+def test_market_requirement_ledger_uses_returned_rows_not_requested_arguments():
+    import json
+
+    request = "What is the current price of Brent crude and WTI?"
+    ledger = TaskRequirementLedger.from_request(request)
+    partial = json.dumps({
+        "quotes": [{"instrument": "brent", "symbol": "BZ=F", "price": 97.43}],
+        "errors": [{"instrument": "wti", "error": "provider unavailable"}],
+    })
+    ledger.record_tool(
+        "market_quote", status="partial", reason="partial_result", arguments={"instruments": ["BZ=F", "CL=F"]},
+        result_text=partial,
+    )
+    assert ledger.status_for_tool("market_quote") == "failed"
+
+    complete = json.dumps({
+        "quotes": [
+            {"instrument": "brent", "symbol": "BZ=F", "price": 97.43},
+            {"instrument": "wti", "symbol": "CL=F", "price": 93.95},
+        ],
+        "errors": [],
+    })
+    ledger.record_tool(
+        "market_quote", status="ok", reason="ok", arguments={"instruments": ["BZ=F", "CL=F"]},
+        result_text=complete,
+    )
+    assert ledger.status_for_tool("market_quote") == "satisfied"
+
+
+def test_market_requirement_rejects_malformed_or_empty_result_provenance():
+    ledger = TaskRequirementLedger.from_request("What are the current Brent and WTI prices?")
+    assert "market_quote" in ledger.required_tools()
+    ledger.record_tool(
+        "market_quote", status="ok", fingerprint="bad-json",
+        arguments={"instruments": ["BZ=F", "CL=F"]}, result_text="{not json",
+    )
+    assert ledger.status_for_tool("market_quote") != "satisfied"
+
+    ledger = TaskRequirementLedger.from_request("What are the current Brent and WTI prices?")
+    ledger.record_tool(
+        "market_quote", status="ok", fingerprint="empty-meta",
+        arguments={"instruments": ["BZ=F", "CL=F"]},
+        result_metadata={"market_instruments": []},
+    )
+    assert ledger.status_for_tool("market_quote") != "satisfied"

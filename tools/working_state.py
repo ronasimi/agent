@@ -383,7 +383,7 @@ class WorkingStateStore:
         state = _load(self._cid())
         status = str(status or "error")
         from .grounding import grounding_metadata
-        grounding = grounding_metadata(tool_name, result_text, arguments=arguments)
+        grounding = grounding_metadata(tool_name, result_text, arguments=arguments, task_frame=dict(state.get("task_frame") or {}))
         record = {
             "tool": _clip(tool_name, 80),
             "status": status,
@@ -394,6 +394,14 @@ class WorkingStateStore:
             "time_scope": grounding.get("time_scope", ""),
             "source_url": grounding.get("source_url", ""),
             "discovered_urls": grounding.get("discovered_urls", []),
+            # Scope derived from successful numeric quote rows in the original
+            # (unclipped) result.  The human-readable evidence preview may be
+            # too short to contain every instrument in a multi-quote response.
+            "market_instruments": grounding.get("market_instruments", []),
+            # Deterministic validator-only proof derived from the full result
+            # before evidence previews are clipped. This is intentionally omitted
+            # from model-facing render() output to avoid prompt bloat.
+            "grounding_proof": grounding.get("grounding_proof", {}),
             "fingerprint": _clip(fingerprint, 32),
             "evidence_ref": _clip(observation_id, 64),
             # Persisted for an explicitly untrusted evidence digest. It is never
@@ -514,7 +522,7 @@ class WorkingStateStore:
             "requirements": _clean_requirements(list(state.get("requirements", []) or []), self.limits["requirement_items"]),
             "tool_capabilities": list(state.get("tool_capabilities", []) or []) if include_tool_capabilities else [],
             "verified_observations": [
-                {key: value for key, value in item.items() if key != "evidence_preview"}
+                {key: value for key, value in item.items() if key not in {"evidence_preview", "grounding_proof"}}
                 for item in list(state.get("verified_observations", []) or [])
                 if isinstance(item, dict)
             ],

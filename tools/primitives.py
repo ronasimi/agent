@@ -94,8 +94,19 @@ def clock_payload(timezone_name: str = "") -> dict[str, Any]:
 
 
 def current_time(timezone_name: str = "") -> str:
-    """Return the current clock/date for the configured zone or an explicit IANA timezone."""
-    return json.dumps(clock_payload(timezone_name), ensure_ascii=False, indent=2)
+    """Return the current clock/date for the configured zone or an explicit IANA timezone.
+
+    An explicitly supplied invalid zone is an argument error rather than a silent
+    fallback. Silent fallback can make a successful tool result appear to answer
+    a different location than the caller requested.
+    """
+    requested = str(timezone_name or "").strip()
+    if requested:
+        try:
+            ZoneInfo(requested)
+        except (ZoneInfoNotFoundError, ValueError):
+            return f"Error: unknown IANA timezone '{requested}'."
+    return json.dumps(clock_payload(requested), ensure_ascii=False, indent=2)
 
 
 def hostname() -> str:

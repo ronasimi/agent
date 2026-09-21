@@ -218,3 +218,102 @@ def test_simple_encyclopedic_definition_requires_current_turn_wikipedia_evidence
     report = validate_fact_grounding(req, [current], current_turn_id=11)
     assert report["grounded"] is True
     assert report["evidence"]["encyclopedic"] == ["wiki_search"]
+
+
+def test_current_time_requires_current_turn_and_requested_timezone_scope():
+    import json
+
+    request = "What time is it in Tokyo?"
+    frame = __import__("tools.task_requirements", fromlist=["derive_task_frame"]).derive_task_frame(request)
+    stale = make_observation(
+        "current_time",
+        json.dumps({"utc": "2026-09-21T04:00:00+00:00", "local": "2026-09-21T13:00:00+09:00", "timezone": "Asia/Tokyo"}),
+        turn_id=40,
+        arguments={"timezone_name": "Asia/Tokyo"},
+    )
+    assert validate_fact_grounding(request, [stale], current_turn_id=41, task_frame=frame)["grounded"] is False
+
+    wrong = make_observation(
+        "current_time",
+        json.dumps({"utc": "2026-09-21T04:00:00+00:00", "local": "2026-09-21T00:00:00-04:00", "timezone": "America/Toronto"}),
+        turn_id=41,
+        arguments={"timezone_name": "America/Toronto"},
+    )
+    assert validate_fact_grounding(request, [wrong], current_turn_id=41, task_frame=frame)["grounded"] is False
+
+    geocode = make_observation(
+        "geocode_location",
+        json.dumps([{"name": "Tokyo", "country": "Japan", "latitude": 35.6762, "longitude": 139.6503, "timezone": "Asia/Tokyo"}]),
+        turn_id=41,
+        arguments={"query": "Tokyo", "count": 1},
+    )
+    current = make_observation(
+        "current_time",
+        json.dumps({"utc": "2026-09-21T04:00:00+00:00", "local": "2026-09-21T13:00:00+09:00", "timezone": "Asia/Tokyo"}),
+        turn_id=41,
+        arguments={"timezone_name": "Asia/Tokyo"},
+    )
+    assert validate_fact_grounding(request, [geocode, current], current_turn_id=41, task_frame=frame)["grounded"] is True
+
+
+def test_encyclopedic_lookup_does_not_pass_from_incidental_summary_mention():
+    import json
+
+    request = "What is a Cthulhu?"
+    wrong = make_observation(
+        "wiki_search",
+        json.dumps({
+            "title": "Shoggoth",
+            "url": "https://en.wikipedia.org/wiki/Shoggoth",
+            "summary": "A shoggoth is a fictional creature in the Cthulhu Mythos.",
+        }),
+        turn_id=50,
+        arguments={"query": "shoggoth"},
+    )
+    report = validate_fact_grounding(request, [wrong], current_turn_id=50)
+    assert report["grounded"] is False
+    assert report["missing_fact_types"] == ["encyclopedic"]
+
+
+def test_weather_browse_scope_proof_survives_location_after_preview_clip(tmp_path, monkeypatch):
+    import json
+    from tools import working_state
+    from tools.task_requirements import derive_task_frame
+
+    request = "What is the weather in London Ontario today?"
+    frame = derive_task_frame(request)
+    monkeypatch.setattr(working_state, "DB_PATH", str(tmp_path / "weather-state.db"))
+    store = working_state.WorkingStateStore(limits={"evidence_preview_chars": 180})
+    store.begin_turn(
+        turn_id=60, objective=request, rolling_summary="", recalled_context="", recent_messages=[],
+        policy_note="", tool_schemas=[], task_frame=frame,
+    )
+    url = "https://weather.example/london"
+    search_payload = json.dumps([{"title": "Forecast", "url": url, "snippet": "London Ontario Canada weather today"}])
+    store.record_tool_result(
+        tool_name="web_search", arguments={"query": "London Ontario Canada weather today"}, status="ok",
+        reason="ok", result_text=search_payload, fingerprint="search-60",
+    )
+    filler = " ".join(f"token{i}" for i in range(1000))
+    page = f"URL: {url}\n{filler}\nLondon Ontario Canada Current Conditions Temperature 19 C Wind 10 km/h Forecast cloudy"
+    store.record_tool_result(
+        tool_name="browse_url", arguments={"url": url}, status="ok", reason="ok",
+        result_text=page, fingerprint="browse-60",
+    )
+    observations = store.load()["verified_observations"]
+    browse = observations[-1]
+    assert "London" not in browse["evidence_preview"]
+    assert browse["grounding_proof"]["scope_entity"] == frame["entity"]
+    report = validate_fact_grounding(request, observations, current_turn_id=60, task_frame=frame)
+    assert report["grounded"] is True
+
+
+def test_structured_fact_tools_do_not_ground_arbitrary_nonempty_text():
+    assert classify_fact_types("current_time", "timezone UTC at noon") == set()
+    assert classify_fact_types("host_snapshot", "CPU looks healthy") == set()
+    assert classify_fact_types("network_snapshot", "interfaces are up") == set()
+    assert classify_fact_types("repo_status", "working tree clean") == set()
+
+    assert "host_state" in classify_fact_types("host_snapshot", '{"cpu_count":8}')
+    assert "network_state" in classify_fact_types("neighbor_snapshot", "[]")
+    assert "repository_state" in classify_fact_types("repo_status", '{"git_repo":false}')
