@@ -19,7 +19,6 @@ RUN pacman -Syu --noconfirm --needed \
       bind \
       sqlite \
       systemd \
-      kitty-terminfo \
       nss \
       alsa-lib \
       atk \
@@ -55,4 +54,4 @@ USER agent
 # Playwright is retained for explicit screenshot requests.
 RUN playwright install chromium
 
-CMD ["python", "/app/agent.py"]
+CMD ["python", "-m", "webui"]

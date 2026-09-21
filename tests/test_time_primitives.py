@@ -78,11 +78,11 @@ def test_compact_tool_policy_mentions_withheld_capabilities():
 
 
 def test_system_policy_forbids_stale_clock_inference():
-    source = Path("agent.py").read_text(encoding="utf-8")
+    source = Path("al_agent/runtime.py").read_text(encoding="utf-8")
     assert "Never infer the current clock from uptime" in source
     assert "Their absence from the currently supplied schemas" in source
 
 
 def test_runtime_services_mount_host_localtime():
     compose = Path("docker-compose.yml").read_text(encoding="utf-8")
-    assert compose.count("/etc/localtime:/etc/localtime:ro") >= 3
+    assert compose.count("/etc/localtime:/etc/localtime:ro") >= 2

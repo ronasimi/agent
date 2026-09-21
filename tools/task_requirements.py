@@ -71,6 +71,16 @@ _RULES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     ("screenshot", "take_web_screenshot", "requested webpage screenshot", (r"\btake (?:a )?screenshot\b", r"\bscreenshot of\b", r"\bcapture .*page\b")),
     ("repo_status", "repo_status", "repository status", (r"\brepository status\b", r"\brepo status\b")),
     ("repo_checks", "repo_checks", "repository compile/config/lint/test checks", (r"\brepository health\b", r"\brepo checks?\b", r"\bcompile/config/lint/test\b", r"\b(?:compile|lint|pytest|tests?).*checks?\b")),
+    ("gmail", "gmail_search_messages", "requested Gmail messages", (
+        r"\b(?:check|search|show|find|list|read)\s+(?:through\s+)?my\s+(?:gmail|email|emails|mail|inbox|messages?)\b",
+        r"\bwhat(?:'s| is)\s+in\s+my\s+(?:gmail|email|inbox)\b",
+    )),
+    ("google_calendar", "google_calendar_list_events", "requested Google Calendar schedule", (
+        r"\b(?:check|search|show|list|read)\s+my\s+(?:google\s+)?calendar\b",
+        r"\bwhat(?:'s| is)\s+on\s+my\s+(?:google\s+)?calendar\b",
+        r"\bmy\s+(?:upcoming\s+)?(?:calendar\s+)?(?:events|meetings|appointments)\b",
+        r"\b(?:what(?:'s| is)|show|check|list)\s+(?:on\s+)?my\s+schedule\b",
+    )),
 )
 
 # Explicit tool names in the user's request are requirements as well.  This list
@@ -91,6 +101,8 @@ _EXPLICIT_TOOL_NAMES = {
     "dependency_audit", "news_search", "market_quote", "web_search", "browse_url", "take_web_screenshot", "geocode_location", "weather_forecast",
     "repo_status", "repo_checks", "page_metadata", "page_links", "extract_document",
     "current_time", "hostname", "environment_summary", "local_subnets", "scan_subnet",
+    "gmail_search_messages", "gmail_read_message", "google_calendar_list_events",
+    "google_calendar_get_event", "google_calendar_list_calendars",
 }
 
 _FACT_RULE_INTENTS = {
@@ -100,6 +112,8 @@ _FACT_RULE_INTENTS = {
     "news_search": "news",
     "market_quote": "market_price",
     "repo_status": "repository_state",
+    "gmail": "gmail",
+    "google_calendar": "google_calendar",
 }
 
 
@@ -110,7 +124,7 @@ _IMPLEMENTATION_ACTION_RE = re.compile(
 )
 _IMPLEMENTATION_ARTIFACT_RE = re.compile(
     r"\b(?:code|script|module|function|method|class|validator|formatter|parser|router|routing|"
-    r"classifier|intent|prompt|regex|schema|harness|application|app|ui|api|integration|"
+    r"classifier|intent|prompt|regex|schema|widget|harness|application|app|ui|api|integration|"
     r"implementation|logic|library|package)\b",
     re.I,
 )
@@ -227,6 +241,14 @@ def classify_request_intent(user_text: str) -> str:
         return "network_state"
     if not implementation and re.search(r"\b(?:repo(?:sitory)? (?:status|diff|health)|git status|git diff)\b", lower):
         return "repository_state"
+    if not implementation and re.search(r"\bmy\s+(?:gmail|email|emails|mail|inbox|messages?)\b", lower):
+        return "gmail"
+    if not implementation and re.search(
+        r"\b(?:my\s+(?:(?:google\s+)?calendar|schedule|events|meetings|appointments)|"
+        r"(?:google\s+)?calendar\s+events?)\b",
+        lower,
+    ):
+        return "google_calendar"
     if is_news_fact_request(text):
         return "news"
     if not implementation and is_market_price_request(text):

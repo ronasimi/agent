@@ -1,1 +1,1 @@
-"""Optional browser frontend for the local agent."""
+"""Browser interface for the local agent."""

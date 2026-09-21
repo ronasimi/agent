@@ -1,8 +1,7 @@
 """Shared slash-command registry and deterministic executor.
 
-Slash commands are frontend control operations, not model prompts.  Both the
-terminal CLI and Web UI consume this registry so command names, descriptions,
-argument validation, and behavior cannot drift apart.
+Slash commands are browser control operations, not model prompts. The Web UI
+uses this registry for both autocomplete metadata and deterministic execution.
 """
 from __future__ import annotations
 
@@ -77,7 +76,7 @@ for _spec in SLASH_COMMANDS:
 
 
 def list_slash_commands() -> list[dict[str, Any]]:
-    """Return the public command catalog used by frontends/autocomplete."""
+    """Return the public command catalog used by browser autocomplete."""
     return [spec.public_dict() for spec in SLASH_COMMANDS]
 
 
@@ -85,7 +84,7 @@ def parse_slash_command(text: str) -> tuple[SlashCommandSpec | None, str]:
     """Parse one slash command using exact command-token matching.
 
     Unknown slash-prefixed input intentionally does *not* fall through to the
-    model; frontends can report it as an unknown command instead.
+    model; the Web UI can report it as an unknown command instead.
     """
     raw = str(text or "").strip()
     if not raw.startswith("/"):

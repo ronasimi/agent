@@ -1,4 +1,4 @@
-"""FastAPI composition root for the optional Al Agent Web UI.
+"""FastAPI composition root for the Al Agent Web UI.
 
 Route mechanics live here; filesystem/artifact behavior, theme loading, chat
 streaming, and history serialization live in focused sibling modules.
@@ -8,42 +8,57 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
+import re
 import subprocess
+import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
+from urllib.parse import urlencode, urlparse
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile, WebSocket
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, WebSocket
+from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-import agent as agent_runtime
+from al_agent import runtime as agent_runtime
 from al_agent.slash_commands import list_slash_commands
 from tools import (
-    _load_chat_history_from_db, clear_chat_history, conversation_context,
-    create_conversation, delete_conversation, ensure_conversation, list_conversations,
-    normalize_conversation_id, rename_conversation,
+    _load_chat_history_from_db,
+    clear_chat_history,
+    conversation_context,
+    create_conversation,
+    delete_conversation,
+    ensure_conversation,
+    list_conversations,
+    rename_conversation,
 )
 from tools.reminders import list_reminders
 from tools.runtime import list_jobs
 from tools.user_profile import (
-    complete_onboarding_profile, get_onboarding_state, get_profile_image_path, reset_onboarding_profile,
+    complete_onboarding_profile,
+    get_onboarding_state,
+    get_profile_image_path,
+    reset_onboarding_profile,
 )
 from tools.working_state import WorkingStateStore
 
-from . import workspace_ops as _workspace_ops
 from . import chat as _chat_module
-from .chat import RUNS, RUNS_LOCK, _run_turn as _chat_run_turn, chat_socket as _chat_socket
+from . import workspace_ops as _workspace_ops
+from .chat import RUNS, RUNS_LOCK
+from .chat import _run_turn as _chat_run_turn
+from .chat import chat_socket as _chat_socket
 from .config import (
     PDF_PREVIEW_DIR,
     PREVIEW_TEXT_BYTES,
     STATIC,
-    UPLOAD_DIR,
-    WORKSPACE as _DEFAULT_WORKSPACE,
     XRESOURCES_PATH,
 )
+from .config import (
+    WORKSPACE as _DEFAULT_WORKSPACE,
+)
 from .history import _history, _history_export
-from .theme import DEFAULT_THEME, read_xresources_theme
+from .theme import DEFAULT_THEME as DEFAULT_THEME
+from .theme import read_xresources_theme
 
 # Mutable compatibility alias: tests/integrations historically monkeypatch
 # ``webui.server.WORKSPACE``.  Wrappers synchronize it into workspace_ops.
@@ -93,7 +108,7 @@ async def security_headers(request, call_next):
         "style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
     )
     # This is a localhost-first development UI.  Avoid stale browser assets after
-    # rebuilding the sidecar; otherwise CSS/JS changes can appear to be missing.
+    # rebuilding the application; otherwise CSS/JS changes can appear to be missing.
     if request.url.path == "/" or request.url.path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-store, max-age=0"
         response.headers["Pragma"] = "no-cache"
@@ -128,6 +143,9 @@ def _preview_kind(path: Path) -> str:
 
 def _artifact_payload(path: Path) -> dict[str, Any]:
     _sync_workspace_root(); return _workspace_ops._artifact_payload(path)
+
+def _document_preview_text(path: Path, *, max_chars: int = PREVIEW_TEXT_BYTES):
+    return _workspace_ops._document_preview_text(path, max_chars=max_chars)
 
 def _workspace_file_snapshot(limit: int | None = None):
     _sync_workspace_root()
@@ -184,8 +202,14 @@ def history_export(limit: int = 0, conversation_id: str = "default") -> str:
 
 
 @app.get("/api/conversations")
-def conversations(limit: int = 50) -> list[dict[str, Any]]:
-    return list_conversations(limit=max(1, min(int(limit), 200)))
+def conversations(
+    limit: int = Query(default=50, ge=1, le=200),
+    active_conversation_id: str | None = Query(default=None, max_length=128),
+) -> list[dict[str, Any]]:
+    return list_conversations(
+        limit=limit,
+        active_conversation_id=active_conversation_id,
+    )
 
 
 @app.post("/api/conversations")
@@ -234,6 +258,132 @@ def onboarding_complete(payload: dict[str, Any]) -> dict[str, Any]:
 @app.delete("/api/onboarding")
 def onboarding_reset() -> dict[str, Any]:
     return reset_onboarding_profile()
+
+
+def _google_oauth_service():
+    # Keep cryptography/OAuth imports off the first-paint path unless the user
+    # opens Connections or invokes a Workspace tool.
+    from tools.google_workspace_auth import get_google_workspace_oauth
+
+    return get_google_workspace_oauth()
+
+
+def _raise_google_integration_error(exc: Exception) -> None:
+    from tools.credential_store import CredentialStoreError
+    from tools.google_workspace_auth import GoogleWorkspaceAuthError
+
+    if isinstance(exc, GoogleWorkspaceAuthError):
+        status = 409 if exc.code in {"client_not_configured", "not_connected"} else 400
+        raise HTTPException(status_code=status, detail={"code": exc.code, "message": str(exc)}) from exc
+    if isinstance(exc, CredentialStoreError):
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "credential_store_unavailable", "message": "The local credential store is unavailable."},
+        ) from exc
+    raise HTTPException(
+        status_code=500,
+        detail={"code": "integration_error", "message": "Google Workspace setup could not be completed."},
+    ) from exc
+
+
+def _require_same_origin(request: Request) -> None:
+    """Reject browser cross-site writes to the localhost integration API."""
+    fetch_site = str(request.headers.get("sec-fetch-site") or "").lower()
+    if fetch_site == "cross-site":
+        raise HTTPException(status_code=403, detail="Cross-site integration requests are not allowed.")
+    origin = str(request.headers.get("origin") or "").strip()
+    if not origin:
+        return
+    parsed = urlparse(origin)
+    expected_host = str(request.headers.get("host") or "").lower()
+    if parsed.scheme not in {"http", "https"} or parsed.netloc.lower() != expected_host:
+        raise HTTPException(status_code=403, detail="Integration request origin does not match this Web UI.")
+
+
+def _google_callback_redirect(result: str, reason: str = "") -> RedirectResponse:
+    safe_result = result if result in {"connected", "error"} else "error"
+    safe_reason = re.sub(r"[^a-z0-9_-]", "", str(reason or "").lower())[:64]
+    query = {"google_oauth": safe_result}
+    if safe_reason:
+        query["reason"] = safe_reason
+    return RedirectResponse(url=f"/?{urlencode(query)}", status_code=303)
+
+
+@app.get("/api/integrations/google")
+def google_integration_status() -> dict[str, Any]:
+    try:
+        return _google_oauth_service().status()
+    except RuntimeError as exc:
+        _raise_google_integration_error(exc)
+        raise AssertionError("unreachable")
+
+
+@app.post("/api/integrations/google/client")
+async def google_integration_client(
+    request: Request,
+    file: Annotated[UploadFile, File()],
+) -> dict[str, Any]:
+    _require_same_origin(request)
+    try:
+        raw = await file.read(65_537)
+        if len(raw) > 65_536:
+            raise HTTPException(status_code=413, detail="OAuth client JSON must be 64 KiB or smaller.")
+        return _google_oauth_service().store_client_config(raw)
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        _raise_google_integration_error(exc)
+        raise AssertionError("unreachable")
+    finally:
+        await file.close()
+
+
+@app.post("/api/integrations/google/authorize")
+def google_integration_authorize(request: Request) -> dict[str, str]:
+    _require_same_origin(request)
+    try:
+        return {"authorization_url": _google_oauth_service().authorization_url()}
+    except RuntimeError as exc:
+        _raise_google_integration_error(exc)
+        raise AssertionError("unreachable")
+
+
+@app.get("/api/integrations/google/callback")
+def google_integration_callback(
+    code: str = Query(default="", max_length=8192),
+    state: str = Query(default="", max_length=512),
+    error: str = Query(default="", max_length=256),
+) -> RedirectResponse:
+    try:
+        service = _google_oauth_service()
+        if error:
+            service.cancel_authorization(state)
+            return _google_callback_redirect("error", "access_denied" if error == "access_denied" else "oauth_error")
+        service.complete_authorization(state, code)
+        return _google_callback_redirect("connected")
+    except RuntimeError as exc:
+        reason = str(getattr(exc, "code", "oauth_error"))
+        return _google_callback_redirect("error", reason)
+
+
+@app.delete("/api/integrations/google/connection")
+def google_integration_disconnect(request: Request) -> dict[str, Any]:
+    _require_same_origin(request)
+    try:
+        return _google_oauth_service().disconnect()
+    except RuntimeError as exc:
+        _raise_google_integration_error(exc)
+        raise AssertionError("unreachable")
+
+
+@app.delete("/api/integrations/google/client")
+def google_integration_remove_client(request: Request) -> dict[str, Any]:
+    _require_same_origin(request)
+    try:
+        return _google_oauth_service().remove_client_config()
+    except RuntimeError as exc:
+        _raise_google_integration_error(exc)
+        raise AssertionError("unreachable")
 
 
 @app.get("/api/profile-image")
@@ -337,6 +487,12 @@ def workspace_preview(path: str) -> dict[str, Any]:
     target = _safe_workspace_path(path)
     if not target.is_file(): raise HTTPException(status_code=404, detail="File not found")
     artifact = _artifact_payload(target)
+    if artifact["preview_kind"] == "document":
+        try:
+            content, truncated = _document_preview_text(target)
+        except (OSError, ValueError, zipfile.BadZipFile) as exc:
+            raise HTTPException(status_code=422, detail=f"Unable to preview document: {exc}") from exc
+        return {**artifact, "content": content, "truncated": truncated}
     if artifact["preview_kind"] not in {"text", "markdown"}: return {**artifact, "content": None, "truncated": False}
     try:
         with target.open("rb") as handle: raw = handle.read(PREVIEW_TEXT_BYTES + 1)

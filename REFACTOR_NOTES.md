@@ -1,9 +1,9 @@
 # Refactor notes
 
-This refactor intentionally preserves public entry points and tool names while moving implementation behind focused modules.
+This refactor preserves public tool names while moving implementation behind focused modules and making the Web UI the only user interface.
 
 Key compatibility facades:
-- `agent.py` -> `al_agent/*`
+- Web runtime -> `al_agent/runtime.py` + `webui/*`
 - `worker.py` -> `al_agent/background/*`
 - `tools/__init__.py` -> `tools/catalog.py` + memory exports
 - `tools/primitive_ops.py` -> `tools/primitive_modules/*`

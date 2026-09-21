@@ -29,7 +29,7 @@ def source_root() -> Path:
 
 def _allowed_prefixes() -> tuple[str, ...]:
     configured = OPT_CFG.get("allowed_paths") or [
-        "agent.py", "worker.py", "tools", "tests", "config", "README.md",
+        "al_agent", "webui", "worker.py", "tools", "tests", "config", "README.md",
         "Dockerfile", "docker-compose.yml", "requirements.txt", "ollama.env.example",
     ]
     return tuple(str(value).strip("/") for value in configured if str(value).strip("/"))

@@ -4,7 +4,7 @@
 
 # Al Agent
 
-**Al Agent** is a local, Ollama-powered assistant harness designed for long-running work without making the interactive chat feel sluggish. It combines a responsive foreground agent with typed tools, reusable recipes, durable memory, background research, system/network diagnostics, reminders, and an optional browser-based UI.
+**Al Agent** is a local, Ollama-powered assistant harness designed for long-running work without making interactive chat feel sluggish. Its sole user interface is a localhost-first Web UI backed by typed tools, reusable recipes, durable memory, background research, system/network diagnostics, and reminders.
 
 The default configuration uses three base Qwen3.5 roles plus an embedding model:
 
@@ -41,26 +41,15 @@ The aliases map to:
 
 The harness passes explicit sampling/context settings per role, so behavior does not depend on alias-local Modelfile parameters.
 
-### 2. Start the agent
+### 2. Start Al Agent
 
 From the repository root:
 
 ```bash
 docker compose up -d --build
-docker attach agent
 ```
 
 The `storage-init` service creates and fixes ownership for persistent `workspace/` and `memory/` storage on first run, so a fresh clone can be started directly.
-
-Detach from the CLI without stopping it with `Ctrl-P`, `Ctrl-Q`.
-
-### 3. Start the Web UI
-
-The Web UI is optional and uses the Compose `web` profile:
-
-```bash
-docker compose --profile web up -d --build
-```
 
 Then open:
 
@@ -69,17 +58,29 @@ http://127.0.0.1:8080
 ```
 
 To expose the UI on your LAN, set `WEBUI_HOST=0.0.0.0` deliberately. The default is localhost-only.
+The Web UI does not provide multi-user authentication, so do not bind it to an untrusted network.
+
+Stop and remove every harness container, including the Web UI, with:
+
+```bash
+docker compose down
+```
 
 ## Web UI
 
 The Web UI provides a ChatGPT-style local interface with:
 
 - streaming responses and inline tool activity
-- a status message directly below the active user prompt
+- responsive inline previews for user attachments and agent-created images, video, audio, PDFs, text, Markdown, and modern office documents
+- structured email cards for email drafts/previews with separate sender, recipient, subject, and body regions
+- persistent per-conversation thumbs-up/thumbs-down recipe decisions (green for save, red for decline)
+- an elapsed working status directly below the active user prompt
 - persistent command history with Up/Down navigation
 - slash-command autocomplete: type `/` to see every command, usage, and description
 - deterministic slash-command routing before the LLM (commands never become model prompts)
-- durable per-conversation history in the Recent sidebar
+- durable per-conversation history in the Recents sidebar, newest first with the current chat pinned on top
+- active-conversation restoration after browser refresh
+- a centered transcript with user bubbles, plain assistant responses, message copy actions, and a floating composer
 - non-destructive New Chat creation with isolated working state/observations
 - a complete-chat copy button
 - collapsible navigation and workspace sidebars
@@ -91,9 +92,54 @@ The Web UI provides a ChatGPT-style local interface with:
 
 The full Al Agent image is used as the application logo. The yellow smiley face is used as the browser favicon.
 
-On first run, the Web UI opens a profile questionnaire for stable user context (name, role, timezone, optional location/email/interests, response style, research depth, and optional profile image). **Profile setup** in the sidebar can rerun it and replace questionnaire-owned context. The CLI runs the same OOBE on an interactive TTY and exposes `/profile` to rerun it.
+On first run, the Web UI opens a profile questionnaire for stable user context (name, role, timezone, optional location/email/interests, response style, research depth, and optional profile image). **Profile setup** in the sidebar can rerun it and replace questionnaire-owned context; `/profile` opens the same editor.
 
 Each browser thread has its own conversation ID, chat rows, rolling summary, tool observations, compaction watermark, and working state. Creating a new chat no longer deletes the previous thread.
+
+### Google Workspace (read-only)
+
+Open **Connections** in the sidebar to connect Gmail and Google Calendar. The integration requests exactly these two OAuth scopes:
+
+```text
+https://www.googleapis.com/auth/gmail.readonly
+https://www.googleapis.com/auth/calendar.readonly
+```
+
+The registered tools are:
+
+| Service | Tool | Capability |
+| --- | --- | --- |
+| Gmail | `gmail_search_messages` | Search/list message metadata and bounded snippets |
+| Gmail | `gmail_read_message` | Read one bounded text body; attachments are not downloaded |
+| Calendar | `google_calendar_list_calendars` | List visible calendars |
+| Calendar | `google_calendar_list_events` | List events in a bounded time range |
+| Calendar | `google_calendar_get_event` | Read one event and bounded attendee/details data |
+
+None of these tools can send or modify email, add labels, create or edit events, invite attendees, or delete Google data. Google-derived text is marked as untrusted external content in every tool response so instructions inside a message or event are treated as data, not agent commands.
+
+#### Google Cloud setup
+
+1. Create or select a Google Cloud project.
+2. Enable both the **Gmail API** and **Google Calendar API**.
+3. Configure the OAuth consent screen. For an External app in testing, add the connecting Google account as a test user.
+4. Create an **OAuth client ID** with application type **Web application**.
+5. Add the redirect URI shown in the Connections screen. With the default configuration it is:
+
+   ```text
+   http://127.0.0.1:8080/api/integrations/google/callback
+   ```
+
+6. Download the OAuth client JSON, select it in Connections, and choose **Connect Google**.
+
+Google's setup references are the [Gmail Python quickstart](https://developers.google.com/workspace/gmail/api/quickstart/python), [Calendar Python quickstart](https://developers.google.com/workspace/calendar/api/quickstart/python), [Gmail scope catalog](https://developers.google.com/workspace/gmail/api/auth/scopes), and [Calendar authorization guide](https://developers.google.com/workspace/calendar/api/auth). The Gmail read-only scope is classified by Google as a Restricted scope. A local app used only by its owner/test users can remain in OAuth testing, but publishing the integration broadly can trigger Google's verification and restricted-scope security-assessment requirements.
+
+OAuth uses a one-time, ten-minute state value and PKCE. The uploaded client secret, refresh token, and access token never enter browser status responses or model tool output. They are authenticated-encrypted in `/app/memory/credentials/vault.db`; the default encryption key is created at `/app/memory/credentials/master.key`. The directory is mode `0700` and the key/database are mode `0600`.
+
+For key separation, supply a Fernet key through `AGENT_CREDENTIAL_KEY` or place it in a mode-`0600` file and set `AGENT_CREDENTIAL_KEY_FILE`. Set `GOOGLE_OAUTH_REDIRECT_URI` when using an HTTPS reverse proxy or a non-default loopback port, and register the identical value in Google Cloud. Plain HTTP redirect URIs are accepted only for `localhost`, `127.0.0.1`, or `::1`.
+
+Disconnecting revokes and removes the stored user token. **Remove setup** also deletes the encrypted OAuth client configuration. The vault API is provider/account/kind namespaced so future integrations can use the same storage boundary without defining ad-hoc secret files.
+
+The vault protects copied disks, archives, and accidental database disclosure. It does not protect credentials from the same OS account (or root) while the harness is running; use an external key file and normal host hardening when that is in scope. Gmail/event content is fetched only when a tool is called and is not copied into the credential vault, but requested content can be recorded in local conversation/tool history.
 
 ### User profile picture
 
@@ -103,9 +149,19 @@ The footer avatar is loaded from durable memory at:
 /app/memory/profile/user_picture.png
 ```
 
-The Web UI and agent containers share the `memory/` volume, so changing the profile image survives restarts and rebuilds.
+The Web UI and background worker share the `memory/` volume, so changing the profile image survives restarts and rebuilds.
 
 When you explicitly identify an attached image as a picture of yourself, the agent is instructed to ask whether you want to use it as the Web UI profile image. If you approve, the agent uses the typed `set_profile_image` tool to validate the workspace image, normalize it to PNG, and copy it into durable profile storage. The Web UI refreshes the avatar after a successful tool call.
+
+Model-facing tools refer to that durable file as `profile-image://current` rather
+than exposing `/app/memory` as a general media root. `profile_image_info` and
+`set_profile_image` attach the image directly for vision and render it through
+the Web UI's dedicated profile-image endpoint. Generic file tools remain
+restricted to `/app/workspace`.
+
+Visual producer tools (`image_resize`, `image_crop`, `image_convert`, and
+`render_document_page`) also attach their generated workspace image directly.
+The model does not need to guess or repeat a path through `attach_media`.
 
 For compatibility with older conversations, the Web UI can migrate a previously remembered `user_photo`/`user_picture` by finding the corresponding attached workspace image in chat history. It does **not** use face recognition to decide that a person in an image is you.
 
@@ -153,6 +209,7 @@ Examples of available tool families include:
 - **Research:** `enqueue_research`, `get_research_status`
 - **Automation:** `schedule_reminder`, `list_reminders`, durable jobs
 - **Media/profile:** `image_info`, `attach_media`, `set_profile_image`, `profile_image_info`
+- **Google Workspace:** `gmail_search_messages`, `gmail_read_message`, `google_calendar_list_events`, `google_calendar_get_event`, `google_calendar_list_calendars`
 - **Recipes:** `search_recipes`, `run_recipe`, `save_recipe`, `run_pipeline`
 
 Generic shell and Python execution exist as fallback capabilities, but structured tools are preferred and are only exposed when relevant or explicitly requested.
@@ -236,7 +293,7 @@ is controlled by `agent.report_model`, `agent.report_options`, and
 
 The harness supports durable reminders and background jobs. The Web UI exposes them in dedicated views.
 
-The CLI and Web UI share the same slash-command registry. In the Web UI, type `/` to open the searchable command menu.
+Type `/` in the Web UI to open the searchable slash-command menu.
 
 Useful slash commands include:
 
@@ -420,7 +477,7 @@ On a local server the dominant term in TTFT is prompt prefill, and Ollama/llama.
 
 - **Volatile blocks go last.** The harness working state and evidence digest are rewritten on every tool-loop iteration. They are emitted after the stable system prompt and conversation history (`context.volatile_blocks_last`), so a changed working state no longer invalidates the cached prefix. Set it to `false` for a chat template that requires every system message to precede the conversation.
 - **The tool set stays byte-stable.** Pruning satisfied requirement schemas, and reordering them pending-first, both invalidate the whole prefix. Under `working_state.minimize_schema_churn` they happen only during an iteration that must change the set anyway to expose a still-pending requirement. Repeats of a completed check are still suppressed deterministically, and the pending list is still carried by the working state.
-- **Warm-up loads weights; prefix priming is measurement-driven.** Both frontends start a background warm-up (`warmup.enabled`) that loads the model using the same `main_options` as interactive turns. `warmup.prime_system_prefix` defaults to `false`: tool-capable chat templates may place dynamic schemas before messages, so a system-only prime is not guaranteed to be a reusable prefix. Use `scripts/benchmark_warmup.py` and `prompt_eval_cached_count` before enabling it.
+- **Warm-up loads weights; prefix priming is measurement-driven.** The Web UI starts a background warm-up (`warmup.enabled`) that loads the model using the same `main_options` as interactive turns. `warmup.prime_system_prefix` defaults to `false`: tool-capable chat templates may place dynamic schemas before messages, so a system-only prime is not guaranteed to be a reusable prefix. Use `scripts/benchmark_warmup.py` and `prompt_eval_cached_count` before enabling it.
 - **Background compaction does not evict the foreground model.** When `compaction_model` is empty the worker reuses the interactive model, and it now reuses the interactive `num_ctx` as well. Requesting the same model with a smaller context would unload and reload it, making the next user turn pay a full model load plus a full prefill.
 - **Harness control notes are de-duplicated.** Idempotent guidance ("the previous call was rejected", "the candidate answer was discarded") is appended once per turn instead of once per iteration, so the prompt stops growing when the loop is not making progress.
 - **Selection has a relevance floor.** A single incidental description-word match no longer fills the per-turn schema budget, so conversational turns send no tool schemas at all instead of a dozen irrelevant ones.
@@ -457,10 +514,9 @@ Review and commit the resulting diff normally.
 ## Repository layout
 
 ```text
-agent.py                 interactive CLI entry point
 worker.py                background worker
-al_agent/                turn engine, prompts, state, events
-webui/                   FastAPI sidecar and browser UI
+al_agent/                Web runtime facade, turn engine, prompts, state, events
+webui/                   executable FastAPI application and browser UI
 tools/                   tool registry, primitives, diagnostics, recipes
 config/config.yaml       model and harness configuration
 scripts/                 initialization, benchmarks, optimization utilities
@@ -472,12 +528,16 @@ memory/                  persistent SQLite state and user profile assets
 Some especially useful modules:
 
 - `al_agent/turn_engine.py` — foreground model/tool state machine
+- `al_agent/runtime.py` — stable Web UI runtime facade
 - `tools/catalog.py` — dynamic tool loading and schema selection
 - `tools/loop_validator.py` — fast-model recovery decisions
 - `tools/working_state.py` — durable objective/evidence/requirements state
 - `tools/recipe_store.py` — semantic recipe storage and lookup
 - `tools/network_diagnostics.py` — host/network diagnosis
 - `tools/user_profile.py` — profile data and durable profile image handling
+- `tools/credential_store.py` — provider-neutral encrypted local credential vault
+- `tools/google_workspace_auth.py` — OAuth state, PKCE, refresh, and revocation
+- `tools/google_workspace.py` — read-only Gmail and Calendar tools
 - `webui/server.py` — Web UI API
 - `webui/static/app.js` — browser interaction and streaming UI
 
@@ -563,15 +623,15 @@ Your shell is currently inside a directory that was deleted or replaced. Change 
 ```bash
 cd /path/to/agent
 pwd
-docker compose --profile web up -d --build
+docker compose up -d --build
 ```
 
 ### Web UI is not running
 
-The Web UI uses a Compose profile. Start it with:
+Start or recreate the Web UI with:
 
 ```bash
-docker compose --profile web up -d webui
+docker compose up -d --build webui
 ```
 
 Then inspect:
@@ -597,8 +657,11 @@ If you previously told the agent that an uploaded image was a photo of you, the 
 ## Security notes
 
 - The Web UI binds to `127.0.0.1` by default.
+- The Web UI has no built-in multi-user authentication and must not be exposed directly to an untrusted network.
 - Host filesystem mounts are read-only where possible.
 - Structured read-only tools are preferred over generic command execution.
+- Google Workspace requests exactly the Gmail and Calendar read-only scopes; OAuth state is one-time, PKCE-protected, and credential payloads are encrypted locally.
+- Message and event text is explicitly marked as untrusted tool data and remains subject to normal prompt-injection defenses.
 - Custom tools are statically validated before loading.
 - Self-optimization validation runs in a restricted container and cannot self-promote.
 - Profile images are only installed from files already inside the agent workspace and only after explicit user approval through the profile-image tool workflow.

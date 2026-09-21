@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Fail fast if key modular architecture invariants regress."""
 from __future__ import annotations
-from pathlib import Path
+
 import sys
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 limits = {
-    "agent.py": 8_000,
+    "al_agent/runtime.py": 8_000,
     "worker.py": 4_000,
     "tools/primitive_ops.py": 5_000,
 }
 errors=[]
+for removed in ("agent.py", "al_agent/cli.py", "al_agent/cli_commands.py"):
+    if (ROOT / removed).exists(): errors.append(f"removed CLI surface returned: {removed}")
 for rel, limit in limits.items():
     size=(ROOT/rel).stat().st_size
     if size>limit: errors.append(f"{rel} grew to {size} bytes (limit {limit})")

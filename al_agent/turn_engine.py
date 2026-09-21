@@ -46,7 +46,7 @@ from tools.web import (
     is_simple_encyclopedic_request, is_simple_headline_request,
 )
 
-from .console import Spinner, print_perf_stats as _print_perf_stats
+from .runtime_output import OperationStatus, log_perf_stats
 from .events import (
     acquire_inference_lock as _acquire_inference_lock, cancel_requested as _cancel_requested,
     emit_event, release_inference_lock as _release_inference_lock,
@@ -554,7 +554,7 @@ def handle_user_turn(
                 if len(recovery_schemas) >= RECIPE_VALIDATOR_MAX_TOOLS:
                     break
 
-            with Spinner("Fast-model final recipe recovery"):
+            with OperationStatus("Fast-model final recipe recovery"):
                 report = suggest_recovery_recipe(
                     LOOP_VALIDATOR_CLIENT,
                     FAST_MODEL,
@@ -968,7 +968,7 @@ def handle_user_turn(
                         and turn_tool_policy.allowed(name, TOOL_METADATA.get(name, {}))
                         and (name in selected_names or bool(TOOL_METADATA.get(name, {}).get("readonly", True)))
                     )[:LOOP_VALIDATOR_MAX_TOOLS]
-                    with Spinner("Fast-model stalled-step validation"):
+                    with OperationStatus("Fast-model stalled-step validation"):
                         stall_validation = validate_stalled_step(
                             LOOP_VALIDATOR_CLIENT,
                             FAST_MODEL,
@@ -1039,7 +1039,7 @@ def handle_user_turn(
             # chance if the loop reaches its absolute iteration cap.
             if iteration == iteration_limit and tool_iterations and LOOP_VALIDATOR_ENABLED and not stall_enforce_once and not requirement_ledger.pending():
                 tool_names = [str(schema.get("function", {}).get("name", "")) for schema in tool_schemas]
-                with Spinner("Fast-model tool-loop validation"):
+                with OperationStatus("Fast-model tool-loop validation"):
                     recovery_validation = validate_tool_loop(
                         LOOP_VALIDATOR_CLIENT,
                         FAST_MODEL,
@@ -1205,7 +1205,7 @@ def handle_user_turn(
             cached = int(perf_stats.get("prompt_eval_cached_count") or 0)
             cache_total = evaluated + cached
             cache_hit_pct = (cached * 100.0 / cache_total) if cache_total else 0.0
-            _print_perf_stats(perf_stats)
+            log_perf_stats(perf_stats)
             last_model_metrics = {
                 "prompt_eval_count": perf_stats.get("prompt_eval_count"),
                 "cached_count": perf_stats.get("prompt_eval_cached_count"),
@@ -1516,7 +1516,7 @@ def handle_user_turn(
                             raise parallel_exc
                     else:
                         args = normalize_arguments(AVAILABLE_TOOLS_MAP[name], raw_args)
-                        with Spinner(f"Executing {name}"):
+                        with OperationStatus(f"Executing {name}"):
                             result = _execute_registered_tool(name, args)
                 except Exception as exc:
                     execution_error = True
@@ -1583,6 +1583,8 @@ def handle_user_turn(
                 tool_message = tool_result_message(
                     name, result_text, tool_call_id=str(call.get("id") or "")
                 )
+                if media_refs:
+                    tool_message["media"] = media_refs
                 append_and_save(messages, tool_message)
                 turn_tail.append(model_message(tool_message))
 
@@ -1666,6 +1668,13 @@ def handle_user_turn(
                 )
 
             if attached_media:
+                # Once actual pixels are present in the model context, another
+                # attach_media call cannot add evidence and encourages guessed
+                # fallback filenames after a successful producer tool.
+                tool_schemas[:] = [
+                    schema for schema in tool_schemas
+                    if str(schema.get("function", {}).get("name") or "") != "attach_media"
+                ]
                 source_names = ", ".join(dict.fromkeys(attached_from))
                 media_message = {
                     "role": "user",

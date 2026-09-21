@@ -1,27 +1,46 @@
-import os
 from pathlib import Path
 
 import yaml
 
 
-def test_web_profile_is_optional_and_localhost_first():
+def test_webui_is_the_only_default_interface_and_localhost_first():
     compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+    assert "agent" not in compose["services"]
     web = compose["services"]["webui"]
-    assert "web" in web["profiles"]
+    assert "profiles" not in web
     assert web["network_mode"] == "host"
     env = "\n".join(web.get("environment", []))
     assert "WEBUI_HOST=${WEBUI_HOST:-127.0.0.1}" in env
-    command = " ".join(web["command"])
-    assert "uvicorn webui.server:app" in command
+    assert web["command"] == ["python", "-m", "webui"]
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+    assert 'CMD ["python", "-m", "webui"]' in dockerfile
+
+
+def test_webui_module_entrypoint_honors_environment(monkeypatch):
+    from webui import __main__ as web_main
+
+    called = {}
+    monkeypatch.setenv("WEBUI_HOST", "0.0.0.0")
+    monkeypatch.setenv("WEBUI_PORT", "9090")
+    monkeypatch.setattr(web_main.uvicorn, "run", lambda app, **kwargs: called.update(app=app, **kwargs))
+
+    web_main.main()
+
+    assert called == {
+        "app": "webui.server:app",
+        "host": "0.0.0.0",
+        "port": 9090,
+        "proxy_headers": True,
+    }
 
 
 def test_webui_static_assets_exist():
-    for name in ("index.html", "style.css", "command_history.js", "app.js"):
+    for name in ("index.html", "style.css", "command_history.js", "rich_output.js", "interaction_state.js", "app.js"):
         assert (Path("webui/static") / name).is_file()
 
 
 def test_frontend_event_context_routes_events():
-    import agent
+    from al_agent import runtime as agent
 
     received = []
     with agent.frontend_event_context(received.append):
@@ -152,6 +171,21 @@ def test_generated_artifact_preview_ui_and_event_contract_exist():
     assert ".artifact-preview" in css
 
 
+def test_user_and_agent_media_share_inline_responsive_renderer():
+    root = Path(__file__).resolve().parents[1]
+    js = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
+    css = (root / "webui" / "static" / "style.css").read_text(encoding="utf-8")
+
+    assert 'class="message-media"' in js
+    assert "renderMessageMedia" in js
+    assert "addMessage('user',content,{forceScroll:true,media:items})" in js
+    assert "kind==='video'" in js and "kind==='audio'" in js
+    assert "kind==='document'" in js
+    assert ".message-media" in css
+    assert ".artifact-preview video" in css
+    assert ".artifact-preview audio" in css
+
+
 def test_artifact_snapshot_detects_only_new_workspace_files(tmp_path, monkeypatch):
     from webui import server
 
@@ -191,6 +225,28 @@ def test_text_preview_is_bounded_and_download_metadata_is_available(tmp_path, mo
     assert artifact["size"] == 26
 
 
+def test_modern_document_preview_extracts_bounded_inline_text(tmp_path, monkeypatch):
+    import zipfile
+
+    from webui import server
+
+    workspace = tmp_path.resolve()
+    monkeypatch.setattr(server, "WORKSPACE", workspace)
+    path = workspace / "draft.docx"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "word/document.xml",
+            '<?xml version="1.0"?><w:document xmlns:w="urn:test"><w:body>'
+            '<w:p><w:r><w:t>Inline document preview</w:t></w:r></w:p>'
+            "</w:body></w:document>",
+        )
+
+    preview = server.workspace_preview("draft.docx")
+    assert preview["preview_kind"] == "document"
+    assert "Inline document preview" in preview["content"]
+    assert preview["truncated"] is False
+
+
 def test_websocket_turn_emits_generated_artifact_event(tmp_path, monkeypatch):
     import asyncio
     from webui import server
@@ -224,14 +280,56 @@ def test_websocket_turn_emits_generated_artifact_event(tmp_path, monkeypatch):
     assert any(e.get("type") == "history_refresh" for e in ws.events)
 
 
+def test_recipe_interaction_can_defer_until_active_turn_finishes(monkeypatch):
+    import asyncio
+
+    from fastapi import WebSocketDisconnect
+    from webui import chat
+
+    order = []
+
+    async def fake_run(_websocket, payload):
+        order.append(f"start:{payload['content']}")
+        await asyncio.sleep(0.01)
+        order.append(f"end:{payload['content']}")
+
+    monkeypatch.setattr(chat, "_run_turn", fake_run)
+
+    class FakeWebSocket:
+        def __init__(self):
+            self.calls = 0
+
+        async def accept(self):
+            return None
+
+        async def receive_json(self):
+            self.calls += 1
+            if self.calls == 1:
+                return {"type": "message", "content": "first"}
+            if self.calls == 2:
+                return {"type": "message", "content": "save recipe", "defer_until_idle": True}
+            await asyncio.sleep(0.02)
+            raise WebSocketDisconnect()
+
+        async def send_json(self, _payload):
+            return None
+
+    asyncio.run(chat.chat_socket(FakeWebSocket()))
+    assert order == ["start:first", "end:first", "start:save recipe", "end:save recipe"]
+
+
 def test_recipe_suggestion_ui_contract_exists():
     root = Path(__file__).resolve().parents[1]
     js = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
     css = (root / "webui" / "static" / "style.css").read_text(encoding="utf-8")
     assert "recipe_suggestion" in js
     assert "addRecipeSuggestion" in js
-    assert "Save recipe" in js
+    assert "recipe-vote-up" in js and "recipe-vote-down" in js
+    assert "RecipeDecisionStore" in js
+    assert "restoreRecipeSuggestions" in js
     assert ".recipe-suggestion" in css
+    assert ".recipe-suggestion.decided-up" in css
+    assert ".recipe-suggestion.decided-down" in css
 
 
 def test_chat_pane_has_independent_scroll_container_and_fixed_composer():
@@ -244,7 +342,8 @@ def test_chat_pane_has_independent_scroll_container_and_fixed_composer():
     assert ".main{min-width:0;min-height:0;height:100%;overflow:hidden" in css
     assert ".chat-panel{display:flex;flex-direction:column;position:relative;overflow:hidden}" in css
     assert ".messages{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden" in css
-    assert ".composer-wrap{position:relative;flex:0 0 auto" in css
+    assert ".composer-wrap{position:absolute;left:0;right:0;bottom:0" in css
+    assert ".messages{padding-top:38px;padding-bottom:178px}" in css
     assert "isNearBottom" in js
     assert "followOutput" in js
     assert "messagesEl.addEventListener('scroll',updateScrollFollow" in js
@@ -291,19 +390,22 @@ def test_profile_image_endpoint_uses_durable_user_picture(tmp_path, monkeypatch)
     assert response.media_type == "image/png"
 
 
-def test_webui_saved_conversations_have_delete_control_and_refresh_starts_fresh():
+def test_webui_saved_conversations_restore_active_and_offer_row_actions():
     root = Path(__file__).resolve().parents[1]
     js = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
     css = (root / "webui" / "static" / "style.css").read_text(encoding="utf-8")
 
     assert "recent-delete" in js
-    assert "Delete conversation" in js
+    assert "conversation-menu" in js
+    assert "renameSavedConversation" in js
     assert "method:'DELETE'" in js
     assert "deleteSavedConversation" in js
     assert ".recent-delete" in css
     assert "async function bootstrapWebUi()" in js
-    assert "await createFreshConversation();" in js
-    assert "activeConversationId=localStorage.getItem" not in js
+    assert "readActiveConversation()" in js
+    assert "agent.webui.activeConversation.v1" in js
+    assert "active_conversation_id" in js
+    assert "if(rows.length)setActiveConversation(rows[0].id)" in js
 
 
 def test_empty_placeholder_conversations_are_not_listed(tmp_path, monkeypatch):
@@ -315,12 +417,32 @@ def test_empty_placeholder_conversations_are_not_listed(tmp_path, monkeypatch):
     assert all(row["id"] != "default" for row in memory.list_conversations())
     fresh = memory.create_conversation()["id"]
     assert all(row["id"] != fresh for row in memory.list_conversations())
+    active_rows = memory.list_conversations(active_conversation_id=fresh)
+    assert active_rows[0]["id"] == fresh
+    assert active_rows[0]["is_active"] is True
 
     memory._save_message_to_db({"role": "user", "content": "legacy thread"}, conversation_id="default")
     assert any(row["id"] == "default" for row in memory.list_conversations())
 
     assert memory.delete_conversation("default") is True
     assert all(row["id"] != "default" for row in memory.list_conversations())
+
+
+def test_conversations_are_message_recent_with_active_conversation_pinned(tmp_path, monkeypatch):
+    from tools import memory
+
+    monkeypatch.setattr(memory, "DB_PATH", str(tmp_path / "conversation-order.db"))
+    memory.init_db()
+    older = memory.create_conversation("Older thread")["id"]
+    newer = memory.create_conversation("Newer thread")["id"]
+    memory._save_message_to_db({"role": "user", "content": "first"}, conversation_id=older)
+    memory._save_message_to_db({"role": "user", "content": "second"}, conversation_id=newer)
+
+    assert [row["id"] for row in memory.list_conversations()][:2] == [newer, older]
+    pinned = memory.list_conversations(active_conversation_id=older)
+    assert [row["id"] for row in pinned][:2] == [older, newer]
+    assert pinned[0]["is_active"] is True
+    assert pinned[1]["is_active"] is False
 
 
 def test_browser_history_reopens_compacted_conversation(tmp_path, monkeypatch):

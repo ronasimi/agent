@@ -60,7 +60,7 @@ def _copy_source(destination: Path) -> None:
         target = destination / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, target)
-    for special in ("Dockerfile", "requirements.txt", "docker-compose.yml", "README.md", "agent.py", "worker.py"):
+    for special in ("Dockerfile", "requirements.txt", "docker-compose.yml", "README.md", "worker.py"):
         src = root / special
         if src.is_file():
             dst = destination / special; dst.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src, dst)

@@ -50,6 +50,22 @@ _SCHEMA_OVERRIDES: dict[tuple[str, str], dict[str, Any]] = {
     ("connection_snapshot", "state"): {"enum": ["", "established", "listen", "time-wait", "close-wait", "syn-sent", "syn-recv"]},
     ("dns_diagnose", "record_types"): {"items": {"type": "string", "enum": ["A", "AAAA", "CNAME", "MX", "NS", "TXT", "SOA", "SRV", "PTR"]}},
     ("repo_checks", "checks"): {"items": {"type": "string", "enum": ["compile", "config", "ruff", "pytest"]}},
+    ("gmail_search_messages", "query"): {"maxLength": 1000},
+    ("gmail_search_messages", "limit"): {"maximum": 20},
+    ("gmail_search_messages", "account"): {"maxLength": 160},
+    ("gmail_read_message", "message_id"): {"maxLength": 1024},
+    ("gmail_read_message", "account"): {"maxLength": 160},
+    ("google_calendar_list_events", "time_min"): {"maxLength": 160},
+    ("google_calendar_list_events", "time_max"): {"maxLength": 160},
+    ("google_calendar_list_events", "query"): {"maxLength": 500},
+    ("google_calendar_list_events", "calendar_id"): {"maxLength": 1024},
+    ("google_calendar_list_events", "limit"): {"maximum": 50},
+    ("google_calendar_list_events", "account"): {"maxLength": 160},
+    ("google_calendar_get_event", "event_id"): {"maxLength": 1024},
+    ("google_calendar_get_event", "calendar_id"): {"maxLength": 1024},
+    ("google_calendar_get_event", "account"): {"maxLength": 160},
+    ("google_calendar_list_calendars", "limit"): {"maximum": 50},
+    ("google_calendar_list_calendars", "account"): {"maxLength": 160},
 }
 
 _SCHEMA_LIMITS_BY_NAME: dict[str, dict[str, Any]] = {
@@ -67,6 +83,7 @@ _SCHEMA_LIMITS_BY_NAME: dict[str, dict[str, Any]] = {
     "lines": {"minimum": 1, "maximum": 5000},
     "max_lines": {"minimum": 1, "maximum": 5000},
     "max_files": {"minimum": 1, "maximum": 5000},
+    "max_body_chars": {"minimum": 500, "maximum": 20000},
     "max_hops": {"minimum": 1, "maximum": 64},
     "probes": {"minimum": 1, "maximum": 20},
 }
@@ -147,6 +164,14 @@ _PARAMETER_HINTS = {
     "max_chars": "Maximum extracted text characters.",
     "max_diff_chars": "Maximum characters of unified diff to return.",
     "checks": "Known repository checks only: compile, config, ruff, pytest.",
+    "account": "Configured local account selector; use default unless the user chose another account.",
+    "message_id": "Gmail message identifier returned by gmail_search_messages.",
+    "calendar_id": "Google Calendar identifier; primary selects the account's primary calendar.",
+    "event_id": "Google Calendar event identifier returned by google_calendar_list_events.",
+    "time_min": "Inclusive RFC3339 lower time bound with timezone; empty defaults to now.",
+    "time_max": "Exclusive RFC3339 upper time bound with timezone; empty defaults to 14 days after time_min.",
+    "include_spam_trash": "Whether Gmail search may include Spam and Trash; defaults to false.",
+    "max_body_chars": "Maximum Gmail message body characters to return (500-20000).",
     "old_id": "Older durable observation identifier.",
     "new_id": "Newer durable observation identifier.",
 }
@@ -245,8 +270,8 @@ def function_schema(func: Callable, description: str | None = None) -> dict:
             required.append(param.name)
         elif param.default is not None and isinstance(param.default, (str, int, float, bool, list, dict)):
             entry["default"] = param.default
-        entry.update(_SCHEMA_OVERRIDES.get((public_name, param.name), {}))
         entry.update(_SCHEMA_LIMITS_BY_NAME.get(param.name, {}))
+        entry.update(_SCHEMA_OVERRIDES.get((public_name, param.name), {}))
         properties[param.name] = entry
     raw_doc = inspect.getdoc(func) or ""
     first_doc_line = raw_doc.splitlines()[0] if raw_doc.splitlines() else ""

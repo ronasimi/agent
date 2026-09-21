@@ -1,4 +1,3 @@
-prompt_toolkit
 pyyaml
 requests
 beautifulsoup4
@@ -21,3 +20,4 @@ uvicorn
 websockets
 python-multipart
 pillow
+cryptography>=43,<47

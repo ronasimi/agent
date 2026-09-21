@@ -104,12 +104,22 @@ def encode_image(path_str: str) -> str | None:
             return base64.b64encode(body).decode("ascii")
         except Exception as exc:
             print(f"  \033[93m[System]: Could not download media URL: {exc}\033[0m"); return None
+    try:
+        from tools.media import resolve_profile_media
+        profile_media = resolve_profile_media(value)
+    except Exception as exc:
+        print(f"  \033[93m[System]: Could not resolve profile media: {exc}\033[0m")
+        return None
     candidates=[]
-    if value.startswith("/app/workspace/"): candidates.append(value)
-    candidates.extend([os.path.join("/app/workspace",value.lstrip("/")),os.path.join("/app/workspace",os.path.basename(value))])
+    if profile_media is not None:
+        candidates.append(str(profile_media))
+    else:
+        if value.startswith("/app/workspace/"): candidates.append(value)
+        candidates.extend([os.path.join("/app/workspace",value.lstrip("/")),os.path.join("/app/workspace",os.path.basename(value))])
     for candidate in candidates:
         safe=os.path.abspath(candidate)
-        if os.path.commonpath(["/app/workspace",safe]) != "/app/workspace" or not os.path.isfile(safe): continue
+        if profile_media is None and os.path.commonpath(["/app/workspace",safe]) != "/app/workspace": continue
+        if not os.path.isfile(safe): continue
         try:
             if safe.lower().endswith(".pdf"):
                 from pdf2image import convert_from_path

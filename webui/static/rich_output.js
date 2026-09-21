@@ -16,13 +16,96 @@
     }catch{return '#';}
   }
 
+  function safeMediaLink(url){
+    const value=String(url||'').trim();
+    if(/^\/(?:api\/files\/|api\/profile-image(?:\?|$))/.test(value))return value;
+    try{
+      const parsed=new URL(value,'http://localhost/');
+      return parsed.protocol==='https:'?parsed.href:'#';
+    }catch{return '#';}
+  }
+
   function inlineMd(v){
-    let s=esc(v);
+    const media=[];
+    let raw=String(v??'').replace(/!\[([^\]\n]*)\]\(([^\s)]+)\)/g,(_,label,url)=>{
+      const safe=safeMediaLink(url);if(safe==='#')return _;
+      const id=media.length;media.push(`<a class="inline-media-link" href="${esc(safe)}" target="_blank" rel="noopener noreferrer"><img class="inline-markdown-media" src="${esc(safe)}" alt="${esc(label||'Inline image')}" loading="lazy"></a>`);return `@@MEDIA${id}@@`;
+    });
+    let s=esc(raw);
     s=s.replace(/`([^`\n]+)`/g,'<code>$1</code>');
     s=s.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
     s=s.replace(/\*([^*\n]+)\*/g,'<em>$1</em>');
     s=s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,(_,label,url)=>`<a href="${esc(safeLink(url))}" target="_blank" rel="noopener noreferrer">${label}</a>`);
-    return s;
+    return s.replace(/@@MEDIA(\d+)@@/g,(_,idx)=>media[Number(idx)]||'');
+  }
+
+  function emailField(value){
+    if(Array.isArray(value))return value.map(emailField).filter(Boolean).join(', ');
+    if(value&&typeof value==='object'){
+      const address=String(value.email||value.address||value.value||'').trim();const name=String(value.name||'').trim();
+      return name&&address?`${name} <${address}>`:address||name;
+    }
+    return String(value??'').trim();
+  }
+
+  function emailBody(value){
+    if(value&&typeof value==='object'&&!Array.isArray(value))value=value.text??value.plain??value.body??value.content??value.html??'';
+    return String(value??'').trim();
+  }
+
+  function normalizeEmailObject(value){
+    if(!value||typeof value!=='object'||Array.isArray(value))return null;
+    let source=value;
+    for(const key of ['email','draft','preview','message']){
+      if(source[key]&&typeof source[key]==='object'&&!Array.isArray(source[key])){source=source[key];break;}
+    }
+    const lower={};for(const[key,item]of Object.entries(source))lower[String(key).toLowerCase()]=item;
+    const email={
+      from:emailField(lower.from||lower.sender),to:emailField(lower.to||lower.recipients),
+      cc:emailField(lower.cc),bcc:emailField(lower.bcc),subject:emailField(lower.subject),
+      body:emailBody(lower.body??lower.text??lower.content??lower.html??''),
+    };
+    return email.subject&&(email.to||email.from)?email:null;
+  }
+
+  function parseEmailContent(value){
+    if(value&&typeof value==='object'&&!Array.isArray(value)){
+      const email=normalizeEmailObject(value);return email?{prefix:'',email}:null;
+    }
+    const src=String(value??'').replace(/\r\n/g,'\n').trim();if(!src)return null;
+    let candidate=src;
+    const fenced=src.match(/^```(?:json|email)?\s*\n([\s\S]*?)\n```$/i);if(fenced)candidate=fenced[1].trim();
+    if(candidate.startsWith('{')&&candidate.endsWith('}')){
+      try{const email=normalizeEmailObject(JSON.parse(candidate));if(email)return{prefix:'',email};}catch{}
+    }
+
+    const lines=src.split('\n');let start=-1;
+    const headerLine=line=>String(line||'').replace(/^\s{0,3}#{1,3}\s+/,'').replace(/\*\*/g,'').trim().match(/^(To|From|Cc|Bcc|Subject)\s*:\s*(.*)$/i);
+    for(let i=0;i<lines.length;i++){if(headerLine(lines[i])){start=i;break;}}
+    if(start<0)return null;
+    const headers={};let cursor=start;
+    while(cursor<lines.length){
+      const match=headerLine(lines[cursor]);
+      if(!match){if(!lines[cursor].trim())cursor++;break;}
+      headers[match[1].toLowerCase()]=match[2].trim();cursor++;
+    }
+    if(!headers.subject||(!headers.to&&!headers.from))return null;
+    const email={from:headers.from||'',to:headers.to||'',cc:headers.cc||'',bcc:headers.bcc||'',subject:headers.subject,body:lines.slice(cursor).join('\n').trim()};
+    return{prefix:lines.slice(0,start).join('\n').trim(),email};
+  }
+
+  function renderEmailCard(email){
+    const rows=[['From',email.from],['To',email.to],['Cc',email.cc],['Bcc',email.bcc]].filter(([,value])=>value);
+    const meta=rows.map(([label,value])=>`<div class="email-meta-row"><span>${label}</span><strong>${esc(value)}</strong></div>`).join('');
+    const body=email.body?renderMarkdownCore(email.body):'<p class="email-empty-body">No message body</p>';
+    return `<section class="email-card" aria-label="Email preview"><div class="email-card-meta">${meta}<div class="email-subject"><span>Subject</span><h3>${esc(email.subject)}</h3></div></div><div class="email-card-body">${body}</div></section>`;
+  }
+
+  function extractWorkspaceAttachments(value){
+    const refs=[];const seen=new Set();const add=(path,name='')=>{const clean=String(path||'').trim();if(!clean.startsWith('/app/workspace/')||seen.has(clean))return;seen.add(clean);refs.push({path:clean,name:String(name||clean.split('/').pop()||'attachment')});};
+    let text=String(value??'').replace(/(?:^|\n)Attached text file `([^`\n]+)` \((\/app\/workspace\/[^)\n]+)\):\n\n```text\n[\s\S]*?\n```(?=\n|$)/g,(_,name,path)=>{add(path,name);return'\n';});
+    text=text.replace(/(?:^|\n)Attached file:\s*(\/app\/workspace\/[^\n]+)(?=\n|$)/g,(_,path)=>{add(path.trim());return'\n';});
+    return{text:text.replace(/\n{3,}/g,'\n\n').trim(),attachments:refs};
   }
 
   function plainText(value){
@@ -142,7 +225,7 @@
     };
   }
 
-  function renderMarkdown(text){
+  function renderMarkdownCore(text){
     const src=String(text??'').replace(/\r\n/g,'\n');
     const blocks=[];
     const tokenized=src.replace(/```([^\n]*)\n?([\s\S]*?)```/g,(_,lang,code)=>{
@@ -183,5 +266,12 @@
     return out.join('').replace(/@@CODE(\d+)@@/g,(_,idx)=>blocks[Number(idx)]||'');
   }
 
-  return {esc,inlineMd,renderMarkdown,splitTableRow,separatorAlignment,weatherIcon,weatherLineMeta,tableHeaderIcon};
+  function renderMarkdown(text){
+    const parsed=parseEmailContent(text);
+    if(!parsed)return renderMarkdownCore(text);
+    const intro=parsed.prefix?renderMarkdownCore(parsed.prefix):'';
+    return intro+renderEmailCard(parsed.email);
+  }
+
+  return {esc,inlineMd,renderMarkdown,renderEmailCard,parseEmailContent,extractWorkspaceAttachments,splitTableRow,separatorAlignment,weatherIcon,weatherLineMeta,tableHeaderIcon};
 });

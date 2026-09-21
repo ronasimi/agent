@@ -13,7 +13,8 @@ def test_chat_header_has_no_fake_agent_dropdown():
     assert 'id="panelTitle">Al Agent<' in html
     assert "model-pill" not in html
     assert "chevron" not in html
-    assert "chat:'Al Agent'" in js
+    assert "chat:displayConversationTitle(currentConversation())" in js
+    assert "updateConversationHeading" in js
     assert ".panel-heading" in css
 
 
@@ -62,11 +63,13 @@ console.log(JSON.stringify({{result, items:restored.items}}));
     assert data["items"] == ["two", "three", "four"]
 
 
-def test_recipe_suggestion_uses_normal_composer_submit_path():
+def test_recipe_suggestion_submits_without_overwriting_the_composer():
     root = Path(__file__).resolve().parents[1]
     js = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
     assert "sendMessage()" not in js
-    assert "$('#composer').requestSubmit()" in js
+    assert "submitRecipeDecision" in js
+    assert "submitChatMessage(answer,[],{recordHistory:false,deferUntilIdle:true}" in js
+    assert "setPromptValue(btn.dataset.answer" not in js
 
 
 def test_header_copy_control_and_inline_turn_status_contract():
@@ -97,3 +100,19 @@ def test_history_export_formats_complete_rows(monkeypatch):
     assert "User:\nhello" in exported
     assert "Assistant:\nhi" in exported
     assert "Tool [current_time]:" in exported
+
+
+def test_browser_history_preserves_inline_tool_media(monkeypatch):
+    from webui import history
+
+    monkeypatch.setattr(history, "_load_chat_history_from_db", lambda **_kwargs: [
+        {
+            "_db_id": 7,
+            "role": "tool",
+            "name": "render_document_page",
+            "content": "rendered",
+            "media": ["/app/workspace/page.png"],
+        }
+    ])
+    rows = history._history(conversation_id="thread")
+    assert rows[0]["media"] == ["/app/workspace/page.png"]

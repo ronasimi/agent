@@ -22,14 +22,18 @@ def _configure(monkeypatch, tmp_path):
 
 def test_set_profile_image_normalizes_and_persists(monkeypatch, tmp_path):
     profile, workspace, _ = _configure(monkeypatch, tmp_path)
+    from tools.media import PROFILE_MEDIA_REFERENCE, unpack_media_result
     source = workspace / "me.jpg"
     Image.new("RGB", (1400, 900), (200, 160, 120)).save(source, format="JPEG")
 
-    result = json.loads(profile.set_profile_image(str(source)))
+    text, images = unpack_media_result(profile.set_profile_image(str(source)))
+    result = json.loads(text)
 
     assert result["ok"] is True
-    target = Path(result["profile_image"])
-    assert target == profile.PROFILE_IMAGE_PATH
+    assert result["profile_image"] == PROFILE_MEDIA_REFERENCE
+    assert result["attached"] is True
+    assert images == [PROFILE_MEDIA_REFERENCE]
+    target = profile.PROFILE_IMAGE_PATH
     assert target.is_file()
     with Image.open(target) as saved:
         assert saved.format == "PNG"
@@ -37,6 +41,38 @@ def test_set_profile_image_normalizes_and_persists(monkeypatch, tmp_path):
     with sqlite3.connect(profile.DB_PATH) as conn:
         row = conn.execute("SELECT fact FROM memory WHERE topic='user_picture'").fetchone()
     assert row and str(profile.PROFILE_IMAGE_PATH) in row[0]
+
+
+def test_profile_image_info_returns_attachable_logical_reference(monkeypatch, tmp_path):
+    profile, workspace, _ = _configure(monkeypatch, tmp_path)
+    from tools.media import PROFILE_MEDIA_REFERENCE, unpack_media_result
+    source = workspace / "me.png"
+    Image.new("RGB", (64, 64), (10, 20, 30)).save(source)
+    profile.set_profile_image(str(source))
+
+    text, images = unpack_media_result(profile.profile_image_info())
+    payload = json.loads(text)
+
+    assert payload == {
+        "present": True,
+        "profile_image": PROFILE_MEDIA_REFERENCE,
+        "attached": True,
+    }
+    assert images == [PROFILE_MEDIA_REFERENCE]
+    assert "/app/memory" not in text
+    state = profile.get_onboarding_state()
+    assert state["profile_image"] == PROFILE_MEDIA_REFERENCE
+    assert state["profile_image_present"] is True
+
+
+def test_profile_image_info_without_image_is_plain_absence(monkeypatch, tmp_path):
+    profile, _, _ = _configure(monkeypatch, tmp_path)
+    from tools.media import unpack_media_result
+
+    text, images = unpack_media_result(profile.profile_image_info())
+
+    assert json.loads(text) == {"present": False, "profile_image": "", "attached": False}
+    assert images == []
 
 
 def test_profile_image_migrates_legacy_user_photo_from_chat_history(monkeypatch, tmp_path):

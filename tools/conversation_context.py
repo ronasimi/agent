@@ -1,4 +1,4 @@
-"""Conversation-scoped context shared across CLI, Web UI, and background helpers."""
+"""Conversation-scoped context shared across the Web UI and background helpers."""
 from __future__ import annotations
 
 from contextlib import contextmanager

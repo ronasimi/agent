@@ -5,17 +5,17 @@ The repository uses **thin composition roots + domain modules + declarative prov
 ## Runtime layers
 
 ```text
-agent.py / worker.py                    compatibility entry points
+webui/__main__.py / worker.py           executable entry points
         │
         ├── al_agent/                   application orchestration
+        │   ├── runtime.py              stable Web UI runtime facade
         │   ├── state.py                configuration + long-lived services
         │   ├── events.py               frontend event bridge + inference lock
         │   ├── prompts.py              stable policy, memory, media encoding
         │   ├── turn_support.py         deterministic loop helpers
         │   ├── turn_engine.py          one responsibility: model/tool state machine
         │   ├── model_protocol.py       Ollama wire normalization + safe stream transport behavior
-        │   ├── cli.py                  terminal frontend
-        │   ├── cli_commands.py         registered slash-command handlers
+        │   ├── slash_commands.py       browser command registry + handlers
         │   └── background/             durable worker subsystem
         │       ├── resources.py        foreground/resource arbitration
         │       ├── research.py         research/report job handler
@@ -31,15 +31,19 @@ agent.py / worker.py                    compatibility entry points
         │   ├── primitive_ops.py        compatibility re-export facade
         │   ├── pipeline.py             bounded read-only composition
         │   ├── recipe_store.py         semantic recipe persistence
+        │   ├── credential_store.py     encrypted provider-neutral secret vault
+        │   ├── google_workspace_auth.py OAuth state/PKCE/token lifecycle
+        │   ├── google_workspace.py     bounded read-only Gmail/Calendar tools
         │   └── ...                     focused domain tools/stores
         │
-        └── webui/                      optional browser frontend
+        └── webui/                      sole user interface
+            ├── __main__.py             container entry point
             ├── server.py               FastAPI route composition root
             ├── chat.py                 WebSocket turn streaming
             ├── workspace_ops.py        workspace/artifact/upload operations
             ├── theme.py                Xresources palette loading
             ├── history.py              browser history serialization
-            └── static/                 dependency-free SPA
+            └── static/                 dependency-free SPA, rich renderers, interaction state
 ```
 
 ## Adding a primitive
@@ -65,13 +69,21 @@ Use the existing `@agent_tool` decorator and save the validated module under `/a
 
 Create `al_agent/background/job_providers/pNN_name.py` and export exactly one `JOB_HANDLER`.  The generic worker loop discovers it automatically.  Do not add another branch to `worker.py`.
 
-## Adding a CLI command
+## Adding a browser command
 
-Add slash commands to `al_agent/slash_commands.py`. The shared registry is consumed by both CLI and Web UI frontends, and command execution stays outside the model prompt loop.
+Add slash commands to `al_agent/slash_commands.py`. The Web UI consumes the registry for autocomplete and deterministic execution, which stays outside the model prompt loop.
 
 ## Adding a Web UI capability
 
 Keep HTTP route composition in `webui/server.py`, but put domain behavior in a sibling module (`workspace_ops`, `chat`, `theme`, etc.).  The browser must not bypass the main agent tool/policy loop.
+
+Rich output remains split by responsibility: `rich_output.js` performs escaped semantic rendering for Markdown, email cards, and stored attachment markers; `app.js` owns DOM placement and media controls; `interaction_state.js` provides bounded local persistence for recipe decisions. Workspace media is always served through the path-validated `/api/files` and preview routes. Modern office-document previews extract only bounded text from selected archive parts.
+
+## External integration boundary
+
+OAuth client data and user tokens are encrypted by `LocalCredentialStore` before reaching SQLite. Provider, account, and record-kind identifiers are authenticated inside each encrypted envelope; browser status APIs expose only deliberately non-secret metadata. New service integrations should reuse this store rather than create plaintext token files.
+
+The Google Workspace adapter is intentionally split into three layers: FastAPI only orchestrates setup redirects, `google_workspace_auth.py` owns one-time state/PKCE/refresh/revocation, and `google_workspace.py` owns bounded REST reads. Model-facing tool output never contains credentials, and provider text is explicitly marked untrusted. Every new provider should preserve the same separation between setup/control-plane routes and model-facing data-plane tools.
 
 ## Fact grounding gate
 
@@ -85,7 +97,7 @@ Harness-owned compatibility recipes live in auto-discovered `tools/recipe_provid
 
 ## Dependency direction
 
-- frontends depend on `al_agent` application APIs;
+- the Web UI depends on `al_agent` application APIs;
 - `al_agent` depends on `tools` capabilities/stores;
 - tool implementations must not import a frontend;
 - provider manifests describe capabilities but do not execute them;

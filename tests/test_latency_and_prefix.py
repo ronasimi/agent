@@ -97,7 +97,7 @@ def test_volatile_blocks_are_counted_against_the_token_budget():
 
 def test_unchanged_schema_set_is_left_byte_stable():
     """Pruning or reordering alone would invalidate the whole prompt cache."""
-    from agent import _refresh_requirement_tool_schemas
+    from al_agent.runtime import _refresh_requirement_tool_schemas
     from tools import TOOL_METADATA, get_tool_schema
     from tools.task_requirements import TaskRequirementLedger
     from tools.turn_policy import derive_turn_tool_policy
@@ -118,7 +118,7 @@ def test_unchanged_schema_set_is_left_byte_stable():
 
 
 def test_satisfied_schema_is_pruned_when_the_set_changes_anyway():
-    from agent import _refresh_requirement_tool_schemas
+    from al_agent.runtime import _refresh_requirement_tool_schemas
     from tools import TOOL_METADATA, get_tool_schema
     from tools.task_requirements import TaskRequirementLedger
     from tools.turn_policy import derive_turn_tool_policy
@@ -232,7 +232,7 @@ def test_compaction_reuses_the_interactive_context_size_for_the_same_model():
 
 
 def test_finalization_strips_local_only_fields_from_the_wire():
-    import agent
+    from al_agent import runtime as agent
 
     captured = {}
 
@@ -296,7 +296,7 @@ class _ScriptedOllama:
 
 
 def _run_turn(monkeypatch, prompt, reply):
-    import agent
+    from al_agent import runtime as agent
     from al_agent import events, turn_support
 
     client = _ScriptedOllama(reply)
@@ -312,7 +312,7 @@ def _run_turn(monkeypatch, prompt, reply):
 
 def test_grounding_gate_stops_discarding_after_its_budget(monkeypatch, capsys):
     """Without a budget this path silently consumes the whole iteration limit."""
-    import agent
+    from al_agent import runtime as agent
 
     client, events_seen = _run_turn(
         monkeypatch,

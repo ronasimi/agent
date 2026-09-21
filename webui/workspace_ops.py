@@ -1,10 +1,34 @@
 """Workspace browsing, upload, attachment, and artifact helpers."""
 from __future__ import annotations
-import mimetypes, os, re
+
+import mimetypes
+import os
+import re
+import zipfile
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree
+
 from fastapi import HTTPException, UploadFile
-from .config import *
+
+from .config import (
+    ALLOWED_MEDIA_EXT,
+    ALLOWED_TEXT_EXT,
+    ARTIFACT_IGNORE_RELATIVE,
+    ARTIFACT_MAX_PER_TURN,
+    ARTIFACT_SCAN_LIMIT,
+    AUDIO_PREVIEW_EXT,
+    DOCUMENT_PREVIEW_EXT,
+    IMAGE_PREVIEW_EXT,
+    MARKDOWN_EXT,
+    MAX_UPLOAD_BYTES,
+    PREVIEW_TEXT_BYTES,
+    TEXT_PREVIEW_EXT,
+    VIDEO_PREVIEW_EXT,
+    WORKSPACE,
+    WORKSPACE_LIST_LIMIT,
+)
+
 
 def _safe_workspace_path(value: str) -> Path:
     raw = str(value or "").strip()
@@ -83,11 +107,98 @@ def _preview_kind(path: Path) -> str:
         return "audio"
     if suffix in VIDEO_PREVIEW_EXT or media_type.startswith("video/"):
         return "video"
+    if suffix in DOCUMENT_PREVIEW_EXT:
+        return "document"
     if suffix in TEXT_PREVIEW_EXT or media_type.startswith("text/") or media_type in {
         "application/json", "application/xml", "application/javascript",
     }:
         return "text"
     return "download"
+
+def _xml_text(raw: bytes, *, max_chars: int) -> str:
+    """Extract bounded visible text from a bounded Office/OpenDocument XML part."""
+    try:
+        root = ElementTree.fromstring(raw)
+    except ElementTree.ParseError:
+        return ""
+    chunks: list[str] = []
+    total = 0
+    for node in root.iter():
+        value = str(node.text or "").strip()
+        if not value:
+            continue
+        remaining = max_chars - total
+        if remaining <= 0:
+            break
+        clipped = value[:remaining]
+        chunks.append(clipped)
+        total += len(clipped) + 1
+    return "\n".join(chunks)
+
+def _document_preview_text(
+    path: Path, *, max_chars: int = PREVIEW_TEXT_BYTES
+) -> tuple[str, bool]:
+    """Return a safe, bounded text preview for modern local document formats."""
+    limit = max(1024, min(int(max_chars), PREVIEW_TEXT_BYTES))
+    suffix = path.suffix.lower()
+    if suffix == ".rtf":
+        raw = path.read_bytes()[: limit * 4]
+        text = raw.decode("utf-8", errors="replace")
+        text = re.sub(r"\\'[0-9a-fA-F]{2}", " ", text)
+        text = re.sub(r"\\[a-zA-Z]+-?\d*\s?", " ", text)
+        text = re.sub(r"[{}]", "", text)
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        return text[:limit], len(text) > limit
+
+    selectors: tuple[str, ...]
+    if suffix == ".docx":
+        selectors = ("word/document.xml",)
+    elif suffix == ".xlsx":
+        selectors = ("xl/sharedStrings.xml", "xl/worksheets/")
+    elif suffix == ".pptx":
+        selectors = ("ppt/slides/",)
+    elif suffix in {".odt", ".ods", ".odp"}:
+        selectors = ("content.xml",)
+    else:
+        return "", False
+
+    chunks: list[str] = []
+    total = 0
+    truncated = False
+    byte_budget = max(limit * 8, 256 * 1024)
+    with zipfile.ZipFile(path) as archive:
+        selected = [
+            info
+            for info in archive.infolist()
+            if any(
+                info.filename == prefix or info.filename.startswith(prefix)
+                for prefix in selectors
+            )
+        ]
+        selected = sorted(selected, key=lambda info: info.filename)[:64]
+        for info in selected:
+            remaining = limit - total
+            if remaining <= 0 or byte_budget <= 0:
+                truncated = True
+                break
+            if info.file_size > max(limit * 8, 1024 * 1024):
+                truncated = True
+                continue
+            read_limit = min(byte_budget, max(remaining * 4, 4096))
+            with archive.open(info) as handle:
+                raw = handle.read(read_limit + 1)
+            if len(raw) > read_limit:
+                raw = raw[:read_limit]
+                truncated = True
+            byte_budget -= len(raw)
+            text = _xml_text(raw, max_chars=remaining)
+            if text:
+                chunks.append(text)
+                total += len(text) + 2
+            truncated = truncated or info.file_size > len(raw)
+    result = "\n\n".join(chunks).strip()
+    return result[:limit], truncated or len(result) > limit
 
 def _artifact_payload(path: Path) -> dict[str, Any]:
     resolved = path.resolve()

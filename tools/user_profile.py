@@ -10,6 +10,7 @@ from typing import Any
 
 from PIL import Image, ImageOps
 
+from .media import PROFILE_MEDIA_REFERENCE, media_result
 from .runtime import DB_PATH, DB_TIMEOUT
 
 PROFILE_DIR = Path(os.environ.get("AGENT_PROFILE_DIR", "/app/memory/profile")).resolve()
@@ -98,13 +99,21 @@ def _install_profile_image(source: Path, *, update_memory: bool = True) -> Path:
     return PROFILE_IMAGE_PATH
 
 
-def set_profile_image(path: str) -> str:
-    """Set the user's Web UI profile image from an existing workspace image after explicit user approval."""
+def set_profile_image(path: str) -> dict[str, Any]:
+    """Set and attach the user's profile image from a workspace image after explicit approval."""
     source = _safe_workspace_image(path)
-    destination = _install_profile_image(source)
-    return json.dumps(
-        {"ok": True, "source": str(source), "profile_image": str(destination)},
-        ensure_ascii=False,
+    _install_profile_image(source)
+    return media_result(
+        json.dumps(
+            {
+                "ok": True,
+                "source": str(source),
+                "profile_image": PROFILE_MEDIA_REFERENCE,
+                "attached": True,
+            },
+            ensure_ascii=False,
+        ),
+        [PROFILE_MEDIA_REFERENCE],
     )
 
 
@@ -171,10 +180,22 @@ def get_profile_image_path(*, migrate_legacy: bool = True) -> Path | None:
         return None
 
 
-def profile_image_info() -> str:
-    """Report whether a durable Web UI profile image is currently available."""
+def profile_image_info() -> dict[str, Any] | str:
+    """Report and attach the current durable profile image when one is available."""
     path = get_profile_image_path(migrate_legacy=True)
-    return json.dumps({"present": bool(path), "profile_image": str(path) if path else ""}, ensure_ascii=False)
+    if path is None:
+        return json.dumps({"present": False, "profile_image": "", "attached": False}, ensure_ascii=False)
+    return media_result(
+        json.dumps(
+            {
+                "present": True,
+                "profile_image": PROFILE_MEDIA_REFERENCE,
+                "attached": True,
+            },
+            ensure_ascii=False,
+        ),
+        [PROFILE_MEDIA_REFERENCE],
+    )
 
 
 def set_user_identity(
@@ -338,11 +359,13 @@ def get_onboarding_state() -> dict[str, Any]:
     init_user_profile_db()
     with _connect() as conn:
         row = conn.execute("SELECT value FROM user_profile WHERE key='onboarding.completed'").fetchone()
+    profile_image = get_profile_image_path(migrate_legacy=True)
     return {
         "completed": bool(row and str(row[0]).lower() in {"1", "true", "yes"}),
         "identity": get_user_identity(),
         "preferences": get_user_preferences(),
-        "profile_image": str(get_profile_image_path(migrate_legacy=True) or ""),
+        "profile_image": PROFILE_MEDIA_REFERENCE if profile_image else "",
+        "profile_image_present": bool(profile_image),
     }
 
 
@@ -405,30 +428,6 @@ def reset_onboarding_profile() -> dict[str, Any]:
         pass
     return get_onboarding_state()
 
-
-def run_terminal_onboarding(*, reset: bool = False, input_fn=input, output_fn=print) -> dict[str, Any]:
-    """Run the local first-run questionnaire in a terminal; safe to invoke again with reset=True."""
-    state = get_onboarding_state()
-    if state.get("completed") and not reset:
-        return state
-    current = state.get("identity") or {}
-    output_fn("\n[Profile setup] Configure stable context for this local agent. Press Enter to keep a field blank.")
-    name = input_fn(f"Name [{current.get('name','')}]: ").strip() or str(current.get("name") or "")
-    role = input_fn(f"Role / occupation [{current.get('role','')}]: ").strip() or str(current.get("role") or "")
-    timezone = input_fn(f"Timezone [{current.get('timezone','UTC')}]: ").strip() or str(current.get("timezone") or "UTC")
-    location = input_fn("Location (city/region/country): ").strip()
-    email = input_fn(f"Email (optional) [{current.get('email','')}]: ").strip() or str(current.get("email") or "")
-    interests_raw = input_fn("Interests (comma-separated): ").strip()
-    interests = [item.strip() for item in interests_raw.split(",") if item.strip()] or list(current.get("interests") or [])
-    style = input_fn("Response style [concise/balanced/detailed] (concise): ").strip().lower() or "concise"
-    depth = input_fn("Research depth [quick/balanced/deep] (balanced): ").strip().lower() or "balanced"
-    photo = input_fn("Profile picture workspace path (optional): ").strip()
-    result = complete_onboarding_profile(
-        name=name, role=role, timezone=timezone, location=location, email=email, interests=interests,
-        response_style=style, research_depth=depth, profile_image_path=photo, reset=reset,
-    )
-    output_fn("[Profile setup] Saved.")
-    return result
 
 def get_user_research_style() -> dict[str, Any]:
     """Get research style preferences with defaults."""

@@ -538,7 +538,7 @@ def list_self_optimization_candidates(status: str = "", limit: int = 20) -> str:
 
 
 def approve_self_optimization(candidate_id: str, expected_sha256: str) -> str:
-    """Human CLI boundary: export a digest-pinned patch, but never apply it to live source."""
+    """Human approval boundary: export a digest-pinned patch, but never apply it to live source."""
     candidate = get_optimization_candidate(str(candidate_id).strip())
     digest = str(expected_sha256).strip().lower()
     if not candidate or candidate.get("status") != "awaiting_approval":

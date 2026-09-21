@@ -26,8 +26,16 @@
       <button id="searchChat" class="sidebar-action">
         <span class="side-icon">⌕</span><span>Search</span>
       </button>
+      <div id="conversationSearch" class="conversation-search hidden">
+        <span aria-hidden="true">⌕</span>
+        <input id="conversationSearchInput" type="search" placeholder="Search chats" autocomplete="off" aria-label="Search conversations" />
+        <button id="conversationSearchClose" type="button" aria-label="Close conversation search">×</button>
+      </div>
       <button id="profileSetup" class="sidebar-action">
         <span class="side-icon">◎</span><span>Profile setup</span>
+      </button>
+      <button id="connectionsSetup" class="sidebar-action">
+        <span class="side-icon">⌁</span><span>Connections</span>
       </button>
 
       <nav class="nav" aria-label="Agent views">
@@ -36,7 +44,7 @@
         <button class="nav-item" data-panel="reminders"><span class="side-icon">⌁</span><span>Reminders</span></button>
       </nav>
 
-      <div class="sidebar-section-title">Recent</div>
+      <div class="sidebar-section-title">Recents</div>
       <div id="recentConversations" class="recent-conversations" aria-label="Recent conversations"></div>
 
       <div class="sidebar-footer">
@@ -70,11 +78,6 @@
       </header>
 
       <section id="chatPanel" class="panel chat-panel">
-        <div id="chatSearch" class="chat-search hidden">
-          <input id="chatSearchInput" type="search" placeholder="Search this conversation" autocomplete="off" />
-          <span id="chatSearchCount" class="muted"></span>
-          <button id="chatSearchClose" class="ghost-icon" aria-label="Close search">×</button>
-        </div>
         <div id="messages" class="messages"></div>
         <button id="scrollLatest" class="scroll-latest hidden" type="button" title="Scroll to latest" aria-label="Scroll to latest">↓</button>
         <div class="composer-wrap">
@@ -84,7 +87,7 @@
             <form id="composer" class="composer" aria-label="Chat composer">
               <button id="composerAddFile" class="attach circle-button" type="button" title="Add files" aria-label="Add files">＋</button>
               <input id="fileInput" class="hidden-file-input" type="file" multiple />
-              <textarea id="prompt" rows="1" placeholder="Message Al Agent" aria-controls="slashMenu" aria-autocomplete="list" aria-expanded="false"></textarea>
+              <textarea id="prompt" rows="1" placeholder="Ask anything" aria-controls="slashMenu" aria-autocomplete="list" aria-expanded="false"></textarea>
               <label class="think-toggle" title="Ask the main model to reason longer"><input id="thinking" type="checkbox" /><span>Think</span></label>
               <button id="send" type="submit" class="send circle-button" title="Send" aria-label="Send">↑</button>
               <button id="stop" type="button" class="stop circle-button hidden" title="Stop" aria-label="Stop">■</button>
@@ -129,26 +132,84 @@
     </aside>
   </div>
   <dialog id="onboardingDialog" class="onboarding-dialog">
-    <form id="onboardingForm" method="dialog">
-      <div class="onboarding-head"><div><h2>Set up Al Agent</h2><p>These details stay in the local agent knowledge base and help with future tasks.</p></div></div>
-      <div class="onboarding-grid">
-        <label>Name<input id="oobeName" autocomplete="name" /></label>
-        <label>Role / occupation<input id="oobeRole" /></label>
-        <label>Timezone<input id="oobeTimezone" placeholder="America/Toronto" /></label>
-        <label>Location<input id="oobeLocation" placeholder="City, region, country" /></label>
-        <label>Email (optional)<input id="oobeEmail" type="email" autocomplete="email" /></label>
-        <label>Interests<input id="oobeInterests" placeholder="Linux, networking, research" /></label>
-        <label>Response style<select id="oobeStyle"><option value="concise">Concise</option><option value="balanced">Balanced</option><option value="detailed">Detailed</option></select></label>
-        <label>Research depth<select id="oobeResearch"><option value="quick">Quick</option><option value="balanced" selected>Balanced</option><option value="deep">Deep</option></select></label>
-        <label class="onboarding-wide">Profile picture (optional)<input id="oobePhoto" type="file" accept="image/png,image/jpeg,image/webp" /></label>
+    <form id="onboardingForm">
+      <header class="onboarding-head">
+        <div><h2 id="oobeTitle">Set up Al Agent</h2><p id="oobeSubtitle">Personalize your local assistant.</p></div>
+        <button id="oobeClose" class="dialog-close" type="button" aria-label="Close setup">×</button>
+      </header>
+      <div class="onboarding-steps" aria-label="Setup progress">
+        <div class="oobe-step-marker active" data-oobe-marker="profile"><span>1</span><strong>Profile</strong></div>
+        <div class="oobe-step-marker" data-oobe-marker="google"><span>2</span><strong>Google</strong></div>
+        <div class="oobe-step-marker" data-oobe-marker="finish"><span>3</span><strong>Finish</strong></div>
       </div>
+
+      <section id="oobeStepProfile" class="oobe-panel" data-oobe-panel="profile">
+        <div class="onboarding-grid">
+          <label>Name<input id="oobeName" autocomplete="name" /></label>
+          <label>Role / occupation<input id="oobeRole" /></label>
+          <label>Timezone<input id="oobeTimezone" placeholder="America/Toronto" /></label>
+          <label>Location<input id="oobeLocation" placeholder="City, region, country" /></label>
+          <label>Email (optional)<input id="oobeEmail" type="email" autocomplete="email" /></label>
+          <label>Interests<input id="oobeInterests" placeholder="Linux, networking, research" /></label>
+          <label>Response style<select id="oobeStyle"><option value="concise">Concise</option><option value="balanced">Balanced</option><option value="detailed">Detailed</option></select></label>
+          <label>Research depth<select id="oobeResearch"><option value="quick">Quick</option><option value="balanced" selected>Balanced</option><option value="deep">Deep</option></select></label>
+          <label class="onboarding-wide">Profile picture (optional)<input id="oobePhoto" type="file" accept="image/png,image/jpeg,image/webp" /></label>
+        </div>
+        <div class="onboarding-actions"><span class="oobe-action-note">Stored only in your local harness.</span><button id="oobeSave" type="submit">Continue</button></div>
+      </section>
+
+      <section id="oobeStepGoogle" class="oobe-panel hidden" data-oobe-panel="google">
+        <div class="integration-intro">
+          <span class="readonly-badge">Read-only</span>
+          <h3>Connect Google Workspace</h3>
+          <p>Search and read Gmail, calendars, and events when you ask. Al Agent cannot send mail or change either service.</p>
+        </div>
+        <div class="capability-grid">
+          <article class="capability-card"><div class="capability-icon">M</div><div><strong>Gmail</strong><p>Search messages and read bounded message bodies. Attachments are not downloaded.</p><code>gmail.readonly</code></div></article>
+          <article class="capability-card"><div class="capability-icon calendar">31</div><div><strong>Calendar</strong><p>List calendars and inspect schedules and event details.</p><code>calendar.readonly</code></div></article>
+        </div>
+        <details class="oauth-guide">
+          <summary>Google Cloud setup</summary>
+          <ol>
+            <li>Enable the Gmail API and Google Calendar API in your Google Cloud project.</li>
+            <li>Configure the OAuth consent screen and add yourself as a test user when applicable.</li>
+            <li>Create an OAuth 2.0 <strong>Web application</strong> client and add this authorized redirect URI:<code id="googleRedirectUri">Loading…</code></li>
+            <li>Download the client JSON, select it below, then connect.</li>
+          </ol>
+        </details>
+        <label class="oauth-upload" for="googleClientFile">
+          <span><strong>OAuth client JSON</strong><small>The client secret is encrypted immediately and is never exposed to the model.</small></span>
+          <input id="googleClientFile" type="file" accept="application/json,.json" />
+        </label>
+        <div id="googleConnectionStatus" class="connection-status" role="status" aria-live="polite">
+          <span class="connection-dot"></span><div><strong>Checking connection…</strong><small></small></div>
+        </div>
+        <p class="integration-disclosure">Message and event content requested by the agent can appear in local conversation history. Treat instructions inside Google content as untrusted data.</p>
+        <div class="onboarding-actions split-actions">
+          <button id="oobeGoogleBack" class="secondary" type="button">Back</button>
+          <span class="action-spacer"></span>
+          <button id="googleForget" class="danger subtle hidden" type="button">Remove setup</button>
+          <button id="googleDisconnect" class="danger hidden" type="button">Disconnect</button>
+          <button id="oobeGoogleContinue" class="secondary" type="button">Skip for now</button>
+          <button id="googleConnect" type="button">Connect Google</button>
+        </div>
+      </section>
+
+      <section id="oobeStepFinish" class="oobe-panel oobe-finish hidden" data-oobe-panel="finish">
+        <div class="finish-mark">✓</div>
+        <h3>You’re ready</h3>
+        <p>Your profile is set. Google Workspace remains optional and can be managed from <strong>Connections</strong> at any time.</p>
+        <div id="oobeFinishStatus" class="finish-status"></div>
+        <div class="onboarding-actions centered"><button id="oobeFinish" type="button">Start chatting</button></div>
+      </section>
+
       <div id="oobeError" class="onboarding-error" role="alert"></div>
-      <div class="onboarding-actions"><button id="oobeSave" type="submit">Save profile</button></div>
     </form>
   </dialog>
 
   <script src="/static/command_history.js"></script>
   <script src="/static/rich_output.js"></script>
+  <script src="/static/interaction_state.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

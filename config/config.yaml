@@ -293,7 +293,8 @@ self_optimization:
   source_root: "/app/source"
   workspace_root: "/app/workspace/self_optimization"
   allowed_paths:
-    - "agent.py"
+    - "al_agent"
+    - "webui"
     - "worker.py"
     - "tools"
     - "tests"

@@ -29,20 +29,12 @@ def test_slash_parser_uses_exact_command_tokens():
 
 
 def test_unknown_slash_command_is_consumed_and_never_treated_as_chat():
-    from al_agent.cli_commands import CliContext, dispatch_command
     from al_agent.slash_commands import execute_slash_command
 
     result = execute_slash_command("/does-not-exist")
     assert result.recognized is False
     assert result.ok is False
     assert "Unknown slash command" in result.message
-
-    handled, should_exit = dispatch_command(
-        "/does-not-exist", CliContext(messages=[], thinking_enabled=False)
-    )
-    assert handled is True
-    assert should_exit is False
-
 
 def test_think_command_is_deterministic_and_validated():
     from al_agent.slash_commands import execute_slash_command

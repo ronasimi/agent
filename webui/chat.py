@@ -1,11 +1,18 @@
 """WebSocket chat orchestration for the Web UI."""
 from __future__ import annotations
-import asyncio, inspect, threading, uuid
+
+import asyncio
+import inspect
+import threading
+import uuid
 from typing import Any
+
 from fastapi import WebSocket, WebSocketDisconnect
-import agent as agent_runtime
+
+from al_agent import runtime as agent_runtime
 from al_agent.slash_commands import execute_slash_command
-from tools import _load_chat_history_from_db, conversation_context, ensure_conversation, normalize_conversation_id
+from tools import conversation_context, ensure_conversation, normalize_conversation_id
+
 from .config import ARTIFACT_MAX_PER_TURN
 from .workspace_ops import _build_user_content, _new_artifacts, _workspace_file_snapshot
 
@@ -83,13 +90,12 @@ async def _run_turn(websocket: WebSocket, payload: dict[str, Any]) -> None:
         # lock is acquired by the turn engine. That prevents a queued browser tab
         # from running with history captured before the preceding turn finished.
         messages = [{"role": "system", "content": agent_runtime.build_system_prompt()}]
-        with conversation_context(conversation_id):
-            with agent_runtime.frontend_event_context(sink, cancel_event):
-                handler = agent_runtime.handle_user_turn
-                if "refresh_history" in inspect.signature(handler).parameters:
-                    handler(messages, text, thinking, refresh_history=True)
-                else:  # compatibility for embedders/tests with the legacy callback shape
-                    handler(messages, text, thinking)
+        with conversation_context(conversation_id), agent_runtime.frontend_event_context(sink, cancel_event):
+            handler = agent_runtime.handle_user_turn
+            if "refresh_history" in inspect.signature(handler).parameters:
+                handler(messages, text, thinking, refresh_history=True)
+            else:  # compatibility for embedders/tests with the legacy callback shape
+                handler(messages, text, thinking)
 
     task = asyncio.create_task(asyncio.to_thread(work))
     await websocket.send_json({"type": "accepted", "turn_id": turn_id, "conversation_id": conversation_id, "content": text})
@@ -100,7 +106,7 @@ async def _run_turn(websocket: WebSocket, payload: dict[str, Any]) -> None:
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=0.25)
                 await websocket.send_json(event)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
         exc = task.exception() if task.done() else None
         if exc:
@@ -130,8 +136,11 @@ async def chat_socket(websocket: WebSocket) -> None:
             if action != "message":
                 continue
             if active and not active.done():
-                await websocket.send_json({"type": "error", "message": "This browser session already has an active turn"})
-                continue
+                if bool(payload.get("defer_until_idle", False)):
+                    await asyncio.gather(active, return_exceptions=True)
+                else:
+                    await websocket.send_json({"type": "error", "message": "This browser session already has an active turn"})
+                    continue
             active = asyncio.create_task(_run_turn(websocket, payload))
     except WebSocketDisconnect:
         if active and not active.done():

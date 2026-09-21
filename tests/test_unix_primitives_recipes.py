@@ -204,7 +204,7 @@ def test_pipeline_schema_is_bounded():
 
 def test_successful_turn_emits_recipe_suggestion(tmp_path, monkeypatch):
     _set_recipe_db(tmp_path, monkeypatch)
-    import agent
+    from al_agent import runtime as agent
     from tools import AVAILABLE_TOOLS_MAP
 
     def fake_resolve_host(host: str, record_type: str = "any") -> str:
@@ -249,7 +249,7 @@ def test_turn_preflights_recipes_before_model_planning(tmp_path, monkeypatch):
         [{"tool": "resolve_host", "args": {"host": {"$param": "host"}}}],
         {"host": {"description": "hostname"}}, ["website", "connectivity"],
     )
-    import agent
+    from al_agent import runtime as agent
     monkeypatch.setattr(agent, "_acquire_inference_lock", lambda: None)
     monkeypatch.setattr(agent, "_release_inference_lock", lambda lock: None)
     monkeypatch.setattr(agent, "record_monitor_state", lambda *a, **k: None)

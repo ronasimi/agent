@@ -132,7 +132,7 @@ def test_current_time_accepts_explicit_iana_timezone():
 
 
 def test_time_request_uses_deterministic_pregrounding_and_skips_main_model(monkeypatch):
-    import agent
+    from al_agent import runtime as agent
     from al_agent import turn_engine
 
     calls = []

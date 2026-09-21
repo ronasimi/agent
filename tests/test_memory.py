@@ -49,3 +49,16 @@ def test_complete_history_export_can_include_compacted_rows(tmp_path, monkeypatc
     complete = memory._load_chat_history_from_db(limit=0, include_compacted=True)
     assert [row["content"] for row in recent] == ["new prompt"]
     assert [row["content"] for row in complete] == ["old prompt", "old answer", "new prompt"]
+
+
+def test_tool_media_metadata_round_trips_without_entering_wire_content(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        memory = _use_temp_db(monkeypatch, td)
+        memory._save_message_to_db({
+            "role": "tool",
+            "tool_name": "render_document_page",
+            "content": "rendered",
+            "media": ["/app/workspace/page.png"],
+        })
+        history = memory._load_chat_history_from_db(limit=20)
+        assert history[0]["media"] == ["/app/workspace/page.png"]

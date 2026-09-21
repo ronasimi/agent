@@ -7,7 +7,7 @@ from .runtime import cancel_job, create_job, get_job, list_jobs
 
 
 def enqueue_research(topic: str = "", priority: int = 0) -> str:
-    """Queue a durable deep-research job that continues after the CLI exits or restarts."""
+    """Queue a durable deep-research job that continues across browser sessions and restarts."""
     topic = str(topic).strip()
     if not topic:
         return "Error: Missing required 'topic' parameter."

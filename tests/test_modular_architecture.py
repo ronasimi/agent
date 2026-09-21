@@ -1,10 +1,14 @@
 from pathlib import Path
 
 
-def test_entrypoints_are_thin_compatibility_facades():
-    assert Path("agent.py").stat().st_size < 8_000
+def test_entrypoints_are_thin_and_webui_only():
+    assert Path("al_agent/runtime.py").stat().st_size < 8_000
     assert Path("worker.py").stat().st_size < 4_000
     assert Path("tools/primitive_ops.py").stat().st_size < 5_000
+    assert not Path("agent.py").exists()
+    assert not Path("al_agent/cli.py").exists()
+    assert not Path("al_agent/cli_commands.py").exists()
+    assert "prompt_toolkit" not in Path("requirements.txt").read_text(encoding="utf-8")
 
 
 def test_builtin_provider_modules_are_discovered_without_duplicates():
@@ -30,11 +34,12 @@ def test_background_jobs_are_provider_dispatched():
     assert all(path.name.startswith("p") for path in Path("al_agent/background/job_providers").glob("p*.py"))
 
 
-def test_cli_commands_are_registered_handlers():
-    from al_agent.cli_commands import COMMANDS
-    names = {command.name for command in COMMANDS}
-    assert "/research" in names and "/tools" in names and "exit" in names
-    assert len(names) == len(COMMANDS)
+def test_browser_commands_are_registered_handlers():
+    from al_agent.slash_commands import SLASH_COMMANDS
+    names = {command.name for command in SLASH_COMMANDS}
+    assert "/research" in names and "/tools" in names
+    assert "exit" not in names
+    assert len(names) == len(SLASH_COMMANDS)
 
 
 def test_webui_domain_helpers_are_modularized():

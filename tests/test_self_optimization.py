@@ -35,16 +35,16 @@ def test_patch_policy_rejects_runtime_data():
 
 def test_candidate_uses_isolated_git_worktree(monkeypatch, tmp_path: Path):
     source = tmp_path / "source"
-    source.mkdir()
-    (source / "agent.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (source / "al_agent").mkdir(parents=True)
+    (source / "al_agent" / "runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
     candidates = tmp_path / "optimizer"
     monkeypatch.setattr(optimization, "WORKSPACE_ROOT", candidates)
     monkeypatch.setattr(optimization, "source_root", lambda: source)
     candidate_dir, worktree = optimization._prepare_worktree("candidate-1")
     assert candidate_dir == candidates / "candidates" / "candidate-1"
     assert (worktree / ".git").exists()
-    assert (worktree / "agent.py").read_text(encoding="utf-8") == "VALUE = 1\n"
-    assert source.joinpath("agent.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert (worktree / "al_agent" / "runtime.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert source.joinpath("al_agent", "runtime.py").read_text(encoding="utf-8") == "VALUE = 1\n"
 
 
 def test_generated_code_execution_fails_closed_without_sandbox(monkeypatch, tmp_path: Path):
@@ -61,8 +61,8 @@ def test_networkless_validator_executes_fixed_gate(monkeypatch, tmp_path: Path):
 
     candidates = tmp_path / "candidates"
     repo = candidates / "abc-123" / "repo"
-    repo.mkdir(parents=True)
-    (repo / "agent.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repo / "al_agent").mkdir(parents=True)
+    (repo / "al_agent" / "runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
     monkeypatch.setattr(validator, "CANDIDATES", candidates)
     try:
         result = validator.validate_request(

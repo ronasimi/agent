@@ -135,7 +135,7 @@ def test_malformed_missing_required_call_is_rejected_without_execution():
 
 
 def test_readonly_native_batch_executes_concurrently(monkeypatch):
-    import agent
+    from al_agent import runtime as agent
     import al_agent.turn_engine as turn_engine
     from tools import get_tool_schema
 

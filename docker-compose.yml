@@ -27,45 +27,6 @@ services:
       - ./workspace:/state/workspace
       - ./memory:/state/memory
 
-  agent:
-    build: .
-    image: agent
-    container_name: agent
-    restart: unless-stopped
-    init: true
-    stop_grace_period: 20s
-    pids_limit: 256
-    security_opt:
-      - no-new-privileges:true
-    stdin_open: true
-    tty: true
-    pid: host
-    network_mode: host
-    user: "1000:1000"
-    depends_on:
-      storage-init:
-        condition: service_completed_successfully
-    environment:
-      - XDG_RUNTIME_DIR=/run/user/1000
-      - DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
-      - DISPLAY=${DISPLAY:-:0}
-      - WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-1}
-      - TZ=${TZ:-America/Toronto}
-      - TERM=xterm-256color
-    volumes:
-      - ./config:/app/config:ro
-      - ./workspace:/app/workspace
-      - ./memory:/app/memory
-      - ./tools:/app/tools:ro
-      - ./agent.py:/app/agent.py:ro
-      - ./:/app/source:ro
-      - /:/host:ro
-      - /var/log:/host_log:ro
-      - /run/user/1000/bus:/run/user/1000/bus
-      - ${HOME}/.config/systemd/user:/home/agent/.config/systemd/user
-      - /etc/machine-id:/etc/machine-id:ro
-      - /etc/localtime:/etc/localtime:ro
-
   worker:
     build: .
     image: agent
@@ -143,8 +104,6 @@ services:
     build: .
     image: agent
     container_name: agent-webui
-    profiles:
-      - web
     restart: unless-stopped
     init: true
     stop_grace_period: 20s
@@ -161,19 +120,19 @@ services:
       - TZ=${TZ:-America/Toronto}
       - WEBUI_HOST=${WEBUI_HOST:-127.0.0.1}
       - WEBUI_PORT=${WEBUI_PORT:-8080}
+      - AGENT_CREDENTIAL_DIR=/app/memory/credentials
+      - AGENT_CREDENTIAL_KEY=${AGENT_CREDENTIAL_KEY:-}
+      - AGENT_CREDENTIAL_KEY_FILE=${AGENT_CREDENTIAL_KEY_FILE:-}
+      - GOOGLE_OAUTH_REDIRECT_URI=${GOOGLE_OAUTH_REDIRECT_URI:-}
       - WEBUI_MAX_UPLOAD_BYTES=${WEBUI_MAX_UPLOAD_BYTES:-16777216}
       - WEBUI_XRESOURCES=/host${HOME}/.Xresources
       - WEBUI_WORKSPACE_LIST_LIMIT=${WEBUI_WORKSPACE_LIST_LIMIT:-250}
-    command:
-      - /bin/sh
-      - -lc
-      - exec python -m uvicorn webui.server:app --host "$${WEBUI_HOST:-127.0.0.1}" --port "$${WEBUI_PORT:-8080}" --proxy-headers
+    command: ["python", "-m", "webui"]
     volumes:
       - ./config:/app/config:ro
       - ./workspace:/app/workspace
       - ./memory:/app/memory
       - ./tools:/app/tools:ro
-      - ./agent.py:/app/agent.py:ro
       - ./webui:/app/webui:ro
       - ./:/app/source:ro
       - /:/host:ro

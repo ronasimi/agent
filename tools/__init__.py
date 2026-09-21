@@ -2,7 +2,7 @@
 
 Implementation details live in focused modules (``catalog``, ``providers``,
 ``tool_registry`` and domain tool modules).  Importing from ``tools`` remains
-backward compatible for the CLI, worker, Web UI, tests, and custom extensions.
+backward compatible for the worker, Web UI, tests, and custom extensions.
 """
 from .catalog import (
     ALL_TOOLS,

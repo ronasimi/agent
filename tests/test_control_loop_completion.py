@@ -1,4 +1,4 @@
-from agent import (
+from al_agent.runtime import (
     _refresh_requirement_tool_schemas,
     _suppress_completed_requirement_calls,
 )
@@ -56,7 +56,7 @@ def test_successful_completed_readonly_repeat_is_suppressed_after_all_work_finis
 
 
 def test_fallback_finalizer_preserves_latest_media(monkeypatch):
-    import agent
+    from al_agent import runtime as agent
 
     captured = {}
 

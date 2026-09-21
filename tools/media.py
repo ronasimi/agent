@@ -8,6 +8,7 @@ from typing import Any
 from .netutil import validate_public_url
 
 MEDIA_RESULT_MARKER = "__agent_media_result__"
+PROFILE_MEDIA_REFERENCE = "profile-image://current"
 WORKSPACE_ROOT = Path("/app/workspace")
 SUPPORTED_LOCAL_MEDIA = {".png", ".jpg", ".jpeg", ".webp", ".pdf"}
 
@@ -34,20 +35,52 @@ def unpack_media_result(result: Any) -> tuple[str, list[str]]:
     return str(result), []
 
 
+def resolve_profile_media(reference: str) -> Path | None:
+    """Resolve only the canonical durable profile image.
+
+    This deliberately does not make ``/app/memory`` a generally readable media
+    root. The stable logical reference and the exact configured profile-image
+    path are the only accepted non-workspace inputs.
+    """
+    value = str(reference or "").strip()
+    try:
+        from .user_profile import PROFILE_IMAGE_PATH
+
+        profile_path = PROFILE_IMAGE_PATH.resolve()
+        candidate = Path(value).resolve() if value and value != PROFILE_MEDIA_REFERENCE else profile_path
+        if value != PROFILE_MEDIA_REFERENCE and candidate != profile_path:
+            return None
+        if not profile_path.is_file():
+            raise FileNotFoundError("No profile image is configured.")
+        if profile_path.suffix.lower() not in SUPPORTED_LOCAL_MEDIA:
+            raise ValueError("The configured profile image has an unsupported media type.")
+        return profile_path
+    except (OSError, ValueError):
+        if value == PROFILE_MEDIA_REFERENCE:
+            raise
+        return None
+
+
 def _resolve_local_media(path: str) -> Path:
     value = str(path or "").strip()
     if not value:
         raise ValueError("A media path is required.")
 
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = WORKSPACE_ROOT / value.lstrip("/")
-    candidate = candidate.resolve()
-    root = WORKSPACE_ROOT.resolve()
-    try:
-        candidate.relative_to(root)
-    except ValueError as exc:
-        raise ValueError("Local media must be inside /app/workspace.") from exc
+    profile_path = resolve_profile_media(value)
+    if profile_path is not None:
+        candidate = profile_path
+    else:
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            candidate = WORKSPACE_ROOT / value.lstrip("/")
+        candidate = candidate.resolve()
+        root = WORKSPACE_ROOT.resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(
+                "Local media must be inside /app/workspace or be the current profile image."
+            ) from exc
 
     if candidate.suffix.lower() not in SUPPORTED_LOCAL_MEDIA:
         supported = ", ".join(sorted(SUPPORTED_LOCAL_MEDIA))
@@ -58,7 +91,7 @@ def _resolve_local_media(path: str) -> Path:
 
 
 def attach_media(path: str, context: str = "") -> dict[str, Any] | str:
-    """Attach a workspace image/PDF or public image URL for direct visual analysis by the main model."""
+    """Attach workspace media, the current profile image, or a public image URL for visual analysis."""
     value = str(path or "").strip()
     if not value:
         return "Error: a media path or URL is required."
@@ -67,7 +100,8 @@ def attach_media(path: str, context: str = "") -> dict[str, Any] | str:
         if value.startswith(("http://", "https://")):
             reference = validate_public_url(value)
         else:
-            reference = str(_resolve_local_media(value))
+            resolved = _resolve_local_media(value)
+            reference = PROFILE_MEDIA_REFERENCE if resolve_profile_media(value) is not None else str(resolved)
     except Exception as exc:
         return f"Error: {exc}"
 

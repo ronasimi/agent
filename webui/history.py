@@ -23,6 +23,8 @@ def _history(limit: int = 200, conversation_id: str | None = None) -> list[dict[
             entry["name"] = item["name"]
         if item.get("tool_calls"):
             entry["tool_calls"] = item["tool_calls"]
+        if item.get("media"):
+            entry["media"] = item["media"]
         clean.append(entry)
     return clean
 

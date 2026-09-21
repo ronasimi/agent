@@ -138,21 +138,29 @@ def rename_conversation(conversation_id: str, title: str) -> None:
         )
 
 
-def list_conversations(limit: int = 50) -> list[dict[str, Any]]:
+def list_conversations(
+    limit: int = 50, *, active_conversation_id: str | None = None
+) -> list[dict[str, Any]]:
     init_db()
     limit = max(1, min(int(limit), 200))
+    active_id = str(active_conversation_id or "").strip()[:128]
     with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
             SELECT c.id, c.title, c.created_at, c.updated_at,
                    (SELECT content FROM chat_history h WHERE h.conversation_id=c.id AND h.role='user' ORDER BY h.id LIMIT 1) AS first_user,
-                   (SELECT MAX(id) FROM chat_history h WHERE h.conversation_id=c.id) AS last_message_id
+                   (SELECT MAX(id) FROM chat_history h WHERE h.conversation_id=c.id) AS last_message_id,
+                   CASE WHEN c.id = ? THEN 0 ELSE 1 END AS active_rank
             FROM conversations c
-            ORDER BY c.updated_at DESC, COALESCE(last_message_id, 0) DESC
+            ORDER BY active_rank ASC,
+                     COALESCE(last_message_id, 0) DESC,
+                     c.updated_at DESC,
+                     c.created_at DESC,
+                     c.id DESC
             LIMIT ?
             """,
-            (limit,),
+            (active_id, limit),
         ).fetchall()
     result = []
     for row in rows:
@@ -160,7 +168,8 @@ def list_conversations(limit: int = 50) -> list[dict[str, Any]]:
         # Placeholder threads are created eagerly so the next user turn already
         # has a stable conversation_id, but an untouched blank thread is not a
         # saved conversation yet. Keep those placeholders out of the Recent list.
-        if int(row["last_message_id"] or 0) == 0 and (
+        is_active = bool(active_id and row["id"] == active_id)
+        if not is_active and int(row["last_message_id"] or 0) == 0 and (
             row["id"] == DEFAULT_CONVERSATION_ID or title in {"", "New conversation", "Current conversation"}
         ):
             continue
@@ -170,6 +179,7 @@ def list_conversations(limit: int = 50) -> list[dict[str, Any]]:
         result.append({
             "id": row["id"], "title": title, "created_at": row["created_at"],
             "updated_at": row["updated_at"], "last_message_id": int(row["last_message_id"] or 0),
+            "is_active": is_active,
         })
     return result
 
@@ -198,7 +208,7 @@ def _save_message_to_db(msg: dict, conversation_id: str | None = None) -> int:
     content = msg.get("content", "")
     name = msg.get("name") or msg.get("tool_name")
     extra_data = {}
-    for key in ("tool_calls", "tool_call_id"):
+    for key in ("tool_calls", "tool_call_id", "media"):
         if key in msg:
             extra_data[key] = msg[key]
     extra = json.dumps(extra_data, ensure_ascii=False) if extra_data else None

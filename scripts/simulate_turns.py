@@ -45,7 +45,7 @@ os.environ.setdefault("AGENT_CONFIG", os.path.join(REPO, "config", "config.yaml"
 
 from ollama._types import ChatResponse, Message
 
-import agent
+from al_agent import runtime as agent
 from al_agent import events as _events
 from al_agent import turn_support as _turn_support
 

@@ -32,14 +32,16 @@ def document_text(path: str, start_page: int = 1, end_page: int = 0, max_chars: 
         return text + ("\n[truncated]" if len(text)>=max_chars else "")
     except Exception as exc:return f"Error: document_text failed: {exc}"
 
-def render_document_page(path: str, page: int = 1, output: str = "") -> str:
+def render_document_page(path: str, page: int = 1, output: str = "") -> dict[str, Any] | str:
     """Render one PDF page to a PNG inside the workspace."""
     try:
         p=_safe_workspace(path); page=max(1,int(page)); out=_safe_workspace(output or f"{p.stem}-page-{page}.png")
         if not shutil.which("pdftoppm"):return "Error: pdftoppm is not installed."
         prefix=str(out.with_suffix("")); proc=subprocess.run(["pdftoppm","-f",str(page),"-singlefile","-png","-r","110",str(p),prefix],capture_output=True,text=True,timeout=30)
         if proc.returncode:return f"Error: pdftoppm failed: {proc.stderr.strip()}"
-        actual=Path(prefix+".png"); return _json({"path":str(actual),"page":page,"created":actual.exists()})
+        actual=Path(prefix+".png")
+        from ..media import media_result
+        return media_result(_json({"path":str(actual),"page":page,"created":actual.exists()}),[str(actual)])
     except Exception as exc:return f"Error: render_document_page failed: {exc}"
 
 def document_links(path: str, limit: int = 200) -> str:

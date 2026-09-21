@@ -15,3 +15,5 @@ venv/
 .vscode/
 *.swp
 *.swo
+
+/workspace/self_optimization/validation/outbox/
