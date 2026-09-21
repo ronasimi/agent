@@ -199,3 +199,32 @@ def test_maybe_reexec_uses_repo_venv_when_available(tmp_path, monkeypatch):
     assert called["argv"][0] == str(venv_python.resolve())
     assert called["argv"][-2:] == ["--duration", "1h"]
     assert called["env"]["AGENT_VENV_REEXEC"] == "1"
+
+
+def test_default_run_is_five_passes_without_duration_limit():
+    args = soak.parse_args([])
+    assert args.passes == 5
+    assert args.duration == 0.0
+
+
+def test_pass_fixture_profiles_rotate_deterministically(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    first = soak.create_fixtures(workspace / "p1", workspace, pass_no=1)
+    second = soak.create_fixtures(workspace / "p2", workspace, pass_no=2)
+    sixth = soak.create_fixtures(workspace / "p6", workspace, pass_no=6)
+    assert first["profile"] != second["profile"]
+    assert first["expression"] != second["expression"]
+    assert first["endpoint_tls"] is False and second["endpoint_tls"] is True
+    assert sixth["profile"] == first["profile"]
+
+
+def test_process_fixture_uses_probeable_same_uid_process(tmp_path):
+    from tools.primitive_modules import process as process_ops
+    proc = soak._start_process_fixture(tmp_path, 1)
+    try:
+        assert not process_ops.process_info(proc.pid).startswith("Error:")
+        assert not process_ops.process_io(proc.pid).startswith("Error:")
+        assert not process_ops.process_fds(proc.pid, 10).startswith("Error:")
+    finally:
+        soak._stop_process_fixture(proc)

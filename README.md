@@ -670,13 +670,13 @@ If you previously told the agent that an uploaded image was a photo of you, the 
 
 Use the project under the terms of the repository's license, if present.
 
-### Long-running tool / primitive / recipe soak test
+### Tool / primitive / recipe soak test
 
-Use `scripts/soak_test_tools.py` to repeatedly exercise the complete tool registry and compatibility recipes with per-call process isolation, timeout protection, latency/error metrics, periodic checkpoints, and a final Markdown/JSON/CSV report. On a fresh clone/ZIP, run `./scripts/bootstrap_venv.sh` once first. The soak runner automatically re-execs under `.venv/bin/python`, so activation is optional. A typical unattended run is:
+Use `scripts/soak_test_tools.py` to exercise the complete tool registry and compatibility recipes with per-call process isolation, timeout protection, latency/error metrics, periodic checkpoints, and a final Markdown/JSON/CSV report. Because harness primitives intentionally use the production `/app` namespace, run it in the worker container. The convenience wrapper performs the recommended **5 deterministic passes** with fresh per-pass fixtures/state:
 
 ```bash
-./scripts/bootstrap_venv.sh   # first run only
-python scripts/soak_test_tools.py --duration 24h --workers 2 --mutating-mode isolated
+docker compose up -d --build
+./scripts/run_soak_test.sh
 ```
 
-See [`TOOL_SOAK_TESTING.md`](TOOL_SOAK_TESTING.md) for safety modes, resume support, report fields, and focused-run examples.
+See [`TOOL_SOAK_TESTING.md`](TOOL_SOAK_TESTING.md) for pass profiles, safety modes, resume support, report fields, duration-only stress mode, and focused-run examples.

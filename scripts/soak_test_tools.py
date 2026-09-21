@@ -107,6 +107,25 @@ def _preflight_repository_dependencies() -> tuple[bool, list[str]]:
     missing = _missing_declared_dependencies()
     return (not missing, missing)
 
+def _runtime_context_preflight() -> tuple[bool, str]:
+    """Require the production container namespace for meaningful runtime probes."""
+    try:
+        root = ROOT.resolve()
+    except OSError:
+        root = ROOT
+    if root == Path("/app") and Path("/app/workspace").is_dir():
+        return True, ""
+    if os.environ.get("TOOL_SOAK_ALLOW_HOST_RUNTIME") == "1":
+        return True, ""
+    return False, (
+        "Tool soak runtime probes must run inside the Compose worker container so /app, "
+        "/app/workspace, /app/memory, /host, and the production PID namespace match the harness.\n"
+        "Start the stack and run:\n"
+        "  ./scripts/run_soak_test.sh\n"
+        "or:\n"
+        "  docker compose exec -w /app worker python scripts/soak_test_tools.py --workers 2 --mutating-mode isolated"
+    )
+
 # Mutators that can be pointed at the audit DB/profile or confined to an audit
 # subdirectory under the workspace.  The remaining mutators are contract-only
 # unless --mutating-mode all is explicitly selected.
@@ -144,6 +163,7 @@ ERROR_HINTS = {
     "dependency": (
         "not installed", "not available", "unavailable", "missing dependency",
         "command not found", "no such file or directory", "no module named",
+        "try pulling it first", "embedding generation failed",
     ),
     "network": (
         "timed out", "timeout", "connection refused", "network is unreachable",
@@ -170,6 +190,35 @@ PNG_1X1 = base64.b64decode(
 # avoids adding a binary test asset to the repository.
 MINIMAL_PDF = b"""%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 144]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj\n4 0 obj<</Length 41>>stream\nBT /F1 18 Tf 50 80 Td (audit) Tj ET\nendstream endobj\n5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\nxref\n0 6\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \n0000000250 00000 n \n0000000340 00000 n \ntrailer<</Size 6/Root 1 0 R>>\nstartxref\n410\n%%EOF\n"""
 
+
+
+PASS_PROFILES: tuple[dict[str, Any], ...] = (
+    {
+        "label": "baseline", "expression": "6*7", "hash_text": "audit-one",
+        "wiki_query": "Linux", "web_query": "OpenAI", "news_query": "technology headlines",
+        "endpoint_tls": False, "http_url": "http://example.com/", "base64_text": "audit-one",
+    },
+    {
+        "label": "alternate", "expression": "84/2", "hash_text": "audit-two",
+        "wiki_query": "Python (programming language)", "web_query": "Python programming language", "news_query": "science headlines",
+        "endpoint_tls": True, "http_url": "https://example.com/", "base64_text": "audit-two",
+    },
+    {
+        "label": "minimal", "expression": "1+1", "hash_text": "x",
+        "wiki_query": "SQLite", "web_query": "SQLite database", "news_query": "business headlines",
+        "endpoint_tls": False, "http_url": "http://example.com/", "base64_text": "x",
+    },
+    {
+        "label": "unicode", "expression": "(5+7)*3", "hash_text": "audit-π",
+        "wiki_query": "Unicode", "web_query": "Unicode standard", "news_query": "world headlines",
+        "endpoint_tls": True, "http_url": "https://example.com/", "base64_text": "audit-π",
+    },
+    {
+        "label": "boundary", "expression": "1000-958", "hash_text": "audit-five",
+        "wiki_query": "Computer network", "web_query": "computer networking", "news_query": "health headlines",
+        "endpoint_tls": True, "http_url": "https://example.com/", "base64_text": "audit-five",
+    },
+)
 
 @dataclass
 class Target:
@@ -221,46 +270,59 @@ def _workspace_root() -> Path:
     return fallback.resolve()
 
 
-def create_fixtures(base: Path, workspace: Path | None = None) -> dict[str, Any]:
+def create_fixtures(base: Path, workspace: Path | None = None, pass_no: int = 1) -> dict[str, Any]:
+    """Create deterministic, pass-specific fixtures for broader repeat coverage."""
     base.mkdir(parents=True, exist_ok=True)
+    profile = dict(PASS_PROFILES[(max(1, int(pass_no)) - 1) % len(PASS_PROFILES)])
+    label = str(profile["label"])
+    value_b = max(2, int(pass_no) + 1)
+
     text_path = base / "sample.txt"
-    text_path.write_text("alpha\nbeta\nbeta\ngamma 42\n", encoding="utf-8")
+    text_path.write_text(f"alpha\nbeta\n{label}\ngamma {40 + value_b}\n", encoding="utf-8")
     json_path = base / "sample.json"
-    json_path.write_text(json.dumps({"items": [{"name": "alpha", "value": 1}, {"name": "beta", "value": 2}], "ok": True}), encoding="utf-8")
+    json_path.write_text(json.dumps({"items": [{"name": "alpha", "value": 1}, {"name": "beta", "value": value_b}], "ok": True, "pass": int(pass_no)}), encoding="utf-8")
     yaml_path = base / "sample.yaml"
-    yaml_path.write_text("ok: true\nitems:\n  - name: alpha\n    value: 1\n", encoding="utf-8")
+    yaml_path.write_text(f"ok: true\npass: {int(pass_no)}\nitems:\n  - name: alpha\n    value: 1\n", encoding="utf-8")
     csv_path = base / "sample.csv"
-    csv_path.write_text("name,value\nalpha,1\nbeta,2\n", encoding="utf-8")
+    csv_path.write_text(f"name,value\nalpha,1\nbeta,{value_b}\n", encoding="utf-8")
     jsonl_path = base / "sample.jsonl"
-    jsonl_path.write_text('{"name":"alpha","value":1}\n{"name":"beta","value":2}\n', encoding="utf-8")
+    jsonl_path.write_text(f'{{"name":"alpha","value":1}}\n{{"name":"beta","value":{value_b}}}\n', encoding="utf-8")
     html_path = base / "sample.html"
-    html = """<!doctype html><html><head><title>Audit fixture</title><meta name=description content='audit'></head>
-<body><main><h1>Audit</h1><p>Tool soak fixture.</p><a href='/next'>Next</a><img src='/image.png' alt='x'>
-<script type='application/ld+json'>{"@type":"Article","headline":"Audit"}</script>
-<table><tr><th>Name</th><th>Value</th></tr><tr><td>alpha</td><td>1</td></tr></table></main></body></html>"""
+    html = f"""<!doctype html><html><head><title>Audit fixture {pass_no}</title><meta name=description content='audit {label}'></head>
+<body><main><h1>Audit {pass_no}</h1><p>Tool soak fixture {label}.</p><a href='/next'>Next</a><img src='/image.png' alt='x'>
+<script type='application/ld+json'>{{"@type":"Article","headline":"Audit {pass_no}"}}</script>
+<table><tr><th>Name</th><th>Value</th></tr><tr><td>alpha</td><td>{value_b}</td></tr></table></main></body></html>"""
     html_path.write_text(html, encoding="utf-8")
     feed_path = base / "feed.xml"
-    feed_path.write_text("""<?xml version='1.0'?><rss version='2.0'><channel><title>Audit</title><item><title>One</title><link>https://example.com/one</link><description>audit</description></item></channel></rss>""", encoding="utf-8")
+    feed_path.write_text(f"""<?xml version='1.0'?><rss version='2.0'><channel><title>Audit {pass_no}</title><item><title>One {pass_no}</title><link>https://example.com/one</link><description>{label}</description></item></channel></rss>""", encoding="utf-8")
     image_path = base / "sample.png"
     try:
         from PIL import Image
-        Image.new("RGB", (8, 8)).save(image_path, format="PNG")
+        Image.new("RGB", (8 + (int(pass_no) % 3), 8 + (int(pass_no) % 2))).save(image_path, format="PNG")
     except Exception:
         image_path.write_bytes(PNG_1X1)
     pdf_path = base / "sample.pdf"
     pdf_path.write_bytes(MINIMAL_PDF)
     zip_path = base / "sample.zip"
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("inside.txt", "audit archive\n")
+        archive.writestr(f"inside-{int(pass_no)}.txt", f"audit archive {label}\n")
     db_path = base / "sample.sqlite"
     with sqlite3.connect(db_path) as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS items(id INTEGER PRIMARY KEY, name TEXT, value REAL)")
         conn.execute("DELETE FROM items")
-        conn.executemany("INSERT INTO items(name,value) VALUES(?,?)", [("alpha", 1.0), ("beta", 2.0)])
+        conn.executemany("INSERT INTO items(name,value) VALUES(?,?)", [("alpha", 1.0), ("beta", float(value_b))])
         conn.commit()
     workspace = (workspace or _workspace_root()).resolve()
     relative_base = str(base.resolve().relative_to(workspace)) if _is_relative_to(base, workspace) else str(base.resolve())
+    base64_text = str(profile["base64_text"])
     return {
+        "pass_no": int(pass_no), "profile": label,
+        "expression": str(profile["expression"]), "hash_text": str(profile["hash_text"]),
+        "wiki_query": str(profile["wiki_query"]), "web_query": str(profile["web_query"]),
+        "news_query": str(profile["news_query"]), "endpoint_tls": bool(profile["endpoint_tls"]),
+        "http_url": str(profile["http_url"]), "base64_text": base64_text,
+        "base64_data": base64.b64encode(base64_text.encode("utf-8")).decode("ascii"),
+        "feed_url": "https://feeds.bbci.co.uk/news/rss.xml", "host_file": "/etc/os-release",
         "base": str(base), "relative_base": relative_base, "text": str(text_path), "json": str(json_path), "yaml": str(yaml_path),
         "csv": str(csv_path), "jsonl": str(jsonl_path), "html_path": str(html_path),
         "html": html, "feed": feed_path.read_text(encoding="utf-8"), "image": str(image_path),
@@ -277,45 +339,45 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
         return False
 
 
-def _seed_isolated_state(env: dict[str, str]) -> dict[str, str]:
-    """Seed IDs needed by read-only lookup tools in the isolated audit DB."""
+def _seed_isolated_state(env: dict[str, str], pass_no: int = 1) -> dict[str, Any]:
+    """Seed fresh IDs needed by stateful probes for one soak pass."""
     old = os.environ.copy()
     os.environ.update(env)
-    ids: dict[str, str] = {}
+    ids: dict[str, Any] = {}
+    suffix = f"pass-{max(1, int(pass_no)):03d}"
     try:
         # Modules read AGENT_DB_PATH at import time, so do this before importing.
         from tools.runtime import create_job, init_runtime_db
         init_runtime_db()
-        ids["job_id"] = create_job("audit", "Tool soak audit fixture", {"audit": True}, max_attempts=1)
+        ids["job_id"] = create_job("audit", f"Tool soak audit fixture {suffix}", {"audit": True, "pass": int(pass_no)}, max_attempts=1)
         from tools.memory import init_db, remember, store_tool_observation
         init_db()
-        remember("tool-soak-audit", "tool soak audit synthetic fact")
-        ids["observation_old"] = store_tool_observation("audit", '{"value":1}')
-        ids["observation_new"] = store_tool_observation("audit", '{"value":2}')
+        remember(f"tool-soak-audit-{suffix}", f"tool soak audit synthetic fact {suffix}")
+        ids["observation_old"] = store_tool_observation("audit", json.dumps({"value": int(pass_no), "phase": "old"}))
+        ids["observation_new"] = store_tool_observation("audit", json.dumps({"value": int(pass_no) + 1, "phase": "new"}))
 
         # Seed positive-path IDs for lookup tools so their normal success path is
         # exercised instead of deliberately asking for missing objects.
         from tools.task_manager import create_task, log_task
-        ids["task_id"] = create_task("Tool soak audit task", "Synthetic task fixture", priority=-100)
-        log_task("tool soak audit log fixture", ids["task_id"])
+        ids["task_id"] = create_task(f"Tool soak audit task {suffix}", "Synthetic task fixture", priority=-100)
+        log_task(f"tool soak audit log fixture {suffix}", ids["task_id"])
 
         from tools.runtime import create_optimization_candidate
         ids["candidate_id"] = create_optimization_candidate(
-            ids["job_id"], "Tool soak audit candidate", "synthetic_metric"
+            ids["job_id"], f"Tool soak audit candidate {suffix}", "synthetic_metric"
         )
 
         # The legacy work queue predates AGENT_DB_PATH and keeps a module-global
         # absolute DB path. Patch that global only in the soak process, point it
-        # at the isolated audit DB, and seed a completed result. Child workers do
-        # the same redirection in _apply_soak_isolation().
+        # at the isolated audit DB, and seed a completed result.
         from tools import work_queue
         work_queue.DB_PATH = env["AGENT_DB_PATH"]
         work_queue.init_work_queue_db()
         ids["work_id"] = work_queue.queue_work(
-            "Tool soak audit work", "Synthetic work queue fixture", priority=-100,
-            tags=["audit"], estimated_hours=0.01,
+            f"Tool soak audit work {suffix}", "Synthetic work queue fixture", priority=-100,
+            tags=["audit", suffix], estimated_hours=0.01,
         )
-        work_queue.mark_work_complete(ids["work_id"], "Synthetic audit result", "Synthetic audit full result")
+        work_queue.mark_work_complete(ids["work_id"], f"Synthetic audit result {suffix}", f"Synthetic audit full result {suffix}")
 
         # Seed a custom source file for the read/list custom-tool primitives.
         custom_dir = Path(env["TOOL_SOAK_CUSTOM_TOOLS_DIR"])
@@ -325,7 +387,7 @@ def _seed_isolated_state(env: dict[str, str]) -> dict[str, str]:
             "@agent_tool(readonly=True)\n"
             "def audit_fixture_tool() -> str:\n"
             "    \"\"\"Synthetic soak-test fixture.\"\"\"\n"
-            "    return 'audit'\n",
+            f"    return 'audit {suffix}'\n",
             encoding="utf-8",
         )
     except Exception as exc:
@@ -333,6 +395,40 @@ def _seed_isolated_state(env: dict[str, str]) -> dict[str, str]:
     finally:
         os.environ.clear(); os.environ.update(old)
     return ids
+
+
+def _start_process_fixture(base: Path, pass_no: int) -> subprocess.Popen:
+    """Start a same-UID process whose metadata, I/O, and open files are probeable."""
+    marker = base / "process-fixture.txt"
+    code = (
+        "import pathlib,sys,time; "
+        "p=pathlib.Path(sys.argv[1]); "
+        "f=p.open('a+', encoding='utf-8'); "
+        "f.write('tool-soak-process\n'); f.flush(); "
+        "time.sleep(3600)"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", code, str(marker)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    # Give /proc enough time to expose the child before the first process probe.
+    time.sleep(0.05)
+    return proc
+
+
+def _stop_process_fixture(proc: subprocess.Popen | None) -> None:
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=2)
+    except Exception:
+        try:
+            proc.kill()
+            proc.wait(timeout=1)
+        except Exception:
+            pass
 
 
 def build_env(report_dir: Path, workspace: Path) -> dict[str, str]:
@@ -474,7 +570,7 @@ def _default_from_schema(spec: dict[str, Any]) -> Any:
     return "audit"
 
 
-def _required_value(name: str, spec: dict[str, Any], fixtures: dict[str, Any], ids: dict[str, str]) -> Any:
+def _required_value(name: str, spec: dict[str, Any], fixtures: dict[str, Any], ids: dict[str, Any]) -> Any:
     # Exact semantic fixtures first.
     values: dict[str, Any] = {
         "fact": "tool soak audit synthetic fact",
@@ -495,9 +591,9 @@ def _required_value(name: str, spec: dict[str, Any], fixtures: dict[str, Any], i
         "path": fixtures["text"],
         "database": fixtures["db"],
         "table": "items",
-        "pid": 1,
+        "pid": int(ids.get("process_pid") or os.getpid()),
         "port": 443,
-        "expression": "6*7",
+        "expression": fixtures.get("expression", "6*7"),
         "value": 1,
         "from_unit": "km",
         "to_unit": "m",
@@ -548,9 +644,12 @@ def _required_value(name: str, spec: dict[str, Any], fixtures: dict[str, Any], i
     return _default_from_schema(spec)
 
 
-def tool_args(target: Target, fixtures: dict[str, Any], ids: dict[str, str]) -> dict[str, Any]:
+def tool_args(target: Target, fixtures: dict[str, Any], ids: dict[str, Any]) -> dict[str, Any]:
     properties, required = _schema_parameters(target)
     args = {name: _required_value(name, properties.get(name, {}), fixtures, ids) for name in required}
+    process_pid = int(ids.get("process_pid") or os.getpid())
+    endpoint_tls = bool(fixtures.get("endpoint_tls", False))
+    endpoint_port = 443 if endpoint_tls else 80
 
     # Tool-specific arguments improve meaningful path coverage while remaining bounded.
     exact: dict[str, dict[str, Any]] = {
@@ -591,7 +690,7 @@ def tool_args(target: Target, fixtures: dict[str, Any], ids: dict[str, str]) -> 
         "json_sort": {"key": "value", "data": [{"name":"beta","value":2},{"name":"alpha","value":1}], "limit": 10},
         "json_diff": {"a": {"a": 1}, "b": {"a": 2}},
         "list_processes": {"limit": 5},
-        "process_info": {"pid": 1},
+        "process_info": {"pid": process_pid},
         "resolve_host": {"host": "example.com"},
         "route_lookup": {"target": "1.1.1.1"},
         "tcp_connect": {"host": "example.com", "port": 443, "timeout": 3},
@@ -602,7 +701,7 @@ def tool_args(target: Target, fixtures: dict[str, Any], ids: dict[str, str]) -> 
         "render_document_page": {"path": fixtures["pdf"], "page": 1, "output": f"{fixtures['relative_base']}/rendered.png"},
         "image_info": {"path": fixtures["image"]},
         "archive_list": {"path": fixtures["zip"], "limit": 20},
-        "calculate": {"expression": "6*7"},
+        "calculate": {"expression": fixtures.get("expression", "6*7")},
         "parse_datetime": {"value": "2026-09-21T12:00:00+00:00"},
         "time_difference": {"a": "2026-09-21T12:00:00+00:00", "b": "2026-09-21T13:00:00+00:00"},
         "url_parse": {"url": "https://example.com/a?b=1"},
@@ -610,9 +709,9 @@ def tool_args(target: Target, fixtures: dict[str, Any], ids: dict[str, str]) -> 
         "ip_parse": {"address": "192.0.2.1"},
         "subnet_contains": {"network": "192.0.2.0/24", "address": "192.0.2.1"},
         "command_available": {"name": "python"},
-        "process_io": {"pid": 1},
-        "process_threads": {"pid": 1, "limit": 10},
-        "process_fds": {"pid": 1, "limit": 10},
+        "process_io": {"pid": process_pid},
+        "process_threads": {"pid": process_pid, "limit": 10},
+        "process_fds": {"pid": process_pid, "limit": 10},
         "pressure_info": {"resource": "cpu"},
         "interface_info": {"name": "lo"},
         "udp_probe": {"host": "127.0.0.1", "port": 9, "timeout": 1},
@@ -634,9 +733,9 @@ def tool_args(target: Target, fixtures: dict[str, Any], ids: dict[str, str]) -> 
         "db_schema": {"database": fixtures["db"], "table": "items"},
         "db_select": {"database": fixtures["db"], "table": "items", "limit": 5},
         "convert_units": {"value": 1, "from_unit": "km", "to_unit": "m"},
-        "hash_text": {"text": "audit", "algorithm": "sha256"},
-        "base64_encode": {"text": "audit"},
-        "base64_decode": {"data": "YXVkaXQ="},
+        "hash_text": {"text": fixtures.get("hash_text", "audit"), "algorithm": "sha256"},
+        "base64_encode": {"text": fixtures.get("base64_text", "audit")},
+        "base64_decode": {"data": fixtures.get("base64_data", "YXVkaXQ=")},
         "compare_values": {"a": 1, "b": 1},
         "compare_json": {"a": {"a": 1}, "b": {"a": 1}},
         "compare_text": {"a": "audit", "b": "audit"},
@@ -669,11 +768,11 @@ def tool_args(target: Target, fixtures: dict[str, Any], ids: dict[str, str]) -> 
         "parse_feed": {"xml_text": fixtures["feed"], "url": "https://example.com/feed.xml", "limit": 10},
         "fetch_json": {"url": "https://httpbin.org/json", "max_bytes": 100000},
         "extract_tables": {"html": fixtures["html"], "limit": 5, "max_rows": 10},
-        "process_tree": {"pid": 1, "depth": 2, "limit": 20},
+        "process_tree": {"pid": process_pid, "depth": 2, "limit": 20},
         "ping_host": {"host": "127.0.0.1", "count": 1, "timeout": 2},
         "diff_observations": {"old_id": ids.get("observation_old", "audit-old"), "new_id": ids.get("observation_new", "audit-new"), "max_diff_chars": 2000},
         "network_reachability": {"targets": ["1.1.1.1", "example.com"]},
-        "read_host_file": {"filepath": "/etc/os-release"},
+        "read_host_file": {"filepath": fixtures.get("host_file", "/etc/os-release")},
         "read_host_journal": {"lines": 5},
         "tail_host_log": {"log_path": "/var/log/syslog", "lines": 5},
         "process_snapshot": {"limit": 5, "sort_by": "cpu"},
@@ -683,23 +782,23 @@ def tool_args(target: Target, fixtures: dict[str, Any], ids: dict[str, str]) -> 
         "connection_snapshot": {"limit": 10},
         "dns_diagnose": {"name": "example.com", "record_types": ["A", "AAAA"]},
         "network_path": {"target": "1.1.1.1", "max_hops": 5, "probes": 1},
-        "endpoint_probe": {"host": "example.com", "port": 443, "tls": True, "timeout": 5},
-        "http_probe": {"url": "https://example.com/", "timeout": 8},
+        "endpoint_probe": {"host": "example.com", "port": endpoint_port, "tls": endpoint_tls, "timeout": 5},
+        "http_probe": {"url": fixtures.get("http_url", "https://example.com/"), "timeout": 8},
         "local_subnets": {"include_virtual": False},
         "scan_subnet": {"network": "127.0.0.0/30", "max_detail_hosts": 2, "top_ports": 20},
         "map_network": {"network": "127.0.0.0/30", "output_filename": f"tool-soak-{Path(fixtures['base']).name}-network.png", "max_detail_hosts": 2, "top_ports": 20},
         "scan_mdns": {"timeout": 1},
         "geocode_location": {"query": "London, Ontario, Canada", "count": 1, "language": "en"},
         "weather_forecast": {"latitude": 42.9849, "longitude": -81.2453, "forecast_days": 2, "timezone_name": "America/Toronto"},
-        "web_search": {"query": "OpenAI"},
-        "news_search": {"query": "technology headlines", "timelimit": "d", "max_results": 5},
-        "wiki_search": {"query": "Linux"},
+        "web_search": {"query": fixtures.get("web_query", "OpenAI")},
+        "news_search": {"query": fixtures.get("news_query", "technology headlines"), "timelimit": "d", "max_results": 5},
+        "wiki_search": {"query": fixtures.get("wiki_query", "Linux")},
         "market_quote": {"instruments": ["BZ=F", "CL=F"]},
         "browse_url": {"url": "https://example.com/"},
         "page_metadata": {"url": "https://example.com/"},
         "page_links": {"url": "https://example.com/", "limit": 10},
         "discover_site": {"url": "https://example.com/", "limit": 10},
-        "read_feed": {"url": "https://feeds.bbci.co.uk/news/rss.xml", "limit": 5},
+        "read_feed": {"url": fixtures.get("feed_url", "https://feeds.bbci.co.uk/news/rss.xml"), "limit": 5},
         "extract_document": {"path_or_url": fixtures["pdf"], "max_pages": 2, "max_chars": 4000},
         "page_fingerprint": {"url": "https://example.com/"},
         "page_diff": {"url": "https://example.com/", "max_diff_chars": 2000},
@@ -737,7 +836,7 @@ def tool_args(target: Target, fixtures: dict[str, Any], ids: dict[str, str]) -> 
     return args
 
 
-def _recipe_default_params(recipe: dict[str, Any], fixtures: dict[str, Any], ids: dict[str, str]) -> dict[str, Any]:
+def _recipe_default_params(recipe: dict[str, Any], fixtures: dict[str, Any], ids: dict[str, Any]) -> dict[str, Any]:
     params: dict[str, Any] = {}
     fixture_override_keys = {"old_id", "new_id", "path_or_url"}
     for key, spec in dict(recipe.get("parameters") or {}).items():
@@ -763,10 +862,22 @@ def _recipe_default_params(recipe: dict[str, Any], fixtures: dict[str, Any], ids
         elif isinstance(value, list):
             for nested in value: walk(nested)
     walk(recipe.get("pipeline") or [])
+
+    # Exercise meaningful alternate branches while keeping every pass valid.
+    recipe_name = str(recipe.get("name") or "")
+    if recipe_name == "compat.endpoint_probe":
+        use_tls = bool(fixtures.get("endpoint_tls", False))
+        params.update({"host": "example.com", "port": 443 if use_tls else 80, "tls": use_tls, "timeout": 5.0})
+    elif recipe_name == "compat.http_probe":
+        params.update({"url": fixtures.get("http_url", "https://example.com/"), "timeout": 8.0, "allow_private": False})
+    elif recipe_name == "compat.read_feed":
+        params.update({"url": fixtures.get("feed_url", "https://feeds.bbci.co.uk/news/rss.xml"), "limit": 5})
+    elif recipe_name == "compat.read_host_file":
+        params.update({"filepath": fixtures.get("host_file", "/etc/os-release")})
     return params
 
 
-def contract_check(target: Target, fixtures: dict[str, Any], ids: dict[str, str]) -> tuple[bool, str, dict[str, Any]]:
+def contract_check(target: Target, fixtures: dict[str, Any], ids: dict[str, Any]) -> tuple[bool, str, dict[str, Any]]:
     if target.kind.startswith("recipe_"):
         recipe = target.recipe or {}
         pipeline = recipe.get("pipeline")
@@ -845,7 +956,7 @@ def inventory_target(target: Target) -> dict[str, Any]:
     return row
 
 
-def _worker_request(target: Target, args: dict[str, Any], fixtures: dict[str, Any], ids: dict[str, str]) -> dict[str, Any]:
+def _worker_request(target: Target, args: dict[str, Any], fixtures: dict[str, Any], ids: dict[str, Any]) -> dict[str, Any]:
     return {
         "target": {"kind": target.kind, "name": target.name, "module": target.module, "readonly": target.readonly, "recipe": target.recipe},
         "args": args, "fixtures": fixtures, "ids": ids,
@@ -921,7 +1032,7 @@ def worker_main() -> int:
     return 0
 
 
-def invoke_child(target: Target, args: dict[str, Any], fixtures: dict[str, Any], ids: dict[str, str], env: dict[str, str], timeout: float) -> dict[str, Any]:
+def invoke_child(target: Target, args: dict[str, Any], fixtures: dict[str, Any], ids: dict[str, Any], env: dict[str, str], timeout: float) -> dict[str, Any]:
     request = _worker_request(target, args, fixtures, ids)
     started = time.perf_counter()
     command = [sys.executable, str(Path(__file__).resolve()), "--_worker"]
@@ -1182,8 +1293,8 @@ def _matches(name: str, include: list[str], exclude: list[str]) -> bool:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--duration", type=parse_duration, default=parse_duration("24h"), help="Maximum soak duration")
-    parser.add_argument("--passes", type=int, default=0, help="Maximum complete passes; 0 means duration-only")
+    parser.add_argument("--duration", type=parse_duration, default=0.0, help="Optional hard outer duration; 0 disables the duration limit")
+    parser.add_argument("--passes", type=int, default=5, help="Maximum complete passes; 0 means duration-only and requires --duration")
     parser.add_argument("--per-call-timeout", type=parse_duration, default=parse_duration("45s"), help="Controller timeout per child probe")
     parser.add_argument("--slow-call-timeout", type=parse_duration, default=parse_duration("90s"), help="Timeout used for known slow probes")
     parser.add_argument("--interval", type=float, default=0.05, help="Sleep between probe submissions/completions")
@@ -1208,6 +1319,10 @@ def controller_main(args: argparse.Namespace) -> int:
     if not ok:
         print(_dependency_preflight_message(missing), file=sys.stderr)
         return 2
+    runtime_ok, runtime_message = _runtime_context_preflight()
+    if not runtime_ok:
+        print(runtime_message, file=sys.stderr)
+        return 2
 
     workspace = _workspace_root()
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1219,10 +1334,10 @@ def controller_main(args: argparse.Namespace) -> int:
         return 2
 
     # Workspace primitives still intentionally enforce /app/workspace. Keep all
-    # file mutations inside one disposable audit subtree rather than redirecting
-    # the whole harness workspace to a path legacy primitives would reject.
-    fixture_dir = workspace / "tool_soak" / stamp
-    fixtures = create_fixtures(fixture_dir, workspace)
+    # file mutations inside one disposable audit subtree, with a fresh fixture
+    # directory for every pass so state/file probes do not contaminate later runs.
+    fixture_root = workspace / "tool_soak" / stamp
+    fixture_root.mkdir(parents=True, exist_ok=True)
     env = build_env(report_dir, workspace)
 
     # Read user recipes directly before importing tools. This is important: the
@@ -1244,11 +1359,11 @@ def controller_main(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    ids = _seed_isolated_state(env)
     inventory.update({
-        "seed_state": ids, "mutating_mode": args.mutating_mode, "report_dir": str(report_dir),
-        "harness_workspace": str(workspace), "audit_workspace": str(fixture_dir),
+        "seed_state": {"strategy": "fresh_per_pass"}, "mutating_mode": args.mutating_mode, "report_dir": str(report_dir),
+        "harness_workspace": str(workspace), "audit_workspace": str(fixture_root),
         "source_recipe_db": active_recipe_db, "workers": max(1, int(args.workers)),
+        "pass_profiles": [str(profile["label"]) for profile in PASS_PROFILES],
     })
 
     if args.no_recipes:
@@ -1311,9 +1426,20 @@ def controller_main(args: argparse.Namespace) -> int:
             except (ValueError, TypeError, json.JSONDecodeError):
                 pass
 
+    if int(args.passes) < 0:
+        print("--passes must be >= 0.", file=sys.stderr)
+        return 2
+    if int(args.passes) == 0 and float(args.duration) <= 0:
+        print("At least one stopping condition is required: use --passes > 0 or --duration > 0.", file=sys.stderr)
+        return 2
+
     started_mono = time.monotonic()
-    deadline = started_mono + float(args.duration)
+    duration_limit = float(args.duration)
+    deadline = started_mono + duration_limit if duration_limit > 0 else None
     stop = {"requested": False, "signal": ""}
+
+    def within_deadline() -> bool:
+        return deadline is None or time.monotonic() < deadline
 
     def request_stop(signum, _frame):
         stop["requested"] = True
@@ -1322,7 +1448,9 @@ def controller_main(args: argparse.Namespace) -> int:
         signal.signal(sig, request_stop)
 
     workers = max(1, int(args.workers))
-    print(f"Tool soak: {len(targets)} targets; duration={args.duration:.0f}s; mutating={args.mutating_mode}; workers={workers}")
+    duration_label = "none" if deadline is None else f"{duration_limit:.0f}s"
+    pass_label = "duration-only" if not args.passes else str(int(args.passes))
+    print(f"Tool soak: {len(targets)} targets; passes={pass_label}; duration={duration_label}; mutating={args.mutating_mode}; workers={workers}")
     print(f"Reports: {report_dir}")
     if metrics.probes:
         print(f"Resumed {metrics.probes} prior probe records.")
@@ -1353,7 +1481,7 @@ def controller_main(args: argparse.Namespace) -> int:
                 print(f"-- checkpoint: probes={checkpoint['totals']['probes']} success_rate={(checkpoint['totals'].get('success_rate') or 0)*100:.1f}% --")
                 last_checkpoint = now
 
-        while not stop["requested"] and time.monotonic() < deadline:
+        while not stop["requested"] and within_deadline():
             pass_no = next_pass
             if args.passes and pass_no > args.passes:
                 break
@@ -1361,63 +1489,79 @@ def controller_main(args: argparse.Namespace) -> int:
             resume_entries = None
             next_pass = pass_no + 1
             suffix = " (resume)" if len(entries) != len(all_entries) else ""
-            print(f"\n=== pass {pass_no}{suffix} ===")
-            cursor = 0
-            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="tool-soak") as pool:
-                # Submit only one worker-sized batch at a time. This prevents a
-                # Ctrl-C or duration deadline from leaving hundreds of queued
-                # probes that still have to run before shutdown.
-                while cursor < len(entries) and not stop["requested"] and time.monotonic() < deadline:
-                    batch = entries[cursor:cursor + workers]
-                    cursor += len(batch)
-                    pending: dict[Any, tuple[Target, int, dict[str, Any], bool]] = {}
-                    for index, target in batch:
-                        contract_ok, contract_reason, probe_args = contract_check(target, fixtures, ids)
-                        base = {
-                            "timestamp": utc_now(), "pass": pass_no, "ordinal": index, "kind": target.kind,
-                            "name": target.name, "module": target.module, "readonly": target.readonly, "args": _redact(probe_args),
-                        }
-                        if not contract_ok:
-                            record({**base, "status": "contract_error", "reason": contract_reason, "latency_ms": 0.0, "output_bytes": 0, "output_preview": ""}, target, index)
-                        else:
-                            action = "invoke" if target.kind.startswith("recipe_") else _mutation_action(target, args.mutating_mode)
-                            if action == "contract_only":
-                                record({**base, "status": "skipped", "reason": "mutating_contract_only", "latency_ms": 0.0, "output_bytes": 0, "output_preview": ""}, target, index)
-                            else:
-                                desired_timeout = max(float(args.per_call_timeout), float(args.slow_call_timeout) if target.name in SLOW_TOOLS else 0.0)
-                                # Respect the outer duration even for slow probes.
-                                # If the deadline forces a shorter timeout, a
-                                # resulting timeout is classified as deferred
-                                # rather than as a harness/tool failure.
-                                remaining = max(0.1, deadline - time.monotonic())
-                                timeout = min(desired_timeout, remaining)
-                                deadline_limited = timeout + 0.001 < desired_timeout
-                                future = pool.submit(invoke_child, target, probe_args, fixtures, ids, env, timeout)
-                                pending[future] = (target, index, base, deadline_limited)
-                        if args.interval > 0:
-                            time.sleep(args.interval)
 
-                    for future in as_completed(pending):
-                        target, index, base, deadline_limited = pending[future]
-                        try:
-                            result = future.result()
-                        except BaseException as exc:
-                            result = {"status":"error", "reason":"controller_exception", "latency_ms":0.0, "output_bytes":0, "output_preview":f"{type(exc).__name__}: {exc}"}
-                        row = {**base, **result}
-                        if row.get("status") == "timeout" and deadline_limited:
-                            row["status"] = "skipped"
-                            row["reason"] = "soak_deadline"
-                            row.pop("error_class", None)
-                        elif row.get("status") == "timeout":
-                            row["error_class"] = "timeout"
-                        elif row.get("status") == "error":
-                            row["error_class"] = _classify_environment(
-                                str(row.get("reason") or ""),
-                                str(row.get("output_preview") or "") + " " + str(row.get("stderr_preview") or ""),
-                            )
-                        record(row, target, index)
-                    if args.interval > 0 and pending:
-                        time.sleep(args.interval)
+            pass_dir = fixture_root / f"pass-{pass_no:03d}"
+            fixtures = create_fixtures(pass_dir, workspace, pass_no=pass_no)
+            ids = _seed_isolated_state(env, pass_no=pass_no)
+            process_fixture: subprocess.Popen | None = None
+            try:
+                process_fixture = _start_process_fixture(pass_dir, pass_no)
+                ids["process_pid"] = int(process_fixture.pid)
+            except Exception as exc:
+                ids["process_fixture_error"] = f"{type(exc).__name__}: {exc}"
+
+            print(f"\n=== pass {pass_no}{suffix} [{fixtures.get('profile', 'default')}] ===")
+            cursor = 0
+            try:
+                with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="tool-soak") as pool:
+                    # Submit only one worker-sized batch at a time. This prevents a
+                    # Ctrl-C or duration deadline from leaving hundreds of queued
+                    # probes that still have to run before shutdown.
+                    while cursor < len(entries) and not stop["requested"] and within_deadline():
+                        batch = entries[cursor:cursor + workers]
+                        cursor += len(batch)
+                        pending: dict[Any, tuple[Target, int, dict[str, Any], bool]] = {}
+                        for index, target in batch:
+                            contract_ok, contract_reason, probe_args = contract_check(target, fixtures, ids)
+                            base = {
+                                "timestamp": utc_now(), "pass": pass_no, "fixture_profile": fixtures.get("profile", ""),
+                                "ordinal": index, "kind": target.kind, "name": target.name, "module": target.module,
+                                "readonly": target.readonly, "args": _redact(probe_args),
+                            }
+                            if not contract_ok:
+                                record({**base, "status": "contract_error", "reason": contract_reason, "latency_ms": 0.0, "output_bytes": 0, "output_preview": ""}, target, index)
+                            else:
+                                action = "invoke" if target.kind.startswith("recipe_") else _mutation_action(target, args.mutating_mode)
+                                if action == "contract_only":
+                                    record({**base, "status": "skipped", "reason": "mutating_contract_only", "latency_ms": 0.0, "output_bytes": 0, "output_preview": ""}, target, index)
+                                else:
+                                    desired_timeout = max(float(args.per_call_timeout), float(args.slow_call_timeout) if target.name in SLOW_TOOLS else 0.0)
+                                    if deadline is None:
+                                        timeout = desired_timeout
+                                        deadline_limited = False
+                                    else:
+                                        remaining = max(0.1, deadline - time.monotonic())
+                                        timeout = min(desired_timeout, remaining)
+                                        deadline_limited = timeout + 0.001 < desired_timeout
+                                    future = pool.submit(invoke_child, target, probe_args, fixtures, ids, env, timeout)
+                                    pending[future] = (target, index, base, deadline_limited)
+                            if args.interval > 0:
+                                time.sleep(args.interval)
+
+                        for future in as_completed(pending):
+                            target, index, base, deadline_limited = pending[future]
+                            try:
+                                result = future.result()
+                            except BaseException as exc:
+                                result = {"status":"error", "reason":"controller_exception", "latency_ms":0.0, "output_bytes":0, "output_preview":f"{type(exc).__name__}: {exc}"}
+                            row = {**base, **result}
+                            if row.get("status") == "timeout" and deadline_limited:
+                                row["status"] = "skipped"
+                                row["reason"] = "soak_deadline"
+                                row.pop("error_class", None)
+                            elif row.get("status") == "timeout":
+                                row["error_class"] = "timeout"
+                            elif row.get("status") == "error":
+                                row["error_class"] = _classify_environment(
+                                    str(row.get("reason") or ""),
+                                    str(row.get("output_preview") or "") + " " + str(row.get("stderr_preview") or ""),
+                                )
+                            record(row, target, index)
+                        if args.interval > 0 and pending:
+                            time.sleep(args.interval)
+            finally:
+                _stop_process_fixture(process_fixture)
+
             if args.passes and pass_no >= args.passes:
                 break
 
@@ -1427,7 +1571,7 @@ def controller_main(args: argparse.Namespace) -> int:
     print("\n=== final summary ===")
     print(render_markdown(summary))
     if not args.keep_output:
-        shutil.rmtree(fixture_dir, ignore_errors=True)
+        shutil.rmtree(fixture_root, ignore_errors=True)
     if summary["totals"].get("contract_error", 0):
         return 1
     if args.fail_on_errors:

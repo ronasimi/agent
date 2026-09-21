@@ -387,3 +387,83 @@ def test_optional_failed_pipeline_stage_is_not_credited_as_provenance(monkeypatc
     observation = make_observation("run_pipeline", json.dumps(result), turn_id=1)
     assert "fake_optional_failure" not in observation["source_tools"]
     assert "calculate" in observation["source_tools"]
+
+
+def test_pipeline_choose_value_preserves_json_values_from_conditional_stages():
+    from tools import load_tools
+    from tools.pipeline import execute_pipeline
+    load_tools()
+    stages = [
+        {"id": "left", "tool": "compose_object", "when": {"$param": "use_left"}, "args": {"data": {"side": "left"}}},
+        {"id": "right", "tool": "compose_object", "when": {"$not": {"$param": "use_left"}}, "args": {"data": {"side": "right"}}},
+        {"id": "result", "tool": "choose_value", "args": {
+            "condition": {"$param": "use_left"}, "if_true": {"$ref": "left"}, "if_false": {"$ref": "right"},
+        }},
+    ]
+    left = execute_pipeline(stages, {"use_left": True})
+    right = execute_pipeline(stages, {"use_left": False})
+    assert left["ok"] is True and left["result"] == {"side": "left"}
+    assert right["ok"] is True and right["result"] == {"side": "right"}
+
+
+def test_choose_value_manifest_schema_accepts_unconstrained_json_values():
+    from tools import AVAILABLE_TOOLS_MAP, TOOL_SCHEMAS, load_tools
+    from tools.tool_registry import normalize_arguments
+    load_tools()
+    schema = next(row for row in TOOL_SCHEMAS if row["function"]["name"] == "choose_value")
+    props = schema["function"]["parameters"]["properties"]
+    assert "type" not in props["if_true"]
+    assert "type" not in props["if_false"]
+    normalized = normalize_arguments(
+        AVAILABLE_TOOLS_MAP["choose_value"],
+        {"condition": False, "if_true": None, "if_false": {"ok": True}},
+    )
+    assert normalized["if_true"] is None
+    assert normalized["if_false"] == {"ok": True}
+
+
+def test_fixed_builtin_recipe_versions_and_positive_defaults():
+    from tools.recipe_compat import discover_recipe_specs
+    specs, _ = discover_recipe_specs()
+    by_name = {row["name"]: row for row in specs}
+    assert by_name["compat.endpoint_probe"]["version"] >= 2
+    assert by_name["compat.http_probe"]["version"] >= 2
+    assert by_name["compat.read_feed"]["version"] >= 2
+    assert by_name["compat.read_feed"]["parameters"]["url"]["default"].startswith("https://feeds.bbci.co.uk/")
+    assert by_name["compat.read_host_file"]["version"] >= 2
+    assert by_name["compat.read_host_file"]["parameters"]["filepath"]["default"] == "/etc/os-release"
+
+
+def test_fixed_probe_recipes_execute_both_transport_branches_without_type_loss(monkeypatch):
+    from tools import load_tools
+    from tools import executor
+    from tools.pipeline import execute_pipeline
+    from tools.recipe_compat import discover_recipe_specs
+
+    load_tools()
+    specs, _ = discover_recipe_specs()
+    by_name = {row["name"]: row for row in specs}
+    original = executor.execute_registered_tool
+
+    def fake_execute(name, args):
+        if name == "tcp_connect":
+            return json.dumps({"host": args["host"], "port": args["port"], "connected": True})
+        if name == "tls_handshake":
+            return json.dumps({"host": args["host"], "port": args["port"], "tls": True})
+        if name == "http_request":
+            return json.dumps({"url": args["url"], "status": 200})
+        return original(name, args)
+
+    monkeypatch.setattr(executor, "execute_registered_tool", fake_execute)
+
+    endpoint = by_name["compat.endpoint_probe"]["pipeline"]
+    tcp = execute_pipeline(endpoint, {"host": "example.com", "port": 80, "tls": False, "timeout": 5.0})
+    tls = execute_pipeline(endpoint, {"host": "example.com", "port": 443, "tls": True, "timeout": 5.0})
+    assert tcp["ok"] is True and tcp["result"]["connected"] is True
+    assert tls["ok"] is True and tls["result"]["tls"] is True
+
+    http = by_name["compat.http_probe"]["pipeline"]
+    plain = execute_pipeline(http, {"url": "http://example.com/", "timeout": 5.0, "allow_private": False})
+    secure = execute_pipeline(http, {"url": "https://example.com/", "timeout": 5.0, "allow_private": False})
+    assert plain["ok"] is True and plain["result"]["transport"]["connected"] is True
+    assert secure["ok"] is True and secure["result"]["transport"]["tls"] is True

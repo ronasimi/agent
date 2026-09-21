@@ -49,11 +49,11 @@ RECIPE_SPECS = [
         ],
     },
     {
-        "key":"compat.read_feed","version":1,"name":"compat.read_feed","target_tool":"read_feed",
+        "key":"compat.read_feed","version":2,"name":"compat.read_feed","target_tool":"read_feed",
         "description":"Fetch RSS/Atom XML and parse the already-fetched body into bounded feed entries.","tags":["compat","rss","atom","feed"],
-        "parameters":{"url":P("https://example.com/feed.xml","Feed URL"),"limit":P(20,"Maximum entries")},
+        "parameters":{"url":P("https://feeds.bbci.co.uk/news/rss.xml","Feed URL"),"limit":P(20,"Maximum entries")},
         "pipeline":[
-            {"id":"feed","tool":"fetch_url","args":{"url":{"$param":"url","default":"https://example.com/feed.xml"},"max_bytes":1048576,"allow_private":False}},
+            {"id":"feed","tool":"fetch_url","args":{"url":{"$param":"url","default":"https://feeds.bbci.co.uk/news/rss.xml"},"max_bytes":1048576,"allow_private":False}},
             {"id":"result","tool":"parse_feed","args":{"xml_text":{"$ref":"feed","path":"body"},"url":{"$ref":"feed","path":"url"},"limit":{"$param":"limit","default":20}}},
         ],
     },

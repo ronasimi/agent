@@ -1,60 +1,51 @@
 # Tool, Primitive, and Recipe Soak Testing
 
-`scripts/soak_test_tools.py` exercises the live tool registry and compatibility recipe catalog for extended periods. It is intended to catch intermittent provider failures, schema drift, hangs, slow primitives, missing host dependencies, recipe regressions, and tools that alternate between success and failure.
+`scripts/soak_test_tools.py` exercises the live tool registry and compatibility recipe catalog across five deterministic passes by default. It is intended to catch intermittent provider failures, schema drift, hangs, slow primitives, missing host dependencies, recipe regressions, and state contamination between passes.
 
-## Python environment prerequisite
+## Run it in the worker container
 
-From a fresh clone or extracted ZIP, bootstrap the repository-local Python environment once before starting the soak:
-
-```bash
-./scripts/bootstrap_venv.sh
-```
-
-You do **not** need to activate the virtual environment. When `.venv/bin/python` exists, `scripts/soak_test_tools.py` automatically re-executes itself with that interpreter. If the environment has not been bootstrapped, the runner now exits before importing the tool registry and prints the complete list of missing declared Python packages plus the bootstrap command instead of raising a raw `ModuleNotFoundError`.
-
-Missing OS utilities, provider connectivity, and credentials are intentionally **not** startup blockers; those remain per-tool soak results so they are visible in the success/error metrics.
-
-## Recommended 24-hour run
+The harness primitives intentionally use the production container namespace (`/app`, `/app/workspace`, `/app/memory`, `/host`). Run the audit in the worker container so it sees the same mounts, dependencies, PID namespace, and environment as the agent. The convenience wrapper checks that the worker service is running and then starts the test in `/app`:
 
 ```bash
-python scripts/soak_test_tools.py \
-  --duration 24h \
-  --workers 2 \
-  --mutating-mode isolated
+docker compose up -d --build
+./scripts/run_soak_test.sh
 ```
+
+That runs **5 complete passes** with two workers and `--mutating-mode isolated`. You can invoke the Python runner directly if preferred:
+
+```bash
+docker compose exec -w /app worker \
+  python scripts/soak_test_tools.py --workers 2 --mutating-mode isolated
+```
+
+The default five pass profiles are `baseline`, `alternate`, `minimal`, `unicode`, and `boundary`. Each pass gets a fresh fixture directory, fresh job/task/observation/work IDs, and a disposable same-UID process for the process-inspection primitives. Valid probe values rotate across passes, including both TCP and TLS recipe branches. This catches state leakage without making failures non-reproducible.
+
+`--duration` is now optional and defaults to `0` (disabled). `--passes` defaults to `5`. A positive duration can still be supplied as a hard outer deadline, and `--passes 0 --duration 8h` remains available for duration-only stress testing. Per-call child timeouts still prevent one hanging tool from wedging the run.
 
 The default `isolated` mutation mode invokes every read-only tool and every recipe. Mutating primitives that can be safely redirected to the audit database/profile or to `workspace/tool_soak/` are also invoked. System/external-state mutators such as package installation, real reminders/desktop notifications, the legacy live work queue, and generated production tools are schema/argument contract-tested but are not executed.
 
-Use `--mutating-mode all` only inside a disposable test container. It permits calls that may install packages, schedule OS timers, modify the live queue, generate tools, or trigger other persistent side effects.
+Use `--mutating-mode all` only inside a disposable test environment. It permits calls that may install packages, schedule OS timers, modify the live queue, generate tools, or trigger other persistent side effects.
 
-## Fast smoke pass
-
-```bash
-python scripts/soak_test_tools.py --passes 1 --duration 30m --workers 2
-```
-
-A pass covers all registered tools/primitives and all discovered recipes once. `--duration` is always a hard outer soak window; per-call child timeouts keep an individual hanging tool from wedging the run.
-
-Useful focused runs:
+## Focused runs
 
 ```bash
-python scripts/soak_test_tools.py --passes 3 --only 'news_search|web_search|browse_url'
-python scripts/soak_test_tools.py --passes 2 --only 'compat.*'
-python scripts/soak_test_tools.py --duration 8h --exclude 'gmail_*' --exclude 'google_calendar_*'
+./scripts/run_soak_test.sh --passes 1
+./scripts/run_soak_test.sh --passes 3 --only 'news_search|web_search|browse_url'
+./scripts/run_soak_test.sh --passes 2 --only 'compat.*'
+./scripts/run_soak_test.sh --passes 0 --duration 8h --exclude 'gmail_*' --exclude 'google_calendar_*'
 ```
 
 ## Resuming
 
-Every result is flushed to `results.jsonl` immediately. Summary state is maintained with compact counters and latency samples rather than retaining raw outputs in RAM, making repeated 24-hour passes practical. To continue an interrupted report directory:
+Every result is flushed to `results.jsonl` immediately. To continue an interrupted report directory:
 
 ```bash
-python scripts/soak_test_tools.py \
-  --duration 12h \
+./scripts/run_soak_test.sh \
   --resume \
   --output-dir /app/workspace/tool_soak_reports/20260921-120000
 ```
 
-A resumed run retains prior metrics. If the previous pass was interrupted, it first runs only the targets that were not recorded in that pass; otherwise it begins the next pass. Prior JSONL is scanned incrementally, so an all-day result file is not loaded into memory. A malformed/partial trailing JSONL line from an abrupt kill is ignored. Ctrl-C and SIGTERM trigger final summary generation after already-running bounded child probes finish.
+A resumed run retains prior metrics. If the previous pass was interrupted, it first runs only targets that were not recorded in that pass; otherwise it begins the next pass. Pass profiles are deterministic, while mutable state IDs and the process fixture are regenerated so one-shot probes such as job cancellation receive fresh valid state. A malformed/partial trailing JSONL line from an abrupt kill is ignored. Ctrl-C and SIGTERM trigger final summary generation after already-running bounded child probes finish.
 
 ## Output
 
@@ -75,4 +66,4 @@ Each runtime probe is executed in a fresh Python child process and killed by the
 
 Some harness functions intentionally use absolute production paths or external system state. Those remain contract-only in the recommended `isolated` mode and are clearly counted as skipped rather than silently reported as successful.
 
-For CI-style smoke tests, add `--fail-on-errors` to make harness/runtime errors or timeouts produce a non-zero exit status. Credential/dependency/network blocks are excluded from that exit decision by default; add `--fail-on-environment` if CI should fail on those too. Long soak runs leave these flags off because environmental/provider failures are useful metrics rather than a reason to abort collection.
+For CI-style smoke tests, add `--fail-on-errors` to make harness/runtime errors or timeouts produce a non-zero exit status. Credential/dependency/network blocks are excluded from that exit decision by default; add `--fail-on-environment` if CI should fail on those too. Multi-pass runs normally leave these flags off because environmental/provider failures are useful metrics rather than a reason to abort collection.

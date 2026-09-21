@@ -354,6 +354,52 @@ def _location_scoped_news_rows(rows: list[dict], location: str, *, limit: int = 
     return [item for _score, _index, item in ranked[:max(1, min(int(limit), 12))]]
 
 
+def _wiki_api_lookup(query: str) -> dict:
+    """Fetch one Wikipedia result through the bounded MediaWiki JSON API."""
+    params = {
+        "action": "query",
+        "generator": "search",
+        "gsrsearch": query,
+        "gsrlimit": 1,
+        "prop": "extracts|info",
+        "exintro": 1,
+        "explaintext": 1,
+        "inprop": "url",
+        "redirects": 1,
+        "format": "json",
+        "utf8": 1,
+    }
+    url = "https://en.wikipedia.org/w/api.php?" + urlencode(params)
+    _final_url, content_type, body = fetch_text(
+        url,
+        timeout=8.0,
+        max_bytes=512 * 1024,
+        allowed_types={"application/json", "text/json", "text/plain"},
+    )
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Wikipedia returned non-JSON content ({content_type or 'unknown'}).") from exc
+    pages = payload.get("query", {}).get("pages", {}) if isinstance(payload, dict) else {}
+    if not isinstance(pages, dict) or not pages:
+        raise LookupError("Wikipedia returned no matching pages.")
+    page = min(
+        (item for item in pages.values() if isinstance(item, dict)),
+        key=lambda item: int(item.get("index", 1_000_000)),
+        default=None,
+    )
+    if not page:
+        raise LookupError("Wikipedia returned no matching pages.")
+    summary = " ".join(str(page.get("extract") or "").split())
+    if not summary:
+        raise LookupError("Wikipedia returned a page without a summary.")
+    return {
+        "title": str(page.get("title") or query)[:300],
+        "url": str(page.get("fullurl") or "")[:1200],
+        "summary": summary[:5000],
+    }
+
+
 def wiki_search(query: str = "") -> str:
     """Search Wikipedia for concise encyclopedic background information."""
     query = str(query).strip()
@@ -362,18 +408,7 @@ def wiki_search(query: str = "") -> str:
     if len(query) > 1000:
         return "Error: Query is limited to 1000 characters."
     try:
-        import wikipedia
-        page = wikipedia.page(query, auto_suggest=True, preload=False)
-        summary = wikipedia.summary(page.title, sentences=4, auto_suggest=False)
-        return json.dumps(
-            {
-                "title": str(page.title or query)[:300],
-                "url": str(page.url or "")[:1200],
-                "summary": str(summary or "")[:5000],
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
+        return json.dumps(_wiki_api_lookup(query), ensure_ascii=False, indent=2)
     except Exception as exc:
         return f"Error: Wikipedia search failed: {exc}"
 

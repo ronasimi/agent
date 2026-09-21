@@ -258,12 +258,21 @@ def function_schema(func: Callable, description: str | None = None) -> dict:
         if param.kind not in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
             continue
         annotation = hints.get(param.name, str)
-        json_type, items, enum = _json_type(annotation)
-        entry: dict[str, Any] = {"type": json_type}
-        if items:
-            entry["items"] = items
-        if enum is not None:
-            entry["enum"] = enum
+        unwrapped = _unwrap_annotation(annotation)
+        if unwrapped is Any or unwrapped is inspect.Parameter.empty:
+            # An unconstrained JSON value is represented by an empty schema.
+            # Treating Any as a string breaks pipeline composition when a stage
+            # legitimately forwards an object, list, scalar, or null value.
+            entry: dict[str, Any] = {}
+            items = None
+            enum = None
+        else:
+            json_type, items, enum = _json_type(annotation)
+            entry = {"type": json_type}
+            if items:
+                entry["items"] = items
+            if enum is not None:
+                entry["enum"] = enum
         if param.name in _PARAMETER_HINTS:
             entry["description"] = _PARAMETER_HINTS[param.name]
         if param.default is inspect.Parameter.empty or param.name in required_overrides:

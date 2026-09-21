@@ -53,10 +53,10 @@ RECIPE_SPECS = [
         ],
     },
     {
-        "key":"compat.read_host_file","version":1,"name":"compat.read_host_file","target_tool":"read_host_file",
+        "key":"compat.read_host_file","version":2,"name":"compat.read_host_file","target_tool":"read_host_file",
         "description":"Read bounded text from the read-only host mount using the focused host_read_text primitive.","tags":["compat","host","file","read"],
-        "parameters":{"filepath":P("filepath","/etc/resolv.conf","Host path under /host")},
-        "pipeline":[{"id":"result","tool":"host_read_text","args":{"path":{"$param":"filepath","default":"/etc/resolv.conf"},"max_chars":20000}}],
+        "parameters":{"filepath":P("filepath","/etc/os-release","Host path under /host")},
+        "pipeline":[{"id":"result","tool":"host_read_text","args":{"path":{"$param":"filepath","default":"/etc/os-release"},"max_chars":20000}}],
     },
     {
         "key":"compat.process_snapshot","version":1,"name":"compat.process_snapshot","target_tool":"process_snapshot",
@@ -114,7 +114,7 @@ RECIPE_SPECS = [
         "pipeline":[{"id":"result","tool":"trace_route","args":{"target":{"$param":"target","default":"example.com"},"max_hops":{"$param":"max_hops","default":20},"probes":{"$param":"probes","default":3}}}],
     },
     {
-        "key":"compat.endpoint_probe","version":1,"name":"compat.endpoint_probe","target_tool":"endpoint_probe",
+        "key":"compat.endpoint_probe","version":2,"name":"compat.endpoint_probe","target_tool":"endpoint_probe",
         "description":"Choose a direct TCP or TLS primitive based on the tls parameter, preserving DNS/connect timing evidence.","tags":["compat","endpoint","tcp","tls","probe"],
         "parameters":{"host":P("host","example.com","Host/IP"),"port":P("port",443,"TCP port"),"tls":P("tls",False,"Perform TLS handshake"),"timeout":P("timeout",5.0,"Timeout seconds")},
         "pipeline":[
@@ -124,7 +124,7 @@ RECIPE_SPECS = [
         ],
     },
     {
-        "key":"compat.http_probe","version":1,"name":"compat.http_probe","target_tool":"http_probe",
+        "key":"compat.http_probe","version":2,"name":"compat.http_probe","target_tool":"http_probe",
         "description":"Decompose an HTTP(S) probe into URL parsing, TCP/TLS endpoint probing, and a bounded HTTP request.","tags":["compat","http","https","probe","tls"],
         "parameters":{"url":P("url","https://example.com","HTTP(S) URL"),"timeout":P("timeout",8.0,"Timeout seconds"),"allow_private":P("allow_private",False,"Allow private/local target")},
         "pipeline":[
