@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from .task_requirements import classify_request_intent, derive_task_frame, is_implementation_request
+from .task_requirements import classify_request_intent, derive_fact_frames, derive_task_frame, is_implementation_request
 from .market import extract_market_instruments, is_market_price_request
 
 WEATHER_RECIPE_NAME = "weather.current_forecast"
@@ -67,11 +68,78 @@ _WEATHER_DETAIL_RE = re.compile(
 )
 
 
-def requested_fact_types(user_request: str, task_frame: dict[str, Any] | None = None) -> set[str]:
+@dataclass
+class FactRequirement:
+    fact_type: str
+    status: str = "pending"
+    evidence: list[str] = field(default_factory=list)
+    last_error: str = ""
+
+    @property
+    def satisfied(self) -> bool:
+        return self.status == "satisfied"
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "fact_type": self.fact_type,
+            "status": self.status,
+            "satisfied": self.satisfied,
+            "evidence": list(self.evidence),
+            "last_error": self.last_error,
+        }
+
+
+@dataclass
+class FactGroundingLedger:
+    requirements: dict[str, FactRequirement] = field(default_factory=dict)
+
+    @classmethod
+    def from_fact_types(cls, fact_types: set[str] | list[str]) -> "FactGroundingLedger":
+        return cls({str(name): FactRequirement(str(name)) for name in sorted(set(fact_types or []))})
+
+    def apply_report(self, report: dict[str, Any]) -> None:
+        evidence = report.get("evidence") if isinstance(report.get("evidence"), dict) else {}
+        missing = {str(item) for item in (report.get("missing_fact_types") or [])}
+        reason = str(report.get("reason") or report.get("diagnosis") or "")[:240]
+        for fact_type in report.get("required_fact_types") or []:
+            key = str(fact_type)
+            requirement = self.requirements.setdefault(key, FactRequirement(key))
+            proof = [str(item) for item in (evidence.get(key) or []) if str(item)]
+            if proof:
+                requirement.status = "satisfied"
+                requirement.evidence = proof
+                requirement.last_error = ""
+            elif key in missing and not requirement.satisfied:
+                requirement.status = "pending"
+                requirement.last_error = reason
+
+    def mark_error(self, fact_type: str, reason: str) -> None:
+        key = str(fact_type or "")
+        requirement = self.requirements.setdefault(key, FactRequirement(key))
+        if not requirement.satisfied:
+            requirement.status = "failed"
+            requirement.last_error = str(reason or "")[:240]
+
+    def missing_fact_types(self) -> set[str]:
+        return {key for key, value in self.requirements.items() if not value.satisfied}
+
+    def can_finalize(self) -> bool:
+        return all(item.satisfied for item in self.requirements.values())
+
+    def as_list(self) -> list[dict[str, Any]]:
+        return [self.requirements[key].as_dict() for key in sorted(self.requirements)]
+
+
+def requested_fact_types(
+    user_request: str,
+    task_frame: dict[str, Any] | None = None,
+    fact_frames: dict[str, dict[str, Any]] | None = None,
+) -> set[str]:
     """Return fact types with deterministic grounding policies for this request."""
     text = " ".join(str(user_request or "").split())
     frame = dict(task_frame or {})
     result: set[str] = set()
+    result.update(str(key) for key in dict(fact_frames or {}) if str(key))
     explicit_intent = classify_request_intent(text)
     implementation = is_implementation_request(text)
     if frame.get("intent") == "weather" or explicit_intent == "weather" or (not implementation and any(pattern.search(text) for pattern in _WEATHER_REQUEST_PATTERNS)):
@@ -367,9 +435,10 @@ def make_observation(
     turn_id: int = 0,
     arguments: Any = None,
     task_frame: dict[str, Any] | None = None,
+    fact_frames: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Create the minimal provenance record used by the grounding validator."""
-    meta = grounding_metadata(tool_name, content, arguments=arguments, task_frame=task_frame)
+    meta = grounding_metadata(tool_name, content, arguments=arguments, task_frame=task_frame, fact_frames=fact_frames)
     return {
         "tool": str(tool_name or ""),
         "status": str(status or ""),
@@ -622,6 +691,7 @@ def grounding_metadata(
     *,
     arguments: Any = None,
     task_frame: dict[str, Any] | None = None,
+    fact_frames: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Return compact scope/provenance metadata safe to persist with evidence.
 
@@ -630,6 +700,17 @@ def grounding_metadata(
     scope proof can be derived from the *full* result before preview clipping.
     """
     name = str(tool_name or "").strip().lower()
+    frames = {str(k): dict(v or {}) for k, v in dict(fact_frames or {}).items() if isinstance(v, dict)}
+    legacy_frame = dict(task_frame or {})
+
+    def scoped_frame(fact_type: str) -> dict[str, Any]:
+        frame = dict(frames.get(str(fact_type or "")) or {})
+        if frame:
+            return frame
+        if str(legacy_frame.get("intent") or "") == str(fact_type or ""):
+            return legacy_frame
+        return legacy_frame if not frames else {}
+
     text = str(content or "")
     args = _compact_arguments(arguments)
     stages = sorted(_recipe_stages(text))
@@ -654,7 +735,7 @@ def grounding_metadata(
         target = str(args.get("query") or "")[:500]
         if name != "wiki_search":
             discovered_urls = _urls_from_payload(text)
-            frame = derive_task_frame(target)
+            frame = scoped_frame("news" if name == "news_search" else "web_fact") or derive_task_frame(target)
             time_scope = str(frame.get("time_scope") or "")
         else:
             payload = _json_payload(text)
@@ -666,7 +747,7 @@ def grounding_metadata(
         # Runtime ingestion knows the current task frame. Persist exact matched
         # scope values from the full body so a requested city/time appearing late
         # in a long page cannot be lost when the human-readable preview is clipped.
-        frame = dict(task_frame or {})
+        frame = scoped_frame("weather") if "weather" in facts else legacy_frame
         entity = str(frame.get("entity") or "").strip()
         entity_tokens = set(_frame_tokens(entity))
         full_terms = set(_frame_tokens(text))
@@ -694,7 +775,7 @@ def grounding_metadata(
             proof["timezone"] = str(payload.get("timezone") or "")[:80]
     elif recipe_like:
         target = _weather_query_from_recipe(text)[:500]
-        frame = derive_task_frame(target)
+        frame = scoped_frame("weather") or derive_task_frame(target)
         time_scope = str(frame.get("time_scope") or "")
         payload = _json_payload(text)
         if isinstance(payload, dict) and isinstance(payload.get("result"), dict):
@@ -834,6 +915,7 @@ def validate_fact_grounding(
     weather_max_age_seconds: int = 10800,
     now: datetime | None = None,
     task_frame: dict[str, Any] | None = None,
+    fact_frames: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Hard-check requested fact types against observation provenance.
 
@@ -843,9 +925,21 @@ def validate_fact_grounding(
     observation. A current_time observation never satisfies weather.
     """
     frame = dict(task_frame or derive_task_frame(user_request))
-    required = requested_fact_types(user_request, frame)
+    frames = {str(k): dict(v or {}) for k, v in dict(fact_frames or {}).items() if isinstance(v, dict)}
+    required = requested_fact_types(user_request, frame, frames)
+    if not frames and required:
+        frames = derive_fact_frames(user_request, required_fact_types=required)
+
+    def frame_for(fact_type: str) -> dict[str, Any]:
+        scoped = dict(frames.get(str(fact_type or "")) or {})
+        if scoped:
+            return scoped
+        if str(frame.get("intent") or "") == str(fact_type or ""):
+            return frame
+        return {}
+
     if not required:
-        return {"status": "not_required", "grounded": True, "required_fact_types": [], "missing_fact_types": []}
+        return {"status": "not_required", "grounded": True, "required_fact_types": [], "missing_fact_types": [], "fact_requirements": []}
 
     now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     usable = [
@@ -866,7 +960,7 @@ def validate_fact_grounding(
         time_items = [
             item for item in turn_usable
             if "current_time" in _fact_types(item)
-            and _current_time_matches_frame(item, frame, current_geocodes)
+            and _current_time_matches_frame(item, frame_for("current_time"), current_geocodes)
         ]
         if time_items:
             evidence["current_time"] = [str(item.get("tool") or "") for item in time_items[-2:]]
@@ -945,7 +1039,7 @@ def validate_fact_grounding(
         matches = [
             item for item in turn_items
             if str(item.get("tool") or "").lower() == "news_search" and "news" in _fact_types(item)
-            and _news_observation_matches_frame(item, frame)
+            and _news_observation_matches_frame(item, frame_for("news"))
         ]
         if matches:
             evidence["news"] = ["news_search"]
@@ -954,7 +1048,8 @@ def validate_fact_grounding(
 
     if "market_price" in required:
         turn_items = list(turn_usable)
-        expected = _canonical_market_instruments(frame.get("instruments") or extract_market_instruments(user_request))
+        market_frame = frame_for("market_price")
+        expected = _canonical_market_instruments(market_frame.get("instruments") or extract_market_instruments(user_request))
         matches = []
         for item in turn_items:
             if str(item.get("tool") or "").lower() != "market_quote" or "market_price" not in _fact_types(item):
@@ -1058,16 +1153,16 @@ def validate_fact_grounding(
         current_search = [
             item for item in current_weather
             if str(item.get("tool") or "").lower() == "web_search"
-            and _observation_matches_frame(item, frame)
+            and _observation_matches_frame(item, frame_for("weather"))
         ]
         current_recipe = [
             item for item in current_weather
-            if _weather_recipe_observation(item) and _observation_matches_frame(item, frame)
+            if _weather_recipe_observation(item) and _observation_matches_frame(item, frame_for("weather"))
         ]
         current_api = [
             item for item in current_weather
             if _weather_api_observation(item)
-            and _weather_api_matches_frame(item, frame, [
+            and _weather_api_matches_frame(item, frame_for("weather"), [
                 geo for geo in current
                 if str(geo.get("tool") or "").lower() == "geocode_location"
             ])
@@ -1085,7 +1180,7 @@ def validate_fact_grounding(
                 source = _canonical_url(str(browse.get("source_url") or ""))
                 if not source:
                     source = _browse_source_url(str(browse.get("evidence_preview") or browse.get("content") or ""), dict(browse.get("arguments") or {}))
-                if source and source in discovered and _observation_matches_frame(browse, frame, linked_search=True):
+                if source and source in discovered and _observation_matches_frame(browse, frame_for("weather"), linked_search=True):
                     linked_pairs.append((search, browse))
 
         stored_weather = [
@@ -1094,7 +1189,7 @@ def validate_fact_grounding(
             and (not current_turn_id or int(item.get("turn_id") or 0) != int(current_turn_id))
             and str(item.get("tool") or "").lower() != "web_search"
             and _fresh(item, now=now_utc, max_age_seconds=weather_max_age_seconds)
-            and _observation_matches_frame(item, frame)
+            and _observation_matches_frame(item, frame_for("weather"))
             and (_weather_recipe_observation(item) or _weather_api_observation(item) or str(item.get("tool") or "").lower() == "browse_url")
         ]
 
@@ -1109,6 +1204,17 @@ def validate_fact_grounding(
         else:
             missing.append("weather")
 
+    fact_requirements = [
+        {
+            "fact_type": fact_type,
+            "status": "satisfied" if fact_type in evidence else "pending",
+            "satisfied": fact_type in evidence,
+            "evidence": list(evidence.get(fact_type) or []),
+            "last_error": "" if fact_type in evidence else "insufficient_evidence",
+        }
+        for fact_type in sorted(required)
+    ]
+
     if missing:
         return {
             "status": "missing_evidence",
@@ -1119,6 +1225,7 @@ def validate_fact_grounding(
             "evidence": evidence,
             "diagnosis": "insufficient_evidence",
             "reason": "requested fact type is not present in qualifying observations",
+            "fact_requirements": fact_requirements,
         }
     return {
         "status": "grounded",
@@ -1128,6 +1235,7 @@ def validate_fact_grounding(
         "observed_fact_types": observed,
         "evidence": evidence,
         "diagnosis": "task_complete",
+        "fact_requirements": fact_requirements,
     }
 
 
@@ -1245,14 +1353,23 @@ def weather_fallback_stages() -> list[dict[str, Any]]:
     ]
 
 
-def execute_weather_grounding_recovery(user_request: str, memory_context: str = "") -> dict[str, Any]:
+def execute_weather_grounding_recovery(
+    user_request: str,
+    memory_context: str = "",
+    *,
+    frame: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Fetch structured weather first, then fall back to search + verified page."""
     from .pipeline import execute_pipeline
     from .recipe_store import get_recipe
 
-    query = build_weather_query(user_request, memory_context)
-    location = _weather_location(user_request, memory_context)
-    forecast_days = _forecast_days_for_request(user_request)
+    scoped_frame = dict(frame or {})
+    scoped_request = str(scoped_frame.get("source_text") or user_request or "")
+    location = str(scoped_frame.get("entity") or "").strip() or _weather_location(scoped_request, memory_context)
+    time_scope = str(scoped_frame.get("time_scope") or "").strip()
+    query_request = " ".join(part for part in (scoped_request, location, time_scope) if part)
+    query = build_weather_query(query_request, memory_context)
+    forecast_days = _forecast_days_for_request(" ".join(part for part in (scoped_request, time_scope) if part))
     structured_error = ""
 
     if location:

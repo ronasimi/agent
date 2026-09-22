@@ -39,6 +39,7 @@ class Requirement:
 
 
 _RULES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
+    ("weather_forecast", "weather_forecast", "current weather/forecast", (r"\b(?:weather|forecast|current conditions?)\b", r"\b(?:temperature|precipitation|rain|snow|humidity|wind speed)\b.*\b(?:today|tomorrow|current|now|tonight|week|days?|hours?)\b")),
     ("current_time", "current_time", "current clock time/date", (r"\bwhat time is it\b", r"\bcurrent time\b", r"\bcurrent date\b", r"\bwhat(?:'s| is) (?:today(?:'s)? date|the date)\b", r"\bwhat day is it\b", r"\b(?:local|utc) time\b", r"\bwhat timezone\b", r"\bcurrent timezone\b")),
     ("host_health", "host_snapshot", "host CPU/memory/disk/temperature state", (r"\bhost (?:health|cpu|memory|disk|temperature|state)", r"\bcpu,? memory,? disk", r"\b(?:host|system|cpu|gpu) temperature\b", r"\btemperature sensors?\b")),
     ("pressure", "pressure_snapshot", "CPU/memory/I/O pressure", (r"\bpressure (?:state|snapshot)?\b", r"\b(?:cpu|memory|i/o|io) pressure\b")),
@@ -65,7 +66,7 @@ _RULES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     ("path", "network_path", "network path/hop diagnosis", (r"\bnetwork path\b", r"\btraceroute\b", r"\bmtr\b", r"\broute tracing\b")),
     ("tool_health", "tool_health", "registered tool/dependency health", (r"\btool/?dependency health\b", r"\btool health\b", r"\bcurrent tool.*health\b")),
     ("dependency_audit", "dependency_audit", "runtime dependency audit", (r"\bdependency health\b", r"\bdependency audit\b", r"\btool/?dependency health\b")),
-    ("news_search", "news_search", "current news headline discovery", (r"\b(?:latest|recent|current|today(?:'s)?)\b.{0,48}\b(?:news|headlines?|stories?)\b", r"\b(?:latest|top|local)\s+headlines?\b")),
+    ("news_search", "news_search", "current news headline discovery", (r"\b(?:latest|recent|current|today(?:'s)?)\b.{0,48}\b(?:news|headlines?|stories?)\b", r"\b(?:news|headlines?)\b.{0,48}\b(?:latest|recent|current|today)\b", r"\b(?:latest|top|local)\s+(?:news|headlines?)\b", r"^\s*(?:news|headlines?)\b")),
     ("market_quote", "market_quote", "current market/commodity quote", (r"\b(?:current|latest|live|today(?:'s)?|right now)\b.{0,64}\b(?:price|prices|quote|quotes|trading at)\b", r"\b(?:price|prices|quote|quotes)\b.{0,64}\b(?:wti|brent|crude oil|gold|silver|natural gas|copper)\b")),
     ("web_search", "web_search", "current web source discovery", (r"\bweb research\b", r"\bresearch the current\b", r"\bcurrent .*documentation\b", r"\blook up\b", r"\bsearch the web\b")),
     ("web_verify", "browse_url", "authoritative source content verification", (r"\bcurrent .*documentation\b", r"\bofficial .*documentation\b", r"\bsource urls?\b", r"\bverify .*source\b", r"\bweb research\b")),
@@ -107,6 +108,7 @@ _EXPLICIT_TOOL_NAMES = {
 }
 
 _FACT_RULE_INTENTS = {
+    "weather_forecast": "weather",
     "current_time": "current_time",
     "host_health": "host_state",
     "network_state": "network_state",
@@ -115,6 +117,14 @@ _FACT_RULE_INTENTS = {
     "repo_status": "repository_state",
     "gmail": "gmail",
     "google_calendar": "google_calendar",
+}
+
+_TOOL_FACT_INTENTS = {
+    "geocode_location": "weather",
+    "weather_forecast": "weather",
+    "news_search": "news",
+    "market_quote": "market_price",
+    "current_time": "current_time",
 }
 
 
@@ -171,7 +181,7 @@ _NEWS_TIME_RE = re.compile(
 _NEWS_GENERIC_TOKENS = {
     "a", "about", "are", "around", "current", "for", "from", "headlines", "headline", "in",
     "latest", "local", "me", "near", "news", "of", "please", "recent", "show", "stories",
-    "story", "tell", "the", "today", "todays", "top", "what", "whats",
+    "story", "tell", "give", "get", "check", "find", "the", "today", "todays", "top", "what", "whats",
 }
 # High-frequency news subjects that are commonly capitalized at the start of a
 # sentence or written as acronyms.  They must not be mistaken for a city merely
@@ -226,13 +236,20 @@ def is_news_fact_request(user_text: str) -> bool:
     text = " ".join(str(user_text or "").strip().split())
     if not text or is_implementation_request(text):
         return False
-    return bool(re.search(
+    explicit = bool(re.search(
         r"(?:\b(?:latest|recent|current|today(?:'s)?)\b.{0,48}\b(?:news|headlines?|stories?)\b|"
         r"\b(?:news|headlines?)\b.{0,48}\b(?:latest|recent|current|today)\b|"
-        r"\b(?:latest|top|local)\s+headlines?\b)",
+        r"\b(?:latest|top|local)\s+(?:news|headlines?)\b|"
+        r"^\s*(?:news|headlines?)\b)",
         text,
         re.I,
     ))
+    if explicit:
+        return True
+    # Compound direct requests may name the news noun without repeating a time
+    # qualifier: "Give me today's weather and headlines about AI". The outer
+    # request cue is enough once implementation/documentation prompts are ruled out.
+    return bool(_REQUEST_CUE_RE.search(text) and re.search(r"\b(?:news|headlines?|stories?)\b", text, re.I))
 
 
 def classify_request_intent(user_text: str) -> str:
@@ -340,6 +357,8 @@ def _looks_like_location_candidate(value: str) -> bool:
         return False
     normalized = re.sub(r"\s+", " ", raw).strip().lower()
     lower_words = [word.lower().rstrip(".") for word in re.findall(r"[A-Za-z]+", raw)]
+    if lower_words and lower_words[0] in {"give", "show", "tell", "what", "whats", "get", "find", "check", "latest", "recent", "current", "today", "todays", "top", "local"}:
+        return False
     if normalized in _NEWS_TOPIC_HINTS:
         return False
     if any(word in _CANADIAN_PROVINCES or word in _COUNTRY_ALIASES for word in lower_words):
@@ -418,7 +437,7 @@ def build_news_query(user_text: str, frame: dict[str, Any] | None = None, defaul
     when the user profile contains a home city.
     """
     resolved = dict(frame or {})
-    raw = " ".join(str(user_text or "").strip().split())
+    raw = " ".join(str(resolved.get("source_text") or user_text or "").strip().split())
     entity = canonicalize_location(str(resolved.get("entity") or ""))
     if not entity and re.search(r"\b(?:local|nearby|near me|around me)\b", raw, re.I):
         entity = canonicalize_location(default_location)
@@ -512,6 +531,221 @@ def derive_task_frame(
             frame["instruments"] = instruments
         frame["time_scope"] = "current"
     return {key: value for key, value in frame.items() if value not in ("", None)}
+
+
+@dataclass(frozen=True)
+class FactSpan:
+    fact_type: str
+    start: int
+    end: int
+    text: str
+
+
+@dataclass(frozen=True)
+class ParsedModifier:
+    kind: str
+    value: str
+    start: int
+    end: int
+    scope: str = "local"
+
+
+_FACT_FRAME_ANCHORS: dict[str, re.Pattern[str]] = {
+    "weather": re.compile(r"\b(?:weather|forecast|current conditions?|temperature|precipitation|rain|snow|humidity|wind speed)\b", re.I),
+    "news": re.compile(r"\b(?:news|headlines?|stories?)\b", re.I),
+    "current_time": re.compile(r"\b(?:current time|current date|what time|what day|local time|utc time|timezone|time is it)\b", re.I),
+    "host_state": re.compile(r"\b(?:host (?:health|cpu|memory|disk|temperature|state)|system health|host snapshot)\b", re.I),
+    "network_state": re.compile(r"\b(?:network (?:interfaces|routes|health|state|status|connections?)|neighbor table|arp table|ndp table)\b", re.I),
+    "repository_state": re.compile(r"\b(?:repo(?:sitory)? (?:status|diff|health)|git status|git diff)\b", re.I),
+    "market_price": re.compile(r"\b(?:price|prices|quote|quotes|trading at|worth|wti|brent|crude oil|gold|silver|natural gas|copper)\b", re.I),
+}
+_COMPOUND_CONNECTOR_RE = re.compile(r"\b(?:and|as\s+well\s+as|along\s+with|plus)\b|;", re.I)
+_ALL_TIME_MODIFIER_RE = re.compile(
+    r"\b(?:latest|recent|current|today(?:'s)?|tomorrow|tonight|now|right\s+now|"
+    r"this\s+(?:morning|afternoon|evening|week|weekend|month)|next\s+(?:\d+\s+)?(?:hours?|days?|week|weekend)|"
+    r"last\s+(?:day|week|month)|past\s+\d+\s+(?:hours?|days?)|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+    re.I,
+)
+
+
+def detect_fact_frame_types(user_text: str) -> set[str]:
+    """Detect independently scoped live-fact intents without choosing a primary one."""
+    text = " ".join(str(user_text or "").strip().split())
+    if not text or is_implementation_request(text):
+        return set()
+    result: set[str] = set()
+    if is_weather_fact_request(text):
+        result.add("weather")
+    if is_news_fact_request(text):
+        result.add("news")
+    lower = text.lower()
+    if re.search(r"\b(?:what time is it|current time|current date|what day is it|local time|utc time|timezone)\b", lower):
+        result.add("current_time")
+    if re.search(r"\b(?:host (?:health|cpu|memory|disk|temperature|state)|system health|host snapshot)\b", lower):
+        result.add("host_state")
+    if re.search(r"\b(?:network (?:interfaces|routes|health|state|status|connections?)|neighbor table|arp table|ndp table)\b", lower):
+        result.add("network_state")
+    if re.search(r"\b(?:repo(?:sitory)? (?:status|diff|health)|git status|git diff)\b", lower):
+        result.add("repository_state")
+    if is_market_price_request(text):
+        result.add("market_price")
+    return result
+
+
+def _first_fact_anchor(text: str, fact_type: str) -> re.Match[str] | None:
+    pattern = _FACT_FRAME_ANCHORS.get(str(fact_type or ""))
+    return pattern.search(text) if pattern is not None else None
+
+
+def _compound_clause_ranges(text: str, fact_types: set[str]) -> list[tuple[int, int]]:
+    """Split only between adjacent *different* fact anchors.
+
+    The cut is placed at the connector nearest the following fact anchor. This
+    intentionally keeps entity conjunctions such as ``weather in London and
+    Windsor`` intact while splitting ``headlines and weather``.
+    """
+    if len(fact_types) < 2:
+        return [(0, len(text))]
+    anchors: list[tuple[int, int, str]] = []
+    for fact_type in fact_types:
+        match = _first_fact_anchor(text, fact_type)
+        if match:
+            anchors.append((match.start(), match.end(), fact_type))
+    anchors.sort()
+    cuts: list[tuple[int, int]] = []
+    for left, right in zip(anchors, anchors[1:]):
+        if left[2] == right[2]:
+            continue
+        connectors = list(_COMPOUND_CONNECTOR_RE.finditer(text, left[1], right[0]))
+        if connectors:
+            chosen = connectors[-1]
+            cuts.append((chosen.start(), chosen.end()))
+            continue
+        # Commas may coordinate independent fact nouns, but never split a comma
+        # that is merely part of a place name unless distinct anchors surround it.
+        comma = text.rfind(",", left[1], right[0])
+        if comma >= 0:
+            cuts.append((comma, comma + 1))
+    if not cuts:
+        return [(0, len(text))]
+    ranges: list[tuple[int, int]] = []
+    cursor = 0
+    for start, end in sorted(set(cuts)):
+        if start > cursor:
+            ranges.append((cursor, start))
+        cursor = end
+    if cursor < len(text):
+        ranges.append((cursor, len(text)))
+    return [(start, end) for start, end in ranges if text[start:end].strip()] or [(0, len(text))]
+
+
+def _fact_clause(text: str, fact_type: str, fact_types: set[str]) -> FactSpan:
+    anchor = _first_fact_anchor(text, fact_type)
+    if anchor is None:
+        return FactSpan(fact_type, 0, len(text), text.strip())
+    for start, end in _compound_clause_ranges(text, fact_types):
+        if start <= anchor.start() < end:
+            source = text[start:end].strip(" ,;:-")
+            offset = text[start:end].find(source) if source else 0
+            return FactSpan(fact_type, start + max(0, offset), start + max(0, offset) + len(source), source)
+    return FactSpan(fact_type, anchor.start(), anchor.end(), anchor.group(0))
+
+
+def _shared_time_modifier(text: str, fact_types: set[str]) -> ParsedModifier | None:
+    anchors = [m for fact_type in fact_types if (m := _first_fact_anchor(text, fact_type)) is not None]
+    if not anchors:
+        return None
+    first_anchor = min(match.start() for match in anchors)
+    matches = [m for m in _ALL_TIME_MODIFIER_RE.finditer(text) if m.start() <= first_anchor]
+    if not matches:
+        return None
+    chosen = matches[-1]
+    return ParsedModifier("time", re.sub(r"\s+", " ", chosen.group(0).lower()), chosen.start(), chosen.end(), "shared")
+
+
+def _local_time_scope(source_text: str, fact_type: str) -> str:
+    if fact_type == "news":
+        match = _NEWS_TIME_RE.search(source_text)
+    else:
+        match = _TEMPORAL_RE.search(source_text) or _ALL_TIME_MODIFIER_RE.search(source_text)
+    return re.sub(r"\s+", " ", match.group(0).lower()) if match else ""
+
+
+def derive_fact_frames(
+    user_text: str,
+    previous_frames: dict[str, dict[str, Any]] | None = None,
+    *,
+    default_location: str = "",
+    required_fact_types: set[str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Return one independently scoped frame for every requested fact type.
+
+    Required fact detection precedes clause decomposition. This prevents ordinary
+    entity conjunctions from being mistaken for multiple intents and lets shared
+    leading modifiers (for example ``today's``) propagate to coordinated facts.
+    """
+    text = " ".join(str(user_text or "").strip().split())
+    previous = {str(k): dict(v or {}) for k, v in dict(previous_frames or {}).items() if isinstance(v, dict)}
+    fact_types = set(required_fact_types or detect_fact_frame_types(text))
+    if not fact_types:
+        return {}
+    shared_time = _shared_time_modifier(text, fact_types)
+    frames: dict[str, dict[str, Any]] = {}
+    for fact_type in sorted(fact_types):
+        span = _fact_clause(text, fact_type, fact_types)
+        prior = dict(previous.get(fact_type) or {})
+        source = span.text or text
+        frame: dict[str, Any] = {
+            "intent": fact_type,
+            "source_text": source,
+            "source_span": [span.start, span.end],
+        }
+        if fact_type == "weather":
+            frame["entity"] = _extract_weather_entity(source, prior) or canonicalize_location(default_location)
+            frame["time_scope"] = _local_time_scope(source, fact_type) or (shared_time.value if shared_time else "") or str(prior.get("time_scope") or "") or "current"
+        elif fact_type == "news":
+            frame["entity"] = _extract_news_entity(source, prior, default_location)
+            frame["time_scope"] = _local_time_scope(source, fact_type) or (shared_time.value if shared_time else "") or "current"
+        elif fact_type == "current_time":
+            tz = re.search(r"\b(?:in|for)\s+([A-Za-z][A-Za-z0-9_+:/ .-]{0,80}?)[?!.]*$", source)
+            if tz:
+                frame["entity"] = _clean_entity(tz.group(1))
+            elif prior.get("entity"):
+                frame["entity"] = str(prior.get("entity") or "")
+            frame["time_scope"] = _local_time_scope(source, fact_type) or (shared_time.value if shared_time else "") or "current"
+        elif fact_type == "market_price":
+            instruments = extract_market_instruments(text)
+            if not instruments:
+                instruments = [str(item) for item in (prior.get("instruments") or []) if str(item)]
+            if instruments:
+                frame["instruments"] = instruments
+            frame["time_scope"] = _local_time_scope(source, fact_type) or (shared_time.value if shared_time else "") or "current"
+        else:
+            local_time = _local_time_scope(source, fact_type)
+            if local_time or shared_time:
+                frame["time_scope"] = local_time or str(shared_time.value)
+        frames[fact_type] = {key: value for key, value in frame.items() if value not in ("", None, [])}
+    # Completeness invariant: a detected/required fact can be sparse, but may not
+    # silently disappear during parsing.
+    for fact_type in fact_types:
+        frames.setdefault(fact_type, {"intent": fact_type, "source_text": text, "source_span": [0, len(text)]})
+    return frames
+
+
+def select_primary_fact_frame(
+    fact_frames: dict[str, dict[str, Any]] | None,
+    fallback: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return the compatibility ``task_frame`` projection for legacy callers."""
+    frames = {str(k): dict(v or {}) for k, v in dict(fact_frames or {}).items() if isinstance(v, dict)}
+    legacy = dict(fallback or {})
+    preferred = str(legacy.get("intent") or "")
+    if preferred in frames:
+        return dict(frames[preferred])
+    if frames:
+        return dict(min(frames.values(), key=lambda item: int((item.get("source_span") or [10**9])[0])))
+    return legacy
 
 
 def is_task_continuation(user_text: str, previous_frame: dict[str, Any] | None = None) -> bool:
@@ -689,21 +923,27 @@ def derive_requirements(user_text: str) -> list[Requirement]:
     lower = text.lower().replace("_", " ")
     result: list[Requirement] = []
     seen_tools: set[str] = set()
-    frame = derive_task_frame(text)
+    fact_frames = derive_fact_frames(text)
+    frame = select_primary_fact_frame(fact_frames, derive_task_frame(text))
 
     for key, tool, label, patterns in _RULES:
         expected_intent = _FACT_RULE_INTENTS.get(key)
-        if expected_intent and frame.get("intent") != expected_intent and is_implementation_request(text):
+        scoped_frame = dict(fact_frames.get(expected_intent) or frame) if expected_intent else frame
+        if key == "weather_forecast" and is_evidence_reuse_request(text):
+            continue
+        if expected_intent and expected_intent not in fact_frames and is_implementation_request(text):
             continue
         if any(re.search(pattern, lower, flags=re.I) for pattern in patterns):
             if tool not in seen_tools:
-                result.append(Requirement(key=key, tool=tool, label=label, scope=_scope_for_requirement(key, tool, text, frame)))
+                result.append(Requirement(key=key, tool=tool, label=label, scope=_scope_for_requirement(key, tool, text, scoped_frame)))
                 seen_tools.add(tool)
 
     raw_lower = text.lower()
     for tool in sorted(_EXPLICIT_TOOL_NAMES):
         if tool in raw_lower and tool not in seen_tools:
-            result.append(Requirement(key=f"explicit:{tool}", tool=tool, label=f"explicitly requested {tool}", scope=_scope_for_requirement(f"explicit:{tool}", tool, text, frame)))
+            fact_intent = _TOOL_FACT_INTENTS.get(tool, "")
+            scoped_frame = dict(fact_frames.get(fact_intent) or frame) if fact_intent else frame
+            result.append(Requirement(key=f"explicit:{tool}", tool=tool, label=f"explicitly requested {tool}", scope=_scope_for_requirement(f"explicit:{tool}", tool, text, scoped_frame)))
             seen_tools.add(tool)
     return result
 
@@ -814,6 +1054,14 @@ class TaskRequirementLedger:
                 item.last_reason = "successful tool result did not match requested target/scope"
             elif direct and item.status not in {"satisfied", "partial"}:
                 item.status = "failed"
+
+    def mark_fact_satisfied(self, fact_type: str, reason: str = "grounding_evidence") -> None:
+        """Close tool requirements whose requested fact was grounded by any valid path."""
+        fact_type = str(fact_type or "")
+        for item in self.requirements:
+            if str((item.scope or {}).get("fact_type") or "") == fact_type:
+                item.status = "satisfied"
+                item.last_reason = str(reason or "")[:120]
 
     def status_for_tool(self, tool_name: str) -> str:
         for item in self.requirements:

@@ -115,3 +115,11 @@ The runtime deliberately uses three generative Ollama roles plus one embedding m
 - `nomic-embed-text` creates semantic vectors for memory, knowledge, and recipe retrieval and does not generate user-facing text.
 
 Deterministic routing, requirements, grounding, safety policy, and exact fast-path renderers remain authoritative and bypass model inference whenever possible. `scripts/benchmark_model_roles.py` measures the live deployment cost of each role so additional model tiers are added only when they demonstrate a net benefit on the target host.
+
+## Multi-fact turn model
+
+The routing layer distinguishes the primary conversational frame from factual completion requirements. `task_frame` remains the single primary compatibility frame, while `fact_frames` contains one scope per requested fact type. Grounding metadata, deterministic recovery, and fact-tool pruning consume the fact-specific frame rather than reusing the primary frame across domains.
+
+`FactGroundingLedger` preserves satisfaction independently for each factual requirement. A failure or retry for one fact does not reopen a previously grounded fact. This is especially important for compound turns such as weather plus news, market quotes plus current time, or other mixed retrieval requests.
+
+The parser detects fact types before clause decomposition and assigns shared/local time, location, and topic modifiers afterward. This avoids naive conjunction splitting and guarantees a frame exists for every detected required fact type. See `MULTI_FACT_GROUNDING_2026-09-22.md` for details.

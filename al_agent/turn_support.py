@@ -161,6 +161,7 @@ def _prune_mismatched_fact_tools(
     tool_schemas: list[dict[str, Any]],
     task_frame: dict[str, Any],
     user_input: str,
+    fact_frames: dict[str, dict[str, Any]] | None = None,
 ) -> bool:
     """Remove live-fact primitives selected only by lexical name collision.
 
@@ -169,6 +170,9 @@ def _prune_mismatched_fact_tools(
     many non-news tasks.
     """
     intent = str((task_frame or {}).get("intent") or "")
+    active_intents = {str(key) for key in dict(fact_frames or {}) if str(key)}
+    if intent:
+        active_intents.add(intent)
     raw = str(user_input or "").lower()
     kept: list[dict[str, Any]] = []
     changed = False
@@ -176,7 +180,7 @@ def _prune_mismatched_fact_tools(
         name = str(schema.get("function", {}).get("name") or "")
         expected = _FACT_TOOL_INTENTS.get(name)
         explicit_name = bool(name and re.search(rf"\b{re.escape(name.lower())}\b", raw))
-        if expected and intent != expected and not explicit_name:
+        if expected and expected not in active_intents and not explicit_name:
             changed = True
             continue
         kept.append(schema)

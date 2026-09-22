@@ -99,6 +99,8 @@ def _empty_state() -> dict[str, Any]:
         "turn_id": 0,
         "task_epoch": 0,
         "task_frame": {},
+        "fact_frames": {},
+        "fact_requirements": [],
         "status": "idle",
         "objective": "",
         "background": {"rolling_summary": "", "recent_context": "", "recalled_context": ""},
@@ -134,6 +136,8 @@ def _load(conversation_id: str | None = None) -> dict[str, Any]:
     merged.update(value)
     merged.setdefault("task_epoch", 0)
     merged.setdefault("task_frame", {})
+    merged.setdefault("fact_frames", {})
+    merged.setdefault("fact_requirements", [])
     merged.setdefault("requirements", [])
     return merged
 
@@ -281,6 +285,8 @@ class WorkingStateStore:
         requirements: list[dict[str, Any]] | None = None,
         continuation: bool = False,
         task_frame: dict[str, Any] | None = None,
+        fact_frames: dict[str, dict[str, Any]] | None = None,
+        fact_requirements: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         previous = _load(self._cid())
         state = _empty_state()
@@ -330,6 +336,8 @@ class WorkingStateStore:
             "status": "active",
             "objective": _clip(objective, self.limits["objective_chars"]),
             "task_frame": dict(task_frame or {}),
+            "fact_frames": {str(key): dict(value or {}) for key, value in dict(fact_frames or {}).items() if isinstance(value, dict)},
+            "fact_requirements": [dict(item) for item in list(fact_requirements or []) if isinstance(item, dict)][:16],
             "background": {
                 "rolling_summary": _clip(rolling_summary, self.limits["background_chars"]) if continuation else "",
                 # Avoid stale task leakage. Raw recent conversational setup is
@@ -352,6 +360,11 @@ class WorkingStateStore:
     def update_requirements(self, requirements: list[dict[str, Any]]) -> None:
         state = _load(self._cid())
         state["requirements"] = _clean_requirements(requirements, self.limits["requirement_items"])
+        _save(state, self._cid())
+
+    def update_fact_requirements(self, requirements: list[dict[str, Any]]) -> None:
+        state = _load(self._cid())
+        state["fact_requirements"] = [dict(item) for item in list(requirements or []) if isinstance(item, dict)][:16]
         _save(state, self._cid())
 
     def set_plan(self, plan: list[dict[str, Any]] | list[str]) -> None:
@@ -383,7 +396,11 @@ class WorkingStateStore:
         state = _load(self._cid())
         status = str(status or "error")
         from .grounding import grounding_metadata
-        grounding = grounding_metadata(tool_name, result_text, arguments=arguments, task_frame=dict(state.get("task_frame") or {}))
+        grounding = grounding_metadata(
+            tool_name, result_text, arguments=arguments,
+            task_frame=dict(state.get("task_frame") or {}),
+            fact_frames=dict(state.get("fact_frames") or {}),
+        )
         record = {
             "tool": _clip(tool_name, 80),
             "status": status,
@@ -515,6 +532,8 @@ class WorkingStateStore:
             "turn_id": state.get("turn_id", 0),
             "task_epoch": state.get("task_epoch", 0),
             "task_frame": dict(state.get("task_frame", {}) or {}),
+            "fact_frames": {str(key): dict(value or {}) for key, value in dict(state.get("fact_frames", {}) or {}).items() if isinstance(value, dict)},
+            "fact_requirements": [dict(item) for item in list(state.get("fact_requirements", []) or []) if isinstance(item, dict)],
             "status": state.get("status", "idle"),
             "objective": state.get("objective", ""),
             "background": dict(state.get("background", {}) or {}),

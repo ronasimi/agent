@@ -24,7 +24,7 @@ from tools.loop_validator import (
     suggest_recovery_recipe, tool_call_signature, validate_stalled_step, validate_tool_loop,
 )
 from tools.grounding import (
-    encyclopedic_lookup_query, execute_weather_grounding_recovery, make_observation, requested_fact_types,
+    FactGroundingLedger, encyclopedic_lookup_query, execute_weather_grounding_recovery, make_observation, requested_fact_types,
     validate_fact_grounding,
 )
 from tools.media import unpack_media_result
@@ -35,8 +35,8 @@ from tools.pipeline import execute_pipeline
 from tools.recipe_store import check_recipes_for_task, render_recipe_preflight
 from tools.runtime import record_monitor_state, utc_now
 from tools.task_requirements import (
-    TaskRequirementLedger, build_news_query, derive_task_frame, effective_request_for_frame,
-    is_evidence_reuse_request, is_task_continuation, news_region_for_frame,
+    TaskRequirementLedger, build_news_query, derive_fact_frames, derive_task_frame, effective_request_for_frame,
+    is_evidence_reuse_request, is_task_continuation, news_region_for_frame, select_primary_fact_frame,
 )
 from tools.turn_policy import derive_turn_tool_policy
 from tools.user_profile import get_relevant_user_prompt_context, get_user_location
@@ -144,18 +144,43 @@ def handle_user_turn(
         system_prompt = build_system_prompt()
         previous_working_state = WORKING_STATE.load() if WORKING_STATE_ENABLED else {}
         previous_frame = dict(previous_working_state.get("task_frame") or {})
+        previous_fact_frames = {
+            str(key): dict(value or {})
+            for key, value in dict(previous_working_state.get("fact_frames") or {}).items()
+            if isinstance(value, dict)
+        }
+        if previous_frame.get("intent") and str(previous_frame.get("intent")) not in previous_fact_frames:
+            previous_fact_frames[str(previous_frame["intent"])] = dict(previous_frame)
         continuation = is_task_continuation(user_input, previous_frame)
         try:
             default_location = get_user_location()
         except Exception:
             default_location = ""
-        task_frame = derive_task_frame(
+        legacy_task_frame = derive_task_frame(
             user_input,
             previous_frame if continuation else {},
             default_location=default_location,
         )
+        initial_fact_types = requested_fact_types(user_input, task_frame=legacy_task_frame) if GROUNDING_ENABLED else set()
+        fact_frames = derive_fact_frames(
+            user_input,
+            previous_fact_frames if continuation else {},
+            default_location=default_location,
+            required_fact_types=initial_fact_types,
+        )
+        task_frame = select_primary_fact_frame(fact_frames, legacy_task_frame)
         effective_request = effective_request_for_frame(user_input, task_frame)
-        required_fact_types = requested_fact_types(user_input, task_frame=task_frame) if GROUNDING_ENABLED else set()
+        required_fact_types = requested_fact_types(
+            user_input, task_frame=task_frame, fact_frames=fact_frames,
+        ) if GROUNDING_ENABLED else set()
+        # A turn may have one compatibility/primary frame, but every required fact
+        # must retain its own independently scoped frame.
+        for fact_type in required_fact_types:
+            fact_frames.setdefault(
+                fact_type,
+                {"intent": fact_type, "source_text": user_input, "source_span": [0, len(user_input)]},
+            )
+        fact_grounding_ledger = FactGroundingLedger.from_fact_types(required_fact_types)
         # Tool selection must not be contaminated by the assistant's prior prose.
         # Recommendations such as "system monitoring" or phrases such as "local
         # environment" can otherwise expose unrelated host/time tools on the next
@@ -191,7 +216,8 @@ def handle_user_turn(
             if isinstance(item, dict) and item.get("evidence_ref")
         ]
 
-        requirement_ledger = _task_requirement_ledger_cls.from_request(effective_request)
+        requirement_request = effective_request if continuation else user_input
+        requirement_ledger = _task_requirement_ledger_cls.from_request(requirement_request)
         required_tools = requirement_ledger.required_tools()
         selection_limit = min(REQUIREMENT_TOOL_CAP, max(MAX_TOOLS_PER_TURN, len(required_tools) + 4))
         selected_tool_schemas = select_tool_schemas(
@@ -199,7 +225,7 @@ def handle_user_turn(
             max_tools=selection_limit,
             context_text=recent_selection_context,
         )
-        _prune_mismatched_fact_tools(selected_tool_schemas, task_frame, user_input)
+        _prune_mismatched_fact_tools(selected_tool_schemas, task_frame, user_input, fact_frames=fact_frames)
         turn_tool_policy = derive_turn_tool_policy(user_input, set(AVAILABLE_TOOLS_MAP), TOOL_METADATA)
         turn_tool_policy.allow_explicit_requirements(set(required_tools), TOOL_METADATA)
         tool_schemas = turn_tool_policy.filter_schemas(selected_tool_schemas, TOOL_METADATA)
@@ -303,6 +329,8 @@ def handle_user_turn(
                 requirements=requirement_ledger.as_list(),
                 continuation=continuation,
                 task_frame=task_frame,
+                fact_frames=fact_frames,
+                fact_requirements=fact_grounding_ledger.as_list(),
             )
 
         def current_shared_context() -> str:
@@ -387,6 +415,7 @@ def handle_user_turn(
         last_current_time_content = ""
         last_geocode_content = ""
         local_grounding_observations: list[dict[str, Any]] = []
+        fact_ledger_snapshot = json.dumps(fact_grounding_ledger.as_list(), ensure_ascii=False, sort_keys=True)
         if not WORKING_STATE_ENABLED and continuation:
             local_grounding_observations.extend(list(previous_working_state.get("verified_observations") or []))
 
@@ -396,18 +425,33 @@ def handle_user_turn(
             return list(local_grounding_observations)
 
         def grounding_report() -> dict[str, Any]:
+            nonlocal fact_ledger_snapshot
             if not required_fact_types:
-                return {"status": "not_required", "grounded": True, "missing_fact_types": []}
-            return validate_fact_grounding(
+                return {"status": "not_required", "grounded": True, "missing_fact_types": [], "fact_requirements": []}
+            report = validate_fact_grounding(
                 user_input, grounding_observations(), current_turn_id=current_turn_id,
                 weather_max_age_seconds=WEATHER_GROUNDING_MAX_AGE_SECONDS, task_frame=task_frame,
+                fact_frames=fact_frames,
             )
+            fact_grounding_ledger.apply_report(report)
+            for fact_type in (report.get("evidence") or {}):
+                requirement_ledger.mark_fact_satisfied(str(fact_type), reason="grounding_evidence")
+            current_snapshot = json.dumps(fact_grounding_ledger.as_list(), ensure_ascii=False, sort_keys=True)
+            if WORKING_STATE_ENABLED and current_snapshot != fact_ledger_snapshot:
+                WORKING_STATE.update_fact_requirements(fact_grounding_ledger.as_list())
+                WORKING_STATE.update_requirements(requirement_ledger.as_list())
+                fact_ledger_snapshot = current_snapshot
+            report["fact_requirements"] = fact_grounding_ledger.as_list()
+            return report
 
         def record_local_grounding(tool_name: str, content: str, status: str, arguments: Any = None) -> None:
             if WORKING_STATE_ENABLED or status not in {"ok", "partial"}:
                 return
             local_grounding_observations.append(
-                make_observation(tool_name, content, status=status, at=utc_now(), turn_id=current_turn_id, arguments=arguments, task_frame=task_frame)
+                make_observation(
+                    tool_name, content, status=status, at=utc_now(), turn_id=current_turn_id,
+                    arguments=arguments, task_frame=task_frame, fact_frames=fact_frames,
+                )
             )
 
         def record_recipe_stage_requirements(result: Any, *, reason: str) -> None:
@@ -468,7 +512,11 @@ def handle_user_turn(
                 arguments={"query": "derived from current weather request and stored location context"},
             )
             try:
-                result = execute_weather_grounding_recovery(effective_request, recalled_context)
+                weather_frame = dict(fact_frames.get("weather") or task_frame)
+                weather_request = str(weather_frame.get("source_text") or user_input)
+                result = execute_weather_grounding_recovery(
+                    weather_request, recalled_context, frame=weather_frame,
+                )
             except Exception as exc:
                 result = {"ok": False, "error": str(exc), "grounding_recovery": {"fact_type": "weather"}}
             success = bool(result.get("ok"))
@@ -774,7 +822,8 @@ def handle_user_turn(
             }
             if "current_time" in missing:
                 time_args: dict[str, Any] = {}
-                requested_place = str(task_frame.get("entity") or "").strip()
+                time_frame = dict(fact_frames.get("current_time") or task_frame)
+                requested_place = str(time_frame.get("entity") or "").strip()
                 if requested_place:
                     # current_time accepts IANA zones directly. Human place names
                     # are resolved through the same bounded geocoder used by
@@ -807,9 +856,10 @@ def handle_user_turn(
             # list headlines.
             report = grounding_report()
             if "news" in set(report.get("missing_fact_types") or []):
-                news_location = str(task_frame.get("entity") or "")
-                news_query = build_news_query(user_input, task_frame, default_location)
-                region = news_region_for_frame(task_frame, default_location)
+                news_frame = dict(fact_frames.get("news") or {})
+                news_location = str(news_frame.get("entity") or "")
+                news_query = build_news_query(str(news_frame.get("source_text") or user_input), news_frame, default_location)
+                region = news_region_for_frame(news_frame, default_location)
                 _record_harness_recovery_tool(
                     "news_search",
                     {
@@ -828,7 +878,8 @@ def handle_user_turn(
             # has a current-data primitive.
             report = grounding_report()
             if "market_price" in set(report.get("missing_fact_types") or []):
-                instruments = list(task_frame.get("instruments") or extract_market_instruments(user_input))
+                market_frame = dict(fact_frames.get("market_price") or {})
+                instruments = list(market_frame.get("instruments") or extract_market_instruments(user_input))
                 if instruments:
                     _record_harness_recovery_tool(
                         "market_quote", {"instruments": instruments}, trigger="pre_generation:market_price"
@@ -840,7 +891,9 @@ def handle_user_turn(
             # named concepts while leaving philosophical/opinion prompts direct.
             report = grounding_report()
             if "encyclopedic" in set(report.get("missing_fact_types") or []):
-                subject = encyclopedic_lookup_query(effective_request) or encyclopedic_lookup_query(user_input)
+                encyclopedia_frame = dict(fact_frames.get("encyclopedic") or {})
+                encyclopedia_request = str(encyclopedia_frame.get("source_text") or user_input)
+                subject = encyclopedic_lookup_query(encyclopedia_request) or encyclopedic_lookup_query(user_input)
                 if subject:
                     wiki_ok = _record_harness_recovery_tool(
                         "wiki_search", {"query": subject}, trigger="pre_generation:encyclopedic"
@@ -861,7 +914,9 @@ def handle_user_turn(
             # sources if the resulting evidence is insufficient for the task.
             report = grounding_report()
             if "web_fact" in set(report.get("missing_fact_types") or []):
-                if _record_harness_recovery_tool("web_search", {"query": effective_request}, trigger="pre_generation:web_fact"):
+                web_frame = dict(fact_frames.get("web_fact") or {})
+                web_request = str(web_frame.get("source_text") or user_input)
+                if _record_harness_recovery_tool("web_search", {"query": web_request}, trigger="pre_generation:web_fact"):
                     observations = grounding_observations()
                     searches = [x for x in observations if str(x.get("tool") or "") == "web_search"]
                     discovered = list((searches[-1].get("discovered_urls") or [])) if searches else []
@@ -915,7 +970,7 @@ def handle_user_turn(
                 offset = str(payload.get("utc_offset") or "")
                 return f"The timezone is **{tz}**" + (f" ({zone}, UTC{offset[:3]}:{offset[3:]})" if zone and len(offset) == 5 else ".")
             clock = dt.strftime("%I:%M:%S %p").lstrip("0")
-            place = str(task_frame.get("entity") or "").strip()
+            place = str((fact_frames.get("current_time") or task_frame).get("entity") or "").strip()
             where = f" in **{place}**" if place else ""
             return f"It is **{clock}{zone_suffix}**{where}."
 
@@ -948,7 +1003,7 @@ def handle_user_turn(
                 return
 
         if required_fact_types == {"news"} and last_news_search_attempt.get("attempted"):
-            news_location = str(task_frame.get("entity") or "")
+            news_location = str((fact_frames.get("news") or {}).get("entity") or "")
             if last_news_search_attempt.get("success") and news_search_is_empty(last_news_search_attempt.get("content", "")):
                 deterministic = format_news_no_results(location=news_location)
                 assistant_reply = {"role": "assistant", "content": deterministic}
@@ -982,7 +1037,7 @@ def handle_user_turn(
             deterministic = format_news_results(
                 last_news_search_content,
                 limit=6,
-                location=str(task_frame.get("entity") or ""),
+                location=str((fact_frames.get("news") or {}).get("entity") or ""),
             )
             if deterministic and grounding_report().get("grounded", False):
                 assistant_reply = {"role": "assistant", "content": deterministic}

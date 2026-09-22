@@ -680,3 +680,11 @@ docker compose up -d --build
 ```
 
 See [`TOOL_SOAK_TESTING.md`](TOOL_SOAK_TESTING.md) for pass profiles, safety modes, resume support, report fields, duration-only stress mode, and focused-run examples.
+
+## Multi-fact requests and independent grounding
+
+Compound factual turns are represented as `fact_frames`, one independently scoped frame per requested fact type, while the older single `task_frame` remains as a compatibility projection. This prevents one domain from contaminating another—for example, `What are the current headlines and weather?` grounds weather for the configured location and separately searches generic current headlines instead of turning the news query into weather news.
+
+Grounding and recovery maintain independent status per fact. Once a fact such as weather is satisfied, it is not re-queried merely because another fact such as news still needs evidence. Tool pruning also uses all active fact frames, so secondary fact tools cannot be removed because the primary compatibility frame belongs to another domain.
+
+See `MULTI_FACT_GROUNDING_2026-09-22.md` for parsing, modifier inheritance, grounding-ledger behavior, and regression coverage.
