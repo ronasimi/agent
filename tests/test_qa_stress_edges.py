@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-import time
+import psutil
 
 
 def test_shell_success_reports_exit_code_and_replaces_invalid_utf8(monkeypatch, tmp_path):
@@ -23,13 +23,22 @@ def test_shell_timeout_kills_descendant_process_group(monkeypatch, tmp_path):
 
     monkeypatch.setattr(system, "WORKSPACE_DIR", str(tmp_path))
     marker = tmp_path / "orphan.txt"
+    pid_file = tmp_path / "descendant.pid"
     result = system.execute_shell(
-        "sh -c 'sleep 1.5; echo orphan > orphan.txt' & sleep 10",
+        "sh -c 'echo $$ > descendant.pid; sleep 5; echo orphan > orphan.txt' & wait",
         timeout=1,
     )
     assert result.startswith("Error: Command timed out")
-    time.sleep(1.0)
-    assert not marker.exists()
+    assert pid_file.exists(), "descendant did not start before the timeout"
+    descendant_pid = int(pid_file.read_text().strip())
+    try:
+        descendant = psutil.Process(descendant_pid)
+    except psutil.NoSuchProcess:
+        descendant = None
+    if descendant is not None:
+        _, alive = psutil.wait_procs([descendant], timeout=3.0)
+        assert not alive, "descendant process survived the process-group kill"
+    assert not marker.exists(), "orphaned descendant executed after timeout"
 
 
 def test_structured_parsers_strip_leading_utf8_bom():

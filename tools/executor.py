@@ -2,84 +2,72 @@
 
 Every caller (interactive loop, recipes, pipelines) goes through this module so
 timeouts and future execution policy cannot drift between orchestration paths.
+Timeout-decorated Python/custom tools execute in a single-use subprocess; the
+shared subprocess runner can therefore terminate the entire process group on a
+wall-clock timeout instead of leaving an unkillable CPython worker thread.
 """
 from __future__ import annotations
 
-import queue
-import signal
-import threading
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
 from typing import Any
 
-_TIMEOUT_LOCK = threading.Lock()
-_TIMED_OUT_THREADS: dict[str, list[threading.Thread]] = {}
-_MAX_ORPHANED_TOOL_THREADS = 8
+from .subprocess_utils import run_argv
 
-def _prune_timed_out_threads() -> int:
-    with _TIMEOUT_LOCK:
-        total = 0
-        for key in list(_TIMED_OUT_THREADS):
-            alive = [thread for thread in _TIMED_OUT_THREADS[key] if thread.is_alive()]
-            if alive:
-                _TIMED_OUT_THREADS[key] = alive
-                total += len(alive)
-            else:
-                _TIMED_OUT_THREADS.pop(key, None)
-        return total
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
-def _guard_timed_out_tool(name: str) -> None:
-    total = _prune_timed_out_threads()
-    with _TIMEOUT_LOCK:
-        if any(thread.is_alive() for thread in _TIMED_OUT_THREADS.get(name, [])):
-            raise TimeoutError(f"Tool '{name}' still has a previous timed-out invocation running; refusing to start another copy.")
-        if total >= _MAX_ORPHANED_TOOL_THREADS:
-            raise TimeoutError("Harness tool-timeout circuit breaker is open because too many timed-out tool invocations are still running.")
+
+def _execute_isolated_tool(name: str, args: dict[str, Any], seconds: int) -> Any:
+    """Execute one registered tool in a killable child interpreter."""
+    with tempfile.TemporaryDirectory(prefix="agent-tool-") as temp_dir:
+        request_path = Path(temp_dir) / "request.json"
+        result_path = Path(temp_dir) / "result.json"
+        request_path.write_text(
+            json.dumps({"name": name, "args": args}, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+        try:
+            os.chmod(request_path, 0o600)
+        except OSError:
+            pass
+
+        proc = run_argv(
+            [sys.executable, "-m", "tools.executor_worker", str(request_path), str(result_path)],
+            cwd=str(_REPO_ROOT),
+            timeout=seconds,
+            env=os.environ.copy(),
+            max_output_bytes=262144,
+        )
+        if proc.timed_out:
+            raise TimeoutError(
+                f"Tool '{name}' exceeded its {seconds}-second harness timeout; "
+                "the isolated tool process group was terminated."
+            )
+        if not result_path.exists():
+            detail = (proc.stderr or proc.stdout or f"isolated worker exited with status {proc.returncode}").strip()
+            raise RuntimeError(f"Tool '{name}' isolated worker failed without a result: {detail[:1200]}")
+
+        try:
+            packet = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Tool '{name}' isolated worker returned an invalid result: {exc}") from exc
+        if packet.get("ok") is True:
+            return packet.get("value")
+        error_type = str(packet.get("error_type") or "RuntimeError")
+        message = str(packet.get("error") or "isolated tool failed")
+        raise RuntimeError(f"{error_type}: {message}")
 
 
 def execute_registered_tool(name: str, args: dict[str, Any]) -> Any:
     # Import lazily to avoid a catalog -> executor -> catalog cycle at startup.
     from .catalog import AVAILABLE_TOOLS_MAP, TOOL_METADATA
 
-    _guard_timed_out_tool(name)
     func = AVAILABLE_TOOLS_MAP[name]
     timeout = TOOL_METADATA.get(name, {}).get("timeout")
     if not timeout:
         return func(**args)
     seconds = max(1, min(int(timeout), 300))
-
-    # SIGALRM cleanly interrupts Python/native calls from the process main
-    # thread.  Web turns run on worker threads, so use a daemon invocation there
-    # to keep a buggy extension from wedging the turn forever.  The daemon may
-    # finish later, but it cannot hold the interactive loop or process shutdown.
-    if threading.current_thread() is threading.main_thread() and hasattr(signal, "SIGALRM"):
-        previous_handler = signal.getsignal(signal.SIGALRM)
-
-        def _raise_timeout(_signum, _frame):
-            raise TimeoutError(f"Tool '{name}' exceeded its {seconds}-second harness timeout.")
-
-        signal.signal(signal.SIGALRM, _raise_timeout)
-        signal.setitimer(signal.ITIMER_REAL, seconds)
-        try:
-            return func(**args)
-        finally:
-            signal.setitimer(signal.ITIMER_REAL, 0)
-            signal.signal(signal.SIGALRM, previous_handler)
-
-    result_queue: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
-
-    def invoke() -> None:
-        try:
-            result_queue.put((True, func(**args)))
-        except BaseException as exc:  # propagate the original tool exception
-            result_queue.put((False, exc))
-
-    thread = threading.Thread(target=invoke, name=f"tool-{name}", daemon=True)
-    thread.start()
-    try:
-        ok, value = result_queue.get(timeout=seconds)
-    except queue.Empty as exc:
-        with _TIMEOUT_LOCK:
-            _TIMED_OUT_THREADS.setdefault(name, []).append(thread)
-        raise TimeoutError(f"Tool '{name}' exceeded its {seconds}-second harness timeout; repeated invocations are blocked until the timed-out call exits.") from exc
-    if ok:
-        return value
-    raise value
+    return _execute_isolated_tool(name, args, seconds)

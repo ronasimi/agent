@@ -36,7 +36,7 @@ def pressure_info(resource: str = "all") -> str:
                 for token in parts[1:]:
                     k,v=token.split("=",1); item[k]=float(v) if k!="total" else int(v)
                 rows.append(item)
-        except OSError as exc: rows=[{"error":str(exc)}]
+        except (OSError, ValueError, IndexError) as exc: rows=[{"error":str(exc)}]
         out[kind]=rows
     return _json(out)
 
@@ -82,7 +82,14 @@ def filesystem_usage(path: str = "/", host: bool = True) -> str:
     raw = str(path or "/")
     actual = raw
     if host and Path("/host").is_dir():
-        actual = "/host" if raw == "/" else str(Path("/host") / raw.lstrip("/"))
+        try:
+            root = Path("/host").resolve()
+            target = root if raw == "/" else (root / raw.lstrip("/")).resolve()
+            if os.path.commonpath([str(root), str(target)]) != str(root):
+                return "Error: path escapes /host boundary."
+            actual = str(target)
+        except (OSError, ValueError) as exc:
+            return f"Error: filesystem_usage path validation failed: {exc}"
     try:
         usage = psutil.disk_usage(actual)
         result={"path":raw,"actual_path":actual,"total_gb":round(usage.total/1073741824,2),"free_gb":round(usage.free/1073741824,2),"used_percent":usage.percent}

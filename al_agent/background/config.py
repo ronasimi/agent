@@ -32,7 +32,12 @@ OLLAMA_HOST = AGENT_CFG.get("host", os.environ.get("OLLAMA_HOST", "http://127.0.
 os.environ["OLLAMA_HOST"] = OLLAMA_HOST
 POLL_SECONDS = float(WORKER_CFG.get("poll_interval_seconds", 3))
 HEARTBEAT_SECONDS = float(WORKER_CFG.get("heartbeat_seconds", 15))
+COMPACTION_TIMEOUT_SECONDS = max(1.0, float(WORKER_CFG.get(
+    "compaction_timeout_seconds",
+    AGENT_CFG.get("model_transport", {}).get("timeout_seconds", 120),
+)))
 STALE_SECONDS = int(WORKER_CFG.get("stale_job_seconds", 180))
+MAX_JOB_RUNTIME_SECONDS = max(60.0, float(WORKER_CFG.get("max_job_runtime_seconds", 7200)))
 INTERACTIVE_COOLDOWN = float(WORKER_CFG.get("interactive_cooldown_seconds", 10))
 MIN_AVAILABLE_RAM_MB = int(WORKER_CFG.get("min_available_memory_mb", 900))
 MAX_AGENT_VRAM_MB = int(WORKER_CFG.get("max_agent_vram_mb", 7200))

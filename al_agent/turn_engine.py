@@ -65,28 +65,44 @@ from .turn_support import (
 )
 
 def handle_user_turn(
-    messages: list[dict], user_input: str, thinking_enabled: bool, *, refresh_history: bool = False
+    messages: list[dict],
+    user_input: str,
+    thinking_enabled: bool,
+    *,
+    refresh_history: bool = False,
+    runtime_overrides: dict[str, Any] | None = None,
 ) -> None:
+    overrides = runtime_overrides or {}
+    _ollama_client = overrides.get("OLLAMA", OLLAMA)
+    _validator_client = overrides.get("LOOP_VALIDATOR_CLIENT", LOOP_VALIDATOR_CLIENT)
+    _recipe_match_threshold = overrides.get("RECIPE_MATCH_THRESHOLD", RECIPE_MATCH_THRESHOLD)
+    _task_requirement_ledger_cls = overrides.get("TaskRequirementLedger", TaskRequirementLedger)
+    _record_monitor_state_fn = overrides.get("record_monitor_state", record_monitor_state)
+    _append_and_save_fn = overrides.get("append_and_save", append_and_save)
+    _acquire_lock_fn = overrides.get("acquire_inference_lock", _acquire_inference_lock)
+    _release_lock_fn = overrides.get("release_inference_lock", _release_inference_lock)
+    _queue_compaction_fn = overrides.get("queue_compaction_if_needed", _queue_compaction_if_needed)
+
     turn_started = time.monotonic()
     answer_first_visible_at: float | None = None
     last_model_metrics: dict[str, Any] = {}
     # Advertise foreground demand before blocking on the cross-process lock so
     # a background report worker cannot repeatedly reacquire it between long
     # 9B synthesis calls and starve an interactive turn.
-    record_monitor_state("agent.last_interaction", utc_now())
-    record_monitor_state("agent.interaction_waiting", {"pid": os.getpid(), "started_at": utc_now()})
+    _record_monitor_state_fn("agent.last_interaction", utc_now())
+    _record_monitor_state_fn("agent.interaction_waiting", {"pid": os.getpid(), "started_at": utc_now()})
     try:
-        inference_lock = _acquire_inference_lock()
+        inference_lock = _acquire_lock_fn()
     except Exception:
-        record_monitor_state("agent.interaction_waiting", False)
+        _record_monitor_state_fn("agent.interaction_waiting", False)
         raise
     lock_acquired = time.monotonic()
-    record_monitor_state("agent.interaction_waiting", False)
+    _record_monitor_state_fn("agent.interaction_waiting", False)
     emit_event(
         "turn_start", content=user_input, thinking=bool(thinking_enabled),
         queue_wait_ms=(lock_acquired - turn_started) * 1000.0,
     )
-    record_monitor_state("agent.interaction_active", {"pid": os.getpid(), "started_at": utc_now()})
+    _record_monitor_state_fn("agent.interaction_active", {"pid": os.getpid(), "started_at": utc_now()})
     # A large /research writer may have been kept resident between background
     # calls. We own the inference lock here, so evict it before Ollama loads the
     # interactive model and avoid a transient over-budget three-model state.
@@ -103,9 +119,9 @@ def handle_user_turn(
             handled_recipe, recipe_reply = handle_recipe_confirmation(user_input)
             if handled_recipe:
                 user_msg = {"role": "user", "content": user_input}
-                append_and_save(messages, user_msg)
+                _append_and_save_fn(messages, user_msg)
                 assistant_reply = {"role": "assistant", "content": recipe_reply}
-                append_and_save(messages, assistant_reply)
+                _append_and_save_fn(messages, assistant_reply)
                 print(f"\nAgent: {recipe_reply}\n")
                 answer_first_visible_at = answer_first_visible_at or time.monotonic()
                 emit_event("assistant_final", content=recipe_reply, finalization=False)
@@ -122,7 +138,7 @@ def handle_user_turn(
         if detected_images:
             msg["images"] = detected_images
             print(f"  \033[92m[System]: Attached {len(detected_images)} media file(s).\033[0m")
-        append_and_save(messages, msg)
+        _append_and_save_fn(messages, msg)
         current_turn_id = int(msg.get("_db_id") or 0)
 
         system_prompt = build_system_prompt()
@@ -151,7 +167,7 @@ def handle_user_turn(
         }
         if RECIPES_ENABLED:
             recipe_preflight = check_recipes_for_task(
-                user_input, threshold=RECIPE_MATCH_THRESHOLD, limit=RECIPE_PREFLIGHT_LIMIT,
+                user_input, threshold=_recipe_match_threshold, limit=RECIPE_PREFLIGHT_LIMIT,
             )
             emit_event(
                 "recipe_check",
@@ -175,7 +191,7 @@ def handle_user_turn(
             if isinstance(item, dict) and item.get("evidence_ref")
         ]
 
-        requirement_ledger = TaskRequirementLedger.from_request(effective_request)
+        requirement_ledger = _task_requirement_ledger_cls.from_request(effective_request)
         required_tools = requirement_ledger.required_tools()
         selection_limit = min(REQUIREMENT_TOOL_CAP, max(MAX_TOOLS_PER_TURN, len(required_tools) + 4))
         selected_tool_schemas = select_tool_schemas(
@@ -502,7 +518,7 @@ def handle_user_turn(
                 f"I couldn't retrieve qualifying evidence for {missing}, so I can't provide a grounded factual answer for this request."
             )
             assistant_reply = {"role": "assistant", "content": content}
-            append_and_save(messages, assistant_reply)
+            _append_and_save_fn(messages, assistant_reply)
             if WORKING_STATE_ENABLED:
                 WORKING_STATE.complete_turn(blocked=True)
             print(f"\nAgent: {content}\n")
@@ -522,7 +538,14 @@ def handle_user_turn(
                         note_missing_grounding(report, "forced_finalization")
                     emit_grounding_blocked(report)
                     return False
-            _finalize_after_limit(messages, turn_tail, reason, recovery_context=recovery_context)
+            _finalize_after_limit(
+                messages,
+                turn_tail,
+                reason,
+                recovery_context=recovery_context,
+                client=_ollama_client,
+                append_fn=_append_and_save_fn,
+            )
             answer_first_visible_at = answer_first_visible_at or time.monotonic()
             return True
 
@@ -568,7 +591,7 @@ def handle_user_turn(
 
             with OperationStatus("Fast-model final recipe recovery"):
                 report = suggest_recovery_recipe(
-                    LOOP_VALIDATOR_CLIENT,
+                    _validator_client,
                     FAST_MODEL,
                     user_input,
                     turn_tail,
@@ -904,7 +927,7 @@ def handle_user_turn(
             deterministic = _format_current_time_result(last_current_time_content)
             if deterministic and grounding_report().get("grounded", False):
                 assistant_reply = {"role": "assistant", "content": deterministic}
-                append_and_save(messages, assistant_reply)
+                _append_and_save_fn(messages, assistant_reply)
                 if WORKING_STATE_ENABLED:
                     WORKING_STATE.complete_turn(blocked=False)
                 answer_first_visible_at = time.monotonic()
@@ -916,7 +939,7 @@ def handle_user_turn(
             deterministic = format_weather_recovery(last_weather_recovery_result, user_input)
             if deterministic and grounding_report().get("grounded", False):
                 assistant_reply = {"role": "assistant", "content": deterministic}
-                append_and_save(messages, assistant_reply)
+                _append_and_save_fn(messages, assistant_reply)
                 if WORKING_STATE_ENABLED:
                     WORKING_STATE.complete_turn(blocked=False)
                 answer_first_visible_at = time.monotonic()
@@ -929,7 +952,7 @@ def handle_user_turn(
             if last_news_search_attempt.get("success") and news_search_is_empty(last_news_search_attempt.get("content", "")):
                 deterministic = format_news_no_results(location=news_location)
                 assistant_reply = {"role": "assistant", "content": deterministic}
-                append_and_save(messages, assistant_reply)
+                _append_and_save_fn(messages, assistant_reply)
                 if WORKING_STATE_ENABLED:
                     WORKING_STATE.complete_turn(blocked=True)
                 answer_first_visible_at = time.monotonic()
@@ -944,7 +967,7 @@ def handle_user_turn(
                     str(last_news_search_attempt.get("content") or ""), location=news_location,
                 )
                 assistant_reply = {"role": "assistant", "content": deterministic}
-                append_and_save(messages, assistant_reply)
+                _append_and_save_fn(messages, assistant_reply)
                 if WORKING_STATE_ENABLED:
                     WORKING_STATE.complete_turn(blocked=True)
                 answer_first_visible_at = time.monotonic()
@@ -963,7 +986,7 @@ def handle_user_turn(
             )
             if deterministic and grounding_report().get("grounded", False):
                 assistant_reply = {"role": "assistant", "content": deterministic}
-                append_and_save(messages, assistant_reply)
+                _append_and_save_fn(messages, assistant_reply)
                 if WORKING_STATE_ENABLED:
                     WORKING_STATE.complete_turn(blocked=False)
                 answer_first_visible_at = time.monotonic()
@@ -975,7 +998,7 @@ def handle_user_turn(
             deterministic = format_market_quotes(last_market_quote_content)
             if deterministic and grounding_report().get("grounded", False):
                 assistant_reply = {"role": "assistant", "content": deterministic}
-                append_and_save(messages, assistant_reply)
+                _append_and_save_fn(messages, assistant_reply)
                 if WORKING_STATE_ENABLED:
                     WORKING_STATE.complete_turn(blocked=False)
                 answer_first_visible_at = time.monotonic()
@@ -987,7 +1010,7 @@ def handle_user_turn(
             deterministic = format_encyclopedia_result(last_encyclopedia_content)
             if deterministic and grounding_report().get("grounded", False):
                 assistant_reply = {"role": "assistant", "content": deterministic}
-                append_and_save(messages, assistant_reply)
+                _append_and_save_fn(messages, assistant_reply)
                 if WORKING_STATE_ENABLED:
                     WORKING_STATE.complete_turn(blocked=False)
                 answer_first_visible_at = time.monotonic()
@@ -1021,7 +1044,7 @@ def handle_user_turn(
                     )[:LOOP_VALIDATOR_MAX_TOOLS]
                     with OperationStatus("Fast-model stalled-step validation"):
                         stall_validation = validate_stalled_step(
-                            LOOP_VALIDATOR_CLIENT,
+                            _validator_client,
                             FAST_MODEL,
                             user_input,
                             turn_tail,
@@ -1092,7 +1115,7 @@ def handle_user_turn(
                 tool_names = [str(schema.get("function", {}).get("name", "")) for schema in tool_schemas]
                 with OperationStatus("Fast-model tool-loop validation"):
                     recovery_validation = validate_tool_loop(
-                        LOOP_VALIDATOR_CLIENT,
+                        _validator_client,
                         FAST_MODEL,
                         user_input,
                         turn_tail,
@@ -1148,7 +1171,7 @@ def handle_user_turn(
             try:
                 emit_event("model_start", model=MODEL, tools=[str(schema.get("function", {}).get("name") or "") for schema in tool_schemas])
                 def _model_stream():
-                    return OLLAMA.chat(
+                    return _ollama_client.chat(
                         model=MODEL,
                         messages=ollama_wire_messages(active),
                         tools=tool_schemas,
@@ -1269,7 +1292,7 @@ def handle_user_turn(
                 "cache_hit_pct": cache_hit_pct,
                 "answer_first_visible_ms": perf_stats.get("_first_visible_ms"),
             }
-            record_monitor_state("agent.last_model_stats", last_model_metrics)
+            _record_monitor_state_fn("agent.last_model_stats", last_model_metrics)
             emit_event("model_stats", **last_model_metrics)
 
             policy_leak_detected = policy_leak_detected or _looks_like_prompt_policy_leak(full_content)
@@ -1286,7 +1309,7 @@ def handle_user_turn(
                     )
                     continue
                 safe = "I couldn't produce a clean response for that request without exposing internal control text."
-                append_and_save(messages, {"role": "assistant", "content": safe})
+                _append_and_save_fn(messages, {"role": "assistant", "content": safe})
                 if WORKING_STATE_ENABLED:
                     WORKING_STATE.complete_turn(blocked=True)
                 answer_first_visible_at = answer_first_visible_at or time.monotonic()
@@ -1433,7 +1456,7 @@ def handle_user_turn(
             if full_content or tool_calls:
                 if full_content:
                     print(f"\nAgent: {full_content}", end="", flush=True)
-                append_and_save(messages, assistant_msg)
+                _append_and_save_fn(messages, assistant_msg)
                 turn_tail.append(model_message(assistant_msg))
 
             if not tool_calls:
@@ -1636,7 +1659,7 @@ def handle_user_turn(
                 )
                 if media_refs:
                     tool_message["media"] = media_refs
-                append_and_save(messages, tool_message)
+                _append_and_save_fn(messages, tool_message)
                 turn_tail.append(model_message(tool_message))
 
                 tracker.record_tool(
@@ -1791,8 +1814,8 @@ def handle_user_turn(
                 emit_fallback_recipe_save_prompt()
 
     finally:
-        record_monitor_state("agent.interaction_waiting", False)
-        record_monitor_state("agent.interaction_active", False)
+        _record_monitor_state_fn("agent.interaction_waiting", False)
+        _record_monitor_state_fn("agent.interaction_active", False)
         total_turn_ms = (time.monotonic() - turn_started) * 1000.0
         turn_metrics = {
             "total_turn_ms": total_turn_ms,
@@ -1801,10 +1824,10 @@ def handle_user_turn(
         }
         if answer_first_visible_at is not None:
             turn_metrics["answer_first_visible_ms"] = (answer_first_visible_at - turn_started) * 1000.0
-        record_monitor_state("agent.last_turn_metrics", turn_metrics)
+        _record_monitor_state_fn("agent.last_turn_metrics", turn_metrics)
         try:
-            _queue_compaction_if_needed(messages)
+            _queue_compaction_fn(messages)
         except Exception as exc:
             print(f"  \033[93m[System]: Could not queue context compaction: {exc}\033[0m")
         emit_event("turn_end", **turn_metrics)
-        _release_inference_lock(inference_lock)
+        _release_lock_fn(inference_lock)

@@ -99,31 +99,23 @@ def test_nonzero_execution_with_stdout_is_not_classified_as_success():
     assert outcome["reason"] == "nonzero_exit"
 
 
-def test_executor_blocks_duplicate_copy_of_still_running_timed_out_tool(monkeypatch):
+def test_timeout_bounded_registered_tools_use_killable_isolated_worker(monkeypatch):
     import tools.catalog as catalog
     import tools.executor as executor
 
-    name = "qa_slow_timeout_tool"
-    def slow():
-        time.sleep(2.0)
-        return "done"
+    name = "qa_timeout_tool"
+    monkeypatch.setitem(catalog.AVAILABLE_TOOLS_MAP, name, lambda: "in-process")
+    monkeypatch.setitem(catalog.TOOL_METADATA, name, {"timeout": 7, "readonly": True})
+    calls = []
+    monkeypatch.setattr(
+        executor,
+        "_execute_isolated_tool",
+        lambda tool_name, args, seconds: calls.append((tool_name, args, seconds)) or "isolated",
+    )
 
-    monkeypatch.setitem(catalog.AVAILABLE_TOOLS_MAP, name, slow)
-    monkeypatch.setitem(catalog.TOOL_METADATA, name, {"timeout": 1, "readonly": True})
-    errors = []
-
-    def first_call():
-        try:
-            executor.execute_registered_tool(name, {})
-        except Exception as exc:
-            errors.append(str(exc))
-
-    thread = threading.Thread(target=first_call)
-    thread.start()
-    thread.join(timeout=1.5)
-    assert errors and "exceeded" in errors[0]
-    with pytest.raises(TimeoutError, match="previous timed-out invocation"):
-        executor.execute_registered_tool(name, {})
+    assert executor.execute_registered_tool(name, {}) == "isolated"
+    assert calls == [(name, {}, 7)]
+    assert not hasattr(executor, "_TIMED_OUT_THREADS")
 
 
 def test_malformed_missing_required_call_is_rejected_without_execution():

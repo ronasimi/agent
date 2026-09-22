@@ -132,3 +132,14 @@ The harness now:
 - adds regression tests for news grounding, headline rendering, weather-horizon enforcement, unsupported-field avoidance, and textual read-only tool-call repair.
 
 This both improves reliability and removes a full LLM generation from common weather/headline queries, reducing perceived TTFT for those paths.
+
+## 2026-09-22 follow-up
+
+Additional latency/correctness hardening closes two same-runner transport gaps:
+
+| Issue | Root cause | Fix |
+|---|---|---|
+| Fast validator could reload the main Ollama runner when `fast_model == model` | `tool_loop_validator.options.num_ctx` could override the already-aligned fast context with a smaller value | `state.py` now forces both `FAST_OPTIONS` and final `LOOP_VALIDATOR_OPTIONS.num_ctx` to `MAIN_OPTIONS.num_ctx` whenever the model identity is shared |
+| Main/compaction requests could wait on an unbounded client transport | The main `Client` and inline compaction `Client` omitted explicit timeout values | Added configurable `model_transport.timeout_seconds` and `worker.compaction_timeout_seconds` bounds |
+
+The read-only parallel tool-batch path remains unchanged; timeout-decorated registered tools now pay subprocess isolation only when a tool declares a harness timeout, avoiding a blanket latency penalty on the common tool path.

@@ -130,3 +130,9 @@ def test_textual_readonly_tool_call_can_be_repaired(monkeypatch):
     calls, name = turn_support._recover_textual_readonly_tool_call(text, {"web_search"})
     assert name == "web_search"
     assert calls[0]["function"]["arguments"] == {"query": "London ON news"}
+
+
+def test_single_dict_tool_call_is_not_iterated_as_mapping_keys():
+    call = _call("demo", 7, "single")
+    calls = merge_stream_tool_calls([], call)
+    assert calls == [call]

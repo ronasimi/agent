@@ -46,6 +46,9 @@ agent:
   # should not consume a semantic/tool-loop iteration. Once streaming begins,
   # the request is never replayed because that could duplicate output/actions.
   model_transport:
+    # Upper bound for one Ollama HTTP request/read stall. Streaming generation
+    # may continue normally as long as the transport continues making progress.
+    timeout_seconds: 120
     preflight_retries: 1
     base_delay_seconds: 0.15
     max_delay_seconds: 0.75
@@ -258,7 +261,15 @@ research:
 worker:
   poll_interval_seconds: 3
   heartbeat_seconds: 15
+  # Bound a background compaction transport stall independently of the worker
+  # lifecycle so one dead Ollama request cannot freeze maintenance forever.
+  compaction_timeout_seconds: 120
   stale_job_seconds: 180
+  # Hard safety ceiling for one claimed background job. The worker continues
+  # heartbeats/monitoring while the job runs; if this ceiling is exceeded it
+  # requeues/fails the job and exits so Compose can kill any stuck Python thread
+  # and restart a clean worker process.
+  max_job_runtime_seconds: 7200
   interactive_cooldown_seconds: 10
   min_available_memory_mb: 900
   # This is a scheduling guard, not an Ollama server limit. Keep the actual

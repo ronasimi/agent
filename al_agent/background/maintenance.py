@@ -6,7 +6,10 @@ from tools.host_tools import host_snapshot, ollama_runtime_snapshot
 from tools.memory import apply_conversation_compaction, get_conversation_summary, get_messages_for_compaction
 from tools.notify import format_monitor_notification
 from tools.runtime import complete_job, get_job, get_monitor_state, record_monitor_event, record_monitor_state
-from .config import COMPACTION_KEEP_ALIVE, COMPACTION_MODEL, COMPACTION_OPTIONS, MONITOR_CFG, OLLAMA_HOST
+from .config import (
+    COMPACTION_KEEP_ALIVE, COMPACTION_MODEL, COMPACTION_OPTIONS,
+    COMPACTION_TIMEOUT_SECONDS, MONITOR_CFG, OLLAMA_HOST,
+)
 from .resources import _ensure_interactive_idle, _notify
 
 def run_context_compaction_job(job_id: str) -> str:
@@ -32,7 +35,10 @@ def run_context_compaction_job(job_id: str) -> str:
         f"Older messages:\n{json.dumps(messages, ensure_ascii=False)[:24000]}"
     )
     _ensure_interactive_idle()
-    response = Client(host=os.environ.get("OLLAMA_HOST", OLLAMA_HOST)).generate(
+    response = Client(
+        host=os.environ.get("OLLAMA_HOST", OLLAMA_HOST),
+        timeout=COMPACTION_TIMEOUT_SECONDS,
+    ).generate(
         model=COMPACTION_MODEL,
         prompt=prompt,
         options=COMPACTION_OPTIONS,

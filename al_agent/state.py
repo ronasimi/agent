@@ -16,8 +16,13 @@ AGENT_CFG = CONFIG.get("agent", {})
 MODEL = AGENT_CFG.get("model", "agent-main:4b")
 FAST_MODEL = AGENT_CFG.get("fast_model", "agent-fast:2b")
 FAST_MODEL_KEEP_ALIVE = AGENT_CFG.get("fast_model_keep_alive", 0)
-MAIN_OPTIONS = AGENT_CFG.get("main_options") or {"num_ctx": 16384, "temperature": 0.6, "top_p": 0.95, "top_k": 20}
-FAST_OPTIONS = AGENT_CFG.get("fast_options") or {"num_ctx": 4096, "temperature": 0.6, "top_p": 0.95, "top_k": 20}
+MAIN_OPTIONS = dict(AGENT_CFG.get("main_options") or {"num_ctx": 16384, "temperature": 0.6, "top_p": 0.95, "top_k": 20})
+FAST_OPTIONS = dict(AGENT_CFG.get("fast_options") or {"num_ctx": 4096, "temperature": 0.6, "top_p": 0.95, "top_k": 20})
+# Ollama keys resident runners by model *and* context size.  If the fast role
+# reuses the interactive model, align its context before building validator
+# options so validator calls cannot evict/reload the warm main runner.
+if MODEL == FAST_MODEL and MAIN_OPTIONS.get("num_ctx"):
+    FAST_OPTIONS["num_ctx"] = MAIN_OPTIONS["num_ctx"]
 MAX_TOOLS_PER_TURN = max(8, int(AGENT_CFG.get("max_tools_per_turn", 12)))
 OLLAMA_HOST = AGENT_CFG.get("host", "http://127.0.0.1:11434")
 os.environ["OLLAMA_HOST"] = OLLAMA_HOST
@@ -45,9 +50,12 @@ MODEL_TRANSPORT_CFG = AGENT_CFG.get("model_transport", {})
 MODEL_PREFLIGHT_RETRIES = max(0, min(int(MODEL_TRANSPORT_CFG.get("preflight_retries", 1)), 4))
 MODEL_RETRY_BASE_DELAY = max(0.0, float(MODEL_TRANSPORT_CFG.get("base_delay_seconds", 0.15)))
 MODEL_RETRY_MAX_DELAY = max(MODEL_RETRY_BASE_DELAY, float(MODEL_TRANSPORT_CFG.get("max_delay_seconds", 0.75)))
+MODEL_TRANSPORT_TIMEOUT = max(1.0, float(MODEL_TRANSPORT_CFG.get("timeout_seconds", 120)))
 LOOP_VALIDATOR_CFG = AGENT_CFG.get("tool_loop_validator", {})
 LOOP_VALIDATOR_ENABLED = bool(LOOP_VALIDATOR_CFG.get("enabled", True))
 LOOP_VALIDATOR_OPTIONS = {**FAST_OPTIONS, **(LOOP_VALIDATOR_CFG.get("options") or {})}
+if MODEL == FAST_MODEL and MAIN_OPTIONS.get("num_ctx"):
+    LOOP_VALIDATOR_OPTIONS["num_ctx"] = MAIN_OPTIONS["num_ctx"]
 LOOP_VALIDATOR_MAX_CHARS = int(LOOP_VALIDATOR_CFG.get("max_transcript_chars", 12000))
 LOOP_VALIDATOR_KEEP_ALIVE = LOOP_VALIDATOR_CFG.get("keep_alive", FAST_MODEL_KEEP_ALIVE)
 STALL_VALIDATOR_AFTER = max(2, int(LOOP_VALIDATOR_CFG.get("failed_step_attempts", 3)))
@@ -93,7 +101,7 @@ RECIPE_VALIDATOR_MAX_STAGES = max(1, min(int(RECIPE_CFG.get("validator_fallback_
 RECIPE_VALIDATOR_MAX_TOOLS = max(1, min(int(RECIPE_CFG.get("validator_fallback_max_tools", 12)), LOOP_VALIDATOR_MAX_TOOLS))
 INFERENCE_LOCK_PATH = os.environ.get("AGENT_INFERENCE_LOCK", "/app/workspace/.agent_inference.lock")
 
-OLLAMA = Client(host=OLLAMA_HOST)
+OLLAMA = Client(host=OLLAMA_HOST, timeout=MODEL_TRANSPORT_TIMEOUT)
 LOOP_VALIDATOR_CLIENT = Client(host=OLLAMA_HOST, timeout=float(LOOP_VALIDATOR_CFG.get("timeout_seconds", 45)))
 
 init_db()

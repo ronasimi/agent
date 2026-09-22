@@ -49,10 +49,13 @@ def merge_stream_tool_calls(accumulated: list[Any], incoming: Any) -> list[Any]:
     same id/signature so the turn engine neither drops nor duplicates actions.
     """
     result = list(accumulated or [])
-    try:
-        items = list(incoming or [])
-    except TypeError:
-        items = [incoming] if incoming else []
+    if isinstance(incoming, dict):
+        items = [incoming]
+    else:
+        try:
+            items = list(incoming or [])
+        except TypeError:
+            items = [incoming] if incoming else []
     positions = {_tool_call_key(call): index for index, call in enumerate(result)}
     for call in items:
         key = _tool_call_key(call)

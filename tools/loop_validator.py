@@ -521,7 +521,12 @@ def _sanitize_recovery_recipe(
                 continue
             sid = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(stage.get("id") or f"s{index}"))[:40] or f"s{index}"
             if sid in ids:
-                sid = f"s{index}"
+                base = f"s{index}"
+                sid = base
+                suffix = 1
+                while sid in ids:
+                    sid = f"{base}_{suffix}"
+                    suffix += 1
             ids.add(sid)
             signature = tool_call_signature({"function": {"name": tool, "arguments": args}})
             if signature in seen_signatures or signature in recipe_signatures:
@@ -606,25 +611,52 @@ def suggest_recovery_recipe(
         }
 
 def _parse_structured_payload(raw: Any) -> dict[str, Any]:
-    """Decode a small JSON object even when a local model adds fences/preamble."""
+    """Decode one JSON object from bounded local-model wrapper prose.
+
+    Prefer the complete response, then explicit markdown fences, then scan a
+    small number of object starts.  Do not globally strip backticks because
+    they may legitimately occur inside JSON string values.
+    """
     if isinstance(raw, dict):
         return raw
     text = str(raw or "").strip()
-    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I).strip()
-    try:
-        payload = json.loads(text)
+    if not text:
+        raise ValueError("validator did not return a JSON object")
+
+    decoder = json.JSONDecoder()
+
+    def decode_candidate(candidate: str) -> dict[str, Any] | None:
+        value = str(candidate or "").strip()
+        if not value:
+            return None
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            try:
+                payload, _ = decoder.raw_decode(value)
+            except json.JSONDecodeError:
+                return None
+        return payload if isinstance(payload, dict) else None
+
+    payload = decode_candidate(text)
+    if payload is not None:
+        return payload
+
+    for match in re.finditer(r"```(?:json)?\s*(.*?)```", text, flags=re.I | re.DOTALL):
+        payload = decode_candidate(match.group(1))
+        if payload is not None:
+            return payload
+
+    # Preamble text may itself contain braces, so trying only the first ``{``
+    # can miss the real payload.  Bound the scan to keep malformed output cheap.
+    starts = [index for index, char in enumerate(text) if char == "{"][:32]
+    for start in starts:
+        try:
+            payload, _ = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            continue
         if isinstance(payload, dict):
             return payload
-    except json.JSONDecodeError:
-        pass
-    start = text.find("{")
-    if start >= 0:
-        try:
-            payload, _ = json.JSONDecoder().raw_decode(text[start:])
-            if isinstance(payload, dict):
-                return payload
-        except json.JSONDecodeError:
-            pass
     raise ValueError("validator did not return a JSON object")
 
 

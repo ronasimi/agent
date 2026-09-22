@@ -130,9 +130,9 @@ Baseline: `agent-master-qa-stress-fixes.zip`
 ### 15 Infinite/runaway execution
 
 1. Command-backed tools now use process-group timeouts and bounded pipe draining.
-2. Registered Python tools on Web worker threads still cannot be forcibly killed safely from CPython once already running.
-3. **Pre-fix defect:** after the harness timeout returned, another invocation of the same tool could start while the timed-out daemon thread was still alive, multiplying runaway calls/side effects.
-4. **Fix:** executor-level timeout circuit breaker tracks still-running timed-out tool threads, refuses another copy of the same tool, and caps the total number of orphaned timeout threads until they exit.
+2. Timeout-decorated registered Python/custom tools now execute in a single-use child interpreter through the same process-group-safe subprocess runner.
+3. **Pre-fix defect:** the previous daemon-thread timeout returned control but could not terminate the still-running Python function, so enough deliberately wedged calls could exhaust the orphan-thread circuit-breaker budget.
+4. **Fix:** the executor now kills the isolated tool process group on timeout. The orphan-thread registry/cap is gone, so a timed-out tool cannot retain an execution thread inside the WebUI process.
 
 ## Phase 3 — generalized fixes and root causes
 
@@ -141,7 +141,7 @@ Baseline: `agent-master-qa-stress-fixes.zip`
 | External command behavior differed by tool | Many primitives owned independent `subprocess.run(text=True)` paths | Added shared byte-mode, bounded, process-group-safe `run_argv()` and adopted it across shell/Python, host/network diagnostics, network mapper/primitives, repo checks, and package management |
 | Large/invalid-byte output could consume memory or raise decoding errors | Pipe capture was unbounded and text decoding happened inside `subprocess` | Concurrent byte drains retain a capped prefix, mark truncation, and decode with replacement |
 | Timeout could leave descendants | Timeout killed only a direct process in older helper paths | Every shared external process starts a POSIX session and timeout kills the process group |
-| Repeated timed-out Python tool could multiply runaways | CPython threads cannot be safely killed | Circuit breaker blocks another copy while a previous timed-out invocation remains alive and caps orphaned timeout workers |
+| Timed-out registered Python/custom tool could survive in a daemon thread | CPython threads cannot be safely killed | Timeout-decorated registered tools execute in a single-use subprocess; timeout kills the child process group and leaves no orphan-thread budget to exhaust |
 | Nested malformed tool args passed validation | Schema normalization validated only top-level fields/types | Recursive JSON-schema-subset validation for nested objects/arrays, `required`, `additionalProperties`, enum, min/max, length/item bounds |
 | Extremely large/invalid generic arguments | Generated schemas had few generic limits | Added reusable parameter constraints for command/code/query/URL/path/content/timeouts/ports/common counts |
 | Validation failure could destabilize bookkeeping | `args` could be referenced after normalization raised | Initialize normalized-argument fallback before the execution `try` |
@@ -162,3 +162,20 @@ Baseline: `agent-master-qa-stress-fixes.zip`
 - Ollama alias helper shell syntax: passed
 
 The external test runner uses temporary `ollama`/`ddgs` stubs only because no live Ollama service is available in this environment; the repository itself contains no such stubs.
+
+## 2026-09-22 architectural hardening follow-up
+
+A second QA pass removed the remaining timeout-thread design debt and hardened adjacent control paths:
+
+- request-local runtime dependency overrides replace facade-to-engine global monkeypatching;
+- single-dict streamed tool calls are normalized as one call instead of iterating mapping keys;
+- validator JSON extraction tolerates preambles/fenced output without globally deleting markdown fences;
+- recovery-recipe stage IDs are collision-safe;
+- outbound body reads have an absolute monotonic deadline in addition to Requests' connect/read timeout;
+- timeout-decorated registered tools use killable isolated subprocess workers;
+- background jobs are supervised while periodic monitor/maintenance and durable heartbeats continue; a configured hard runtime ceiling restarts the dedicated worker container to terminate a wedged job thread;
+- PSI parsing and host filesystem path validation fail closed on malformed data/traversal;
+- main/compaction Ollama clients have explicit transport timeouts;
+- same-model fast-validator context is aligned to the main runner context to prevent Ollama runner reload thrash.
+
+Validation after this follow-up: **420 passed, 1 skipped** using external test-only Ollama/DDGS import stubs; architecture check passed and the 223-tool builtin manifest remained current.

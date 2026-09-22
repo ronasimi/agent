@@ -73,25 +73,43 @@ _release_inference_lock = _default_release_inference_lock
 _queue_compaction_if_needed = _turn_support._queue_compaction_if_needed
 
 
-def _sync_runtime_overrides() -> None:
-    """Propagate facade monkeypatches into the modular turn engine."""
-    for name in (
-        "OLLAMA", "LOOP_VALIDATOR_CLIENT", "RECIPE_MATCH_THRESHOLD",
-        "TaskRequirementLedger", "record_monitor_state", "append_and_save",
-        "_acquire_inference_lock", "_release_inference_lock",
-        "_queue_compaction_if_needed",
-    ):
-        if name in globals():
-            setattr(_turn_engine, name, globals()[name])
-    _turn_support.OLLAMA = globals().get("OLLAMA", _state.OLLAMA)
-    _turn_support.append_and_save = globals().get("append_and_save", append_and_save)
+def _runtime_overrides() -> dict[str, object]:
+    """Return request-local facade overrides without mutating module globals.
+
+    Tests and embedders historically monkeypatch this facade.  Passing those
+    values explicitly preserves that contract while avoiding cross-request
+    writes into :mod:`turn_engine` / :mod:`turn_support` in threaded WebUI
+    deployments.
+    """
+    return {
+        "OLLAMA": globals().get("OLLAMA", _state.OLLAMA),
+        "LOOP_VALIDATOR_CLIENT": globals().get("LOOP_VALIDATOR_CLIENT", _state.LOOP_VALIDATOR_CLIENT),
+        "RECIPE_MATCH_THRESHOLD": globals().get("RECIPE_MATCH_THRESHOLD", _state.RECIPE_MATCH_THRESHOLD),
+        "TaskRequirementLedger": globals().get("TaskRequirementLedger", TaskRequirementLedger),
+        "record_monitor_state": globals().get("record_monitor_state", record_monitor_state),
+        "append_and_save": globals().get("append_and_save", append_and_save),
+        "acquire_inference_lock": globals().get("_acquire_inference_lock", _default_acquire_inference_lock),
+        "release_inference_lock": globals().get("_release_inference_lock", _default_release_inference_lock),
+        "queue_compaction_if_needed": globals().get("_queue_compaction_if_needed", _turn_support._queue_compaction_if_needed),
+    }
 
 
 def _finalize_after_limit(messages, turn_tail=None, reason="The tool-call safety limit was reached."):
-    _sync_runtime_overrides()
-    return _turn_support._finalize_after_limit(messages, turn_tail, reason)
+    overrides = _runtime_overrides()
+    return _turn_support._finalize_after_limit(
+        messages,
+        turn_tail,
+        reason,
+        client=overrides["OLLAMA"],
+        append_fn=overrides["append_and_save"],
+    )
 
 
 def handle_user_turn(messages: list[dict], user_input: str, thinking_enabled: bool, **kwargs) -> None:
-    _sync_runtime_overrides()
-    return _turn_engine.handle_user_turn(messages, user_input, thinking_enabled, **kwargs)
+    return _turn_engine.handle_user_turn(
+        messages,
+        user_input,
+        thinking_enabled,
+        runtime_overrides=_runtime_overrides(),
+        **kwargs,
+    )

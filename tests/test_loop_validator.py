@@ -315,3 +315,30 @@ def test_structured_tool_explicit_error_is_not_mislabeled_malformed():
     )
     assert outcome["success"] is False
     assert outcome["reason"] == "tool_reported_error"
+
+
+def test_validator_parser_skips_braces_in_preamble_before_fenced_payload():
+    from tools.loop_validator import _parse_structured_payload
+
+    payload = _parse_structured_payload(
+        'Diagnostic {not-json} follows:\n```json\n'
+        '{"decision":"finish","diagnosis":"task_complete","reason":"done","suggested_tool":""}\n```\nThanks.'
+    )
+    assert payload["decision"] == "finish"
+
+
+def test_recovery_recipe_stage_id_collision_generates_unique_fallback():
+    from tools.loop_validator import _sanitize_recovery_recipe
+
+    payload = {
+        "decision": "recipe",
+        "diagnosis": "wrong_tool",
+        "reason": "alternate path",
+        "name": "collision test",
+        "stages": [
+            {"id": "s2", "tool": "web_search", "args": {"query": "one"}},
+            {"id": "s2", "tool": "web_search", "args": {"query": "two"}},
+        ],
+    }
+    report = _sanitize_recovery_recipe(payload, ["web_search"], set(), 4)
+    assert [stage["id"] for stage in report["stages"]] == ["s2", "s2_1"]

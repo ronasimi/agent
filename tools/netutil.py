@@ -4,6 +4,8 @@ from __future__ import annotations
 import ipaddress
 import os
 import socket
+import threading
+import time
 from typing import Optional
 from urllib.parse import urljoin, urlparse
 
@@ -76,18 +78,40 @@ def fetch_bytes(
     allow_private: bool = False,
 ) -> tuple[str, requests.Response, bytes]:
     """Fetch a URL with bounded redirects and response size."""
+    timeout = max(0.1, float(timeout))
+    deadline = time.monotonic() + timeout
     current = validate_public_url(url, allow_private=allow_private)
     headers = {"User-Agent": USER_AGENT, "Accept": "*/*"}
 
     session = requests.Session()
     response = None
+    deadline_fired = threading.Event()
+
+    def abort_at_deadline() -> None:
+        deadline_fired.set()
+        try:
+            if response is not None:
+                response.close()
+        except Exception:
+            pass
+        try:
+            session.close()
+        except Exception:
+            pass
+
+    deadline_timer = threading.Timer(timeout, abort_at_deadline)
+    deadline_timer.daemon = True
+    deadline_timer.start()
     try:
         for _ in range(max_redirects + 1):
             current = validate_public_url(current, allow_private=allow_private)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"HTTP fetch exceeded total timeout of {timeout:g}s.")
             response = session.get(
                 current,
                 headers=headers,
-                timeout=timeout,
+                timeout=max(0.1, remaining),
                 stream=True,
                 allow_redirects=False,
             )
@@ -119,15 +143,28 @@ def fetch_bytes(
 
         chunks = []
         total = 0
-        for chunk in response.iter_content(chunk_size=65536):
-            if not chunk:
-                continue
-            total += len(chunk)
-            if total > max_bytes:
-                raise ValueError(f"Response exceeded the {max_bytes} byte limit.")
-            chunks.append(chunk)
+        try:
+            stream = response.iter_content(chunk_size=65536)
+            for chunk in stream:
+                if deadline_fired.is_set() or time.monotonic() > deadline:
+                    raise TimeoutError(f"HTTP response body exceeded total timeout of {timeout:g}s.")
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > max_bytes:
+                    raise ValueError(f"Response exceeded the {max_bytes} byte limit.")
+                chunks.append(chunk)
+        except TimeoutError:
+            raise
+        except Exception as exc:
+            if deadline_fired.is_set() or time.monotonic() > deadline:
+                raise TimeoutError(f"HTTP response body exceeded total timeout of {timeout:g}s.") from exc
+            raise
+        if deadline_fired.is_set() or time.monotonic() > deadline:
+            raise TimeoutError(f"HTTP response body exceeded total timeout of {timeout:g}s.")
         return current, response, b"".join(chunks)
     finally:
+        deadline_timer.cancel()
         if response is not None:
             response.close()
         session.close()

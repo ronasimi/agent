@@ -522,6 +522,9 @@ def _finalize_after_limit(
     turn_tail: list[dict[str, Any]] | None = None,
     reason: str = "The tool-call safety limit was reached.",
     recovery_context: str = "",
+    *,
+    client: Any | None = None,
+    append_fn: Any | None = None,
 ) -> None:
     """Produce a bounded no-tools final answer while preserving latest media."""
     history = messages[1:]
@@ -562,10 +565,12 @@ def _finalize_after_limit(
             "and any useful next steps. Do not call tools. If media is attached, ground visual claims only in those pixels."
         ),
     })
+    model_client = client if client is not None else OLLAMA
+    save_message = append_fn if append_fn is not None else append_and_save
     try:
         # Streamed so the user sees the first token of the fallback summary
         # immediately instead of waiting for the whole answer to be generated.
-        response = OLLAMA.chat(
+        response = model_client.chat(
             model=MODEL, messages=ollama_wire_messages(prompt), options=MAIN_OPTIONS,
             tools=[], think=False, keep_alive=-1, stream=True,
         )
@@ -584,7 +589,7 @@ def _finalize_after_limit(
             emit_event("assistant_delta", content=piece)
         if content:
             print()
-            append_and_save(messages, {"role": "assistant", "content": content})
+            save_message(messages, {"role": "assistant", "content": content})
             emit_event("assistant_final", content=content, finalization=True)
     except Exception as exc:
         print(f"  \033[91m[!] Finalization failed: {exc}\033[0m")
