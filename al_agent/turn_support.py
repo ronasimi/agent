@@ -14,12 +14,14 @@ from tools.task_requirements import TaskRequirementLedger, is_followup_request
 from tools.conversation_context import get_active_conversation_id
 from tools.executor import execute_registered_tool
 from .events import emit_event
-from .model_protocol import ollama_wire_messages
+from .model_protocol import extract_qwen_xml_tool_calls, ollama_wire_messages
+from .vision import route_multimodal_messages
 from .prompts import append_and_save, build_system_prompt
 from .state import (
-    COMPACT_AT, MAIN_OPTIONS, MAX_CTX, MAX_ITERATIONS, MAX_ITERATIONS_HARD,
+    COMPACT_AT, FINAL_NUM_PREDICT, MAIN_OPTIONS, MAX_CTX, MAX_ITERATIONS, MAX_ITERATIONS_HARD,
     MAX_MUTATING_CALLS_PER_ITERATION, MAX_TOOL_CALLS_PER_ITERATION, MAX_TOOL_OUTPUT,
     MAX_TOOLS_PER_TURN, MODEL, OLLAMA, PRUNE_SATISFIED_REQUIREMENT_TOOLS,
+    VISION_MODEL, VISION_MODEL_KEEP_ALIVE, VISION_OPTIONS, VISION_SIDECAR_WHEN_DISTINCT, VISION_MAX_OBSERVATION_CHARS,
     RECENT_MESSAGES, REQUIREMENT_TOOL_CAP, RESERVE_TOKENS, SUMMARY_KEEP_MESSAGES,
     SUPPRESS_COMPLETED_REQUIREMENT_REPEATS, VOLATILE_CONTEXT_LAST, WORKING_STATE,
     WORKING_STATE_EVIDENCE_CHARS, WORKING_STATE_ENABLED, WORKING_STATE_HISTORY_TURNS,
@@ -187,6 +189,22 @@ def _prune_mismatched_fact_tools(
     if changed:
         tool_schemas[:] = kept
     return changed
+
+
+def _recover_qwen_xml_tool_calls(content: str, allowed_names: set[str]) -> tuple[list[dict], list[str]]:
+    """Recover Qwen3.8 textual XML calls as first-class native-equivalent calls.
+
+    The model's embedded chat template explicitly requires XML invocations even
+    though Ollama may also surface structured ``message.tool_calls``.  Treat the
+    strict XML envelope as canonical only when every referenced tool was actually
+    supplied in the current turn; normal registry validation still enforces
+    argument names/types and harness mutation policy.
+    """
+    raw_calls, xml_errors = extract_qwen_xml_tool_calls(content)
+    if not raw_calls:
+        return [], xml_errors
+    parsed, parse_errors = _parse_tool_calls(raw_calls, allowed_names)
+    return parsed, [*xml_errors, *parse_errors]
 
 def _recover_textual_readonly_tool_call(content: str, allowed_names: set[str]) -> tuple[list[dict], str]:
     """Recover explicitly-labelled read-only tool JSON emitted as prose.
@@ -509,9 +527,27 @@ def _bounded_tool_result_with_ref(tool_name: str, result: Any) -> tuple[str, str
         return text, observation_id
     if not observation_id:
         observation_id = store_tool_observation(tool_name, text)
+    # Include the first omitted offset in the warning so the model can retrieve
+    # genuinely missing middle content instead of rereading the visible head.
+    head = 0
+    marker = ""
+    remaining = MAX_TOOL_OUTPUT
+    for _ in range(4):
+        marker = (
+            f"\n\n[Harness: middle truncated; full {len(text)}-character result stored as observation "
+            f"{observation_id}. You MUST use read_observation(observation_id='{observation_id}', "
+            f"offset={head}, length=10000) to retrieve missing middle data before summarizing.]\n\n"
+        )
+        remaining = max(200, MAX_TOOL_OUTPUT - len(marker))
+        next_head = remaining // 2
+        if next_head == head:
+            break
+        head = next_head
+    # Rebuild once with the converged offset.
     marker = (
         f"\n\n[Harness: middle truncated; full {len(text)}-character result stored as observation "
-        f"{observation_id}. Use read_observation(observation_id, offset, length) for another slice.]\n\n"
+        f"{observation_id}. You MUST use read_observation(observation_id='{observation_id}', "
+        f"offset={head}, length=10000) to retrieve missing middle data before summarizing.]\n\n"
     )
     remaining = max(200, MAX_TOOL_OUTPUT - len(marker))
     head = remaining // 2
@@ -574,9 +610,24 @@ def _finalize_after_limit(
     try:
         # Streamed so the user sees the first token of the fallback summary
         # immediately instead of waiting for the whole answer to be generated.
+        route = route_multimodal_messages(
+            model_client,
+            prompt,
+            main_model=MODEL,
+            main_options=MAIN_OPTIONS,
+            vision_model=VISION_MODEL,
+            vision_options=VISION_OPTIONS,
+            vision_keep_alive=VISION_MODEL_KEEP_ALIVE,
+            sidecar_when_distinct=VISION_SIDECAR_WHEN_DISTINCT,
+            max_observation_chars=VISION_MAX_OBSERVATION_CHARS,
+        )
+        final_options = dict(route.options or {})
+        final_options["num_predict"] = min(
+            int(final_options.get("num_predict") or FINAL_NUM_PREDICT), FINAL_NUM_PREDICT
+        )
         response = model_client.chat(
-            model=MODEL, messages=ollama_wire_messages(prompt), options=MAIN_OPTIONS,
-            tools=[], think=False, keep_alive=-1, stream=True,
+            model=route.model, messages=ollama_wire_messages(route.messages), options=final_options,
+            tools=[], think=False, keep_alive=route.keep_alive, stream=True,
         )
         # A client that ignores ``stream`` returns one complete response object.
         chunks = [response] if isinstance(response, dict) or hasattr(response, "message") else response

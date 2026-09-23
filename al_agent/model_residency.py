@@ -30,6 +30,7 @@ from .background.config import (
     REPORT_MODEL_KEEP_ALIVE,
     REPORT_OPTIONS,
     REPORT_RESTORE_MODELS,
+    VISION_MODEL,
 )
 
 INFERENCE_LOCK_PATH = os.environ.get("AGENT_INFERENCE_LOCK", "/app/workspace/.agent_inference.lock")
@@ -205,7 +206,7 @@ def enter_report_model_stage(job_id: str = "") -> dict[str, Any]:
     client = _client()
     with model_maintenance_slot():
         with background_inference_slot():
-            for model in dict.fromkeys([MODEL, FAST_MODEL]):
+            for model in dict.fromkeys([MODEL, FAST_MODEL, VISION_MODEL]):
                 if model and model != REPORT_MODEL:
                     _unload(client, model)
             loaded = _warm(client, REPORT_MODEL, REPORT_OPTIONS, REPORT_MODEL_KEEP_ALIVE)

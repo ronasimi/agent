@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import mimetypes
 import os
+import tempfile
 
 WORKSPACE_DIR = os.path.realpath("/app/workspace")
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
@@ -60,9 +61,32 @@ def write_file(filename: str = "", content: str = "") -> str:
         return "Error: Missing required 'filename' parameter."
     try:
         path = _get_safe_path(filename)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(str(content))
-        return f"Successfully wrote {len(str(content))} characters to {filename}"
+        parent = os.path.dirname(path)
+        os.makedirs(parent, exist_ok=True)
+        payload = str(content)
+        # Same-directory temporary + fsync + atomic replace means a cancelled or
+        # crashed write cannot leave a half-written workspace file behind.
+        fd, temp_path = tempfile.mkstemp(prefix=".agent-write-", dir=parent, text=True)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, path)
+            try:
+                dir_fd = os.open(parent, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
+        finally:
+            if os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+        return f"Successfully wrote {len(payload)} characters to {filename}"
     except Exception as exc:
         return f"Error: writing file '{filename}' failed: {exc}"

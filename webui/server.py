@@ -191,6 +191,7 @@ def health() -> dict[str, Any]:
         "ok": True,
         "main_model": agent_runtime.MODEL,
         "fast_model": agent_runtime.FAST_MODEL,
+        "vision_model": agent_runtime.VISION_MODEL,
         "report_model": str(agent_runtime.AGENT_CFG.get("report_model") or ""),
         "context": agent_runtime.MAX_CTX,
         "working_state": agent_runtime.WORKING_STATE_ENABLED,

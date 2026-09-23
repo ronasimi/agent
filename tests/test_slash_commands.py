@@ -12,7 +12,7 @@ def test_slash_catalog_is_unique_described_and_complete():
     assert all(row["description"].strip() for row in rows)
     assert all(row["usage"].startswith(row["name"]) for row in rows)
     assert {
-        "/help", "/forget", "/think", "/profile", "/tools", "/reload",
+        "/help", "/forget", "/think", "/set", "/profile", "/tools", "/reload",
         "/research", "/jobs", "/job", "/cancel-job", "/reminders",
         "/optimize", "/optimizations", "/approve-optimization",
     } == set(names)

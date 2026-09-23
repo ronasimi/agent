@@ -1,9 +1,10 @@
 const $=(s)=>document.querySelector(s);
 const messagesEl=$('#messages'),promptEl=$('#prompt'),appShell=$('#appShell');
 let socket=null,activeTurn=null,assistantNode=null,activeUserMessageEl=null,attachments=[],workspacePath='',workspaceRows=[];
+let assistantStreamBuffer='',assistantRenderFrame=0,thinkingNode=null,thinkingStreamBuffer='',thinkingRenderFrame=0;
 let activityGroup=null,activityCount=0;
 let followOutput=true,slashCommands=[],slashMenuIndex=0;
-let conversationRows=[],turnStartedAt=0,turnTimer=null;
+let conversationRows=[],turnStartedAt=0,turnTimer=null,activeThinkingEnabled=false;
 const artifactCards=new Map();
 const UI_STATE_KEYS={left:'agent.webui.leftSidebarCollapsed',right:'agent.webui.workspaceOpen',commandHistory:'agent.webui.commandHistory.v1',activeConversation:'agent.webui.activeConversation.v1'};
 let activeConversationId='';
@@ -80,7 +81,10 @@ function setStatus(text,state='ok'){
   if(!value||value==='Ready'){node?.remove();return;}
   if(!node){node=document.createElement('div');node.className='turn-status';node.setAttribute('role','status');node.setAttribute('aria-live','polite');node.innerHTML='<span class="turn-status-dot"></span><span class="turn-status-text"></span>';activeUserMessageEl.appendChild(node);}
   node.classList.toggle('error',state==='error');node.classList.toggle('busy',state==='busy');
-  node.querySelector('.turn-status-text').textContent=value;scrollBottom();
+  // Status/timer updates must never force layout or scrolling. The user message
+  // is already visible when the turn starts, and repeated scrollHeight reads
+  // during long reasoning runs can create needless main-thread work.
+  node.querySelector('.turn-status-text').textContent=value;
 }
 function startTurnTimer(){
   if(!turnStartedAt)turnStartedAt=Date.now();
@@ -125,11 +129,127 @@ function addMessage(role,content,{forceScroll=false,media=[]}={}){
   el.querySelector('.message-actions button').onclick=event=>copyMessage(event.currentTarget,bubble);
   messagesEl.appendChild(el);renderMessageMedia(bubble,[...parsed.attachments,...(media||[])]);promptEl.placeholder='Follow up';scrollBottom(forceScroll);return bubble;
 }
-function appendAssistant(content){
-  if(!assistantNode)assistantNode=addMessage('assistant','');assistantNode.dataset.raw=(assistantNode.dataset.raw||'')+(content||'');
-  const parsed=messageContent(assistantNode.dataset.raw);assistantNode.innerHTML=renderMarkdown(parsed.text);renderMessageMedia(assistantNode,parsed.attachments);scrollBottom();
+function paintAssistantStream(){
+  assistantRenderFrame=0;if(!assistantNode)return;
+  assistantNode.dataset.raw=assistantStreamBuffer;
+  assistantNode.classList.remove('attachment-only');
+  // Keep streaming paints intentionally cheap. Re-rendering the full Markdown
+  // document for every token is O(n^2)-ish work and can starve Chromium's
+  // paint loop when WebSocket deltas arrive in a burst. The canonical Markdown
+  // render happens once in finalizeAssistantStream().
+  assistantNode.textContent=assistantStreamBuffer;
+  assistantNode.classList.add('streaming');
+  scrollBottom();
 }
-function resetAssistantStream(){if(assistantNode){assistantNode.closest('.message')?.remove();assistantNode=null;}}
+function scheduleAssistantPaint(){
+  if(assistantRenderFrame)return;
+  assistantRenderFrame=requestAnimationFrame(paintAssistantStream);
+}
+function ensureAssistantComposite(){
+  if(!assistantNode){assistantNode=addMessage('assistant','');assistantStreamBuffer='';}
+  assistantNode.classList.remove('attachment-only');
+  assistantNode.classList.add('assistant-composite');
+  let thinking=assistantNode.querySelector('.assistant-thinking');
+  let answer=assistantNode.querySelector('.assistant-answer');
+  if(!thinking||!answer){
+    assistantNode.innerHTML='';
+    thinking=document.createElement('details');
+    thinking.className='assistant-thinking';
+    thinking.open=true;
+    thinking.innerHTML=`<summary><span class="thinking-chevron">${mdiIcon('chevron-right','›')}</span><span>Thinking</span><span class="thinking-live">live</span></summary><pre></pre>`;
+    answer=document.createElement('div');
+    answer.className='assistant-answer';
+    assistantNode.appendChild(thinking);
+    assistantNode.appendChild(answer);
+  }
+  return {thinking,answer};
+}
+function paintAssistantStream(){
+  assistantRenderFrame=0;if(!assistantNode)return;
+  const shell=ensureAssistantComposite();
+  assistantNode.dataset.raw=assistantStreamBuffer;
+  shell.answer.classList.remove('attachment-only');
+  // Keep streaming paints intentionally cheap. Re-rendering the full Markdown
+  // document for every token is O(n^2)-ish work and can starve Chromium's
+  // paint loop when WebSocket deltas arrive in a burst. The canonical Markdown
+  // render happens once in finalizeAssistantStream().
+  shell.answer.textContent=assistantStreamBuffer;
+  shell.answer.classList.add('streaming');
+  scrollBottom();
+}
+function scheduleAssistantPaint(){
+  if(assistantRenderFrame)return;
+  assistantRenderFrame=requestAnimationFrame(paintAssistantStream);
+}
+function ensureThinkingStream(){
+  const shell=ensureAssistantComposite();
+  thinkingNode=shell.thinking;
+  if(!thinkingStreamBuffer){thinkingNode.open=true;}
+  scrollBottom();
+  return thinkingNode;
+}
+function paintThinkingStream(){
+  thinkingRenderFrame=0;if(!thinkingNode)return;
+  const pre=thinkingNode.querySelector('pre');if(pre)pre.textContent=thinkingStreamBuffer;
+  scrollBottom();
+}
+function appendThinking(content){
+  ensureThinkingStream();thinkingStreamBuffer+=String(content||'');
+  if(!thinkingRenderFrame)thinkingRenderFrame=requestAnimationFrame(paintThinkingStream);
+}
+function finalizeThinkingStream({collapse=false}={}){
+  if(thinkingRenderFrame){cancelAnimationFrame(thinkingRenderFrame);thinkingRenderFrame=0;}
+  if(!thinkingNode)return;
+  const pre=thinkingNode.querySelector('pre');if(pre)pre.textContent=thinkingStreamBuffer;
+  const live=thinkingNode.querySelector('.thinking-live');if(live)live.textContent='done';
+  if(collapse)thinkingNode.open=false;
+  thinkingNode=null;thinkingStreamBuffer='';
+}
+function resetThinkingStream(){
+  if(thinkingRenderFrame){cancelAnimationFrame(thinkingRenderFrame);thinkingRenderFrame=0;}
+  if(thinkingNode){
+    const wrap=thinkingNode.closest('.assistant-thinking');
+    if(wrap)wrap.remove();
+  }
+  thinkingNode=null;thinkingStreamBuffer='';
+  if(assistantNode&&!assistantStreamBuffer){assistantNode.closest('.message')?.remove();assistantNode=null;}
+}
+function appendAssistant(content){
+  finalizeThinkingStream();
+  ensureAssistantComposite();
+  assistantStreamBuffer+=String(content||'');
+  scheduleAssistantPaint();
+}
+function finalizeAssistantStream(content=''){
+  const canonical=String(content||'');
+  if(!assistantNode){
+    if(!canonical)return null;
+    assistantNode=addMessage('assistant',canonical,{forceScroll:true});
+    assistantStreamBuffer=canonical;
+    return assistantNode;
+  }
+  if(assistantRenderFrame){cancelAnimationFrame(assistantRenderFrame);assistantRenderFrame=0;}
+  if(canonical)assistantStreamBuffer=canonical;
+  // If this assistant bubble only contains inline reasoning for a tool turn,
+  // leave it intact rather than replacing it with an empty answer shell.
+  if(!assistantStreamBuffer){
+    assistantNode.classList.remove('streaming');
+    return assistantNode;
+  }
+  const shell=ensureAssistantComposite();
+  assistantNode.dataset.raw=assistantStreamBuffer;
+  const parsed=messageContent(assistantStreamBuffer);
+  shell.answer.classList.remove('streaming');
+  shell.answer.innerHTML=renderMarkdown(parsed.text);
+  renderMessageMedia(shell.answer,parsed.attachments);
+  scrollBottom(true);
+  return assistantNode;
+}
+function resetAssistantStream(){
+  if(assistantRenderFrame){cancelAnimationFrame(assistantRenderFrame);assistantRenderFrame=0;}
+  if(assistantNode)assistantNode.closest('.message')?.remove();
+  assistantNode=null;assistantStreamBuffer='';
+}
 function addTool(name,status,content){const group=ensureActivityGroup();const wrap=document.createElement('details');wrap.className='tool-card';const badgeClass=['ok','error','partial','history'].includes(status)?status:'history';wrap.innerHTML=`<summary><span class="tool-chevron">${mdiIcon('chevron-right','›')}</span><span>${esc(name)}</span><span class="badge ${badgeClass}">${esc(status)}</span></summary><pre></pre>`;wrap.querySelector('pre').textContent=content||'';group.querySelector('.activity-body').appendChild(wrap);bumpActivity();scrollBottom();}
 function addValidator(e){const group=ensureActivityGroup();const el=document.createElement('div');el.className='validator';const recipe=e.suggested_recipe?` · recipe: ${e.suggested_recipe}`:'';const label=e.validator==='grounding'?'Grounding validator':'Fast validator';const missing=Array.isArray(e.missing_fact_types)&&e.missing_fact_types.length?` · missing: ${e.missing_fact_types.join(', ')}`:'';el.textContent=`${label}: ${e.decision||'—'}${e.diagnosis?' · '+e.diagnosis:''}${missing}${e.suggested_tool?' · '+e.suggested_tool:''}${recipe}`;group.querySelector('.activity-body').appendChild(el);bumpActivity();scrollBottom();}
 function recipeSuggestionId(e){
@@ -208,19 +328,20 @@ async function api(path,opts={}){const r=await fetch(path,opts);if(!r.ok){const 
 function cssVar(name,value){document.documentElement.style.setProperty(name,value);}
 async function loadTheme(){try{const t=await api('/api/theme');const c=t.colors||{};const map={foreground:'--xr-foreground',background:'--xr-background',cursorColor:'--xr-cursor'};for(const[k,v]of Object.entries(map))if(c[k])cssVar(v,c[k]);for(let i=0;i<16;i++)if(c[`color${i}`])cssVar(`--xr-color${i}`,c[`color${i}`]);}catch(e){console.warn('Theme load failed',e);}}
 async function loadHealth(){
-  const main=$('#mainModel'),fast=$('#fastModel'),context=$('#contextSize');
+  const main=$('#mainModel'),fast=$('#fastModel'),vision=$('#visionModel'),context=$('#contextSize');
   try{
     const h=await api('/api/health');
-    const mainName=String(h.main_model||'Unknown model'),fastName=String(h.fast_model||'Unknown fast model');
+    const mainName=String(h.main_model||'Unknown model'),fastName=String(h.fast_model||'Unknown fast model'),visionName=String(h.vision_model||mainName);
     const contextTokens=Number(h.context);
     main.textContent=mainName;main.title=`Main model: ${mainName}`;
     fast.textContent=fastName;fast.title=`Fast model: ${fastName}`;
+    vision.textContent=`Vision: ${visionName}`;vision.title=`Vision model: ${visionName}`;
     context.textContent=Number.isFinite(contextTokens)&&contextTokens>0?`${Math.round(contextTokens/1024)}K`:'—';
     context.title=Number.isFinite(contextTokens)&&contextTokens>0?`${contextTokens.toLocaleString()} token context`:'Context size unavailable';
     return h;
   }catch(e){
     main.textContent='Model status unavailable';main.title='Unable to load /api/health';
-    fast.textContent='—';fast.title='';context.textContent='—';context.title='';
+    fast.textContent='—';fast.title='';vision.textContent='—';vision.title='';context.textContent='—';context.title='';
     console.warn('Health load failed',e);return null;
   }
 }
@@ -245,9 +366,19 @@ async function createFreshConversation(){
   return created;
 }
 async function activateConversation(conversationId){
-  if(activeTurn)return false;
   const target=String(conversationId||'');
   if(!target)return false;
+  // Panel navigation must stay responsive while the current turn streams.
+  // Re-opening the already-active conversation is presentation-only and does
+  // not change the stream target, so it is safe during reasoning/generation.
+  if(target===activeConversationId){
+    showPanel('chat');
+    promptEl.focus();
+    return true;
+  }
+  // Switching the stream to a different conversation mid-turn would make the
+  // global assistant/thinking nodes receive deltas for the wrong transcript.
+  if(activeTurn)return false;
   setActiveConversation(target);
   // Load the clicked thread explicitly. Both loaders guard against a later
   // selection winning the race, so rapid sidebar clicks cannot render stale data.
@@ -308,7 +439,7 @@ async function loadConversations(){
   });
   renderConversationList();updateConversationHeading();return conversationRows;
 }
-async function loadHistory(conversationId=activeConversationId){const cid=String(conversationId||'');const rows=await api(`/api/history?${conversationQuery(cid)}`);if(cid!==activeConversationId)return false;messagesEl.innerHTML='';artifactCards.clear();recipeCards.clear();activeUserMessageEl=null;assistantNode=null;resetActivityGroup();for(const m of rows){if(m.role==='user'||m.role==='assistant')addMessage(m.role,m.content,{media:m.media||[]});else if(m.role==='tool'){addTool(m.name||'tool','history',m.content);addMedia(m.media||[]);}}restoreRecipeSuggestions(cid);renderEmptyChat();scrollBottom(true);return true;}
+async function loadHistory(conversationId=activeConversationId){const cid=String(conversationId||'');const rows=await api(`/api/history?${conversationQuery(cid)}`);if(cid!==activeConversationId)return false;messagesEl.innerHTML='';artifactCards.clear();recipeCards.clear();activeUserMessageEl=null;assistantNode=null;assistantStreamBuffer='';thinkingNode=null;thinkingStreamBuffer='';if(assistantRenderFrame){cancelAnimationFrame(assistantRenderFrame);assistantRenderFrame=0;}if(thinkingRenderFrame){cancelAnimationFrame(thinkingRenderFrame);thinkingRenderFrame=0;}resetActivityGroup();for(const m of rows){if(m.role==='user'||m.role==='assistant')addMessage(m.role,m.content,{media:m.media||[]});else if(m.role==='tool'){addTool(m.name||'tool','history',m.content);addMedia(m.media||[]);}}restoreRecipeSuggestions(cid);renderEmptyChat();scrollBottom(true);return true;}
 async function loadState(conversationId=activeConversationId){const cid=String(conversationId||'');const state=await api(`/api/state?${conversationQuery(cid)}`);if(cid!==activeConversationId)return false;$('#stateView').textContent=JSON.stringify(state,null,2);return true;}
 async function loadJobs(){const rows=await api('/api/jobs');$('#jobsView').innerHTML=rows.length?rows.map(j=>`<div class="data-card"><strong>${esc(j.title)}</strong><div class="muted">${esc(j.job_type)} · ${esc(j.status)} · ${esc(j.id).slice(0,8)}</div>${j.error?`<pre>${esc(j.error)}</pre>`:''}</div>`).join(''):'<div class="muted">No jobs.</div>';}
 async function loadReminders(){const rows=await api('/api/reminders');$('#remindersView').innerHTML=rows.length?rows.map(r=>`<div class="data-card"><strong>${esc(r.title)}</strong><div class="muted">${esc(r.when_iso)} · ${esc(r.repeat_mode)} · ${esc(r.status)}</div><div>${esc(r.message||'')}</div></div>`).join(''):'<div class="muted">No reminders.</div>';}
@@ -375,9 +506,9 @@ function connect(){
   socket.onmessage=ev=>{
     const e=JSON.parse(ev.data);
     if(e.type==='accepted'){
-      activeTurn=e.turn_id;startTurnTimer();$('#send').classList.add('hidden');$('#stop').classList.remove('hidden');assistantNode=null;
+      activeTurn=e.turn_id;startTurnTimer();$('#send').classList.add('hidden');$('#stop').classList.remove('hidden');assistantNode=null;assistantStreamBuffer='';thinkingNode=null;thinkingStreamBuffer='';
     }else if(e.type==='command_result'){
-      assistantNode=null;
+      assistantNode=null;assistantStreamBuffer='';resetThinkingStream();
       if(e.action==='clear_conversation'){messagesEl.innerHTML='';artifactCards.clear();recipeCards.clear();recipeDecisionStore.removeConversation(activeConversationId);activeUserMessageEl=null;followOutput=true;renderEmptyChat();}
       if(e.action==='set_thinking')$('#thinking').checked=!!e.data?.thinking;
       if(e.action==='open_profile')void openOnboarding({reset:true});
@@ -387,18 +518,19 @@ function connect(){
       if(e.ok===false)setStatus('Command failed','error');else setStatus('Ready');
       finishTurn();
     }else if(e.type==='queue_wait')setStatus('Queued for inference…','busy');
-    else if(e.type==='queue_acquired')setStatus('Thinking…','busy');
+    else if(e.type==='queue_acquired')setStatus(activeThinkingEnabled?'Thinking…':'Generating…','busy');
     else if(e.type==='recipe_check')setStatus(e.best_match?`Recipe checked: ${e.best_match}`:'Recipes checked','busy');
+    else if(e.type==='thinking_delta')appendThinking(e.content||'');
     else if(e.type==='assistant_delta')appendAssistant(e.content||'');
-    else if(e.type==='assistant_reset')resetAssistantStream();
-    else if(e.type==='tool_start'){assistantNode=null;setStatus(`Running ${e.name}…`,'busy');}
-    else if(e.type==='tool_result'){addTool(e.name,e.status,e.content);addMedia(e.media);if(e.name==='set_profile_image'&&e.status==='ok')refreshProfileImage();setStatus('Thinking…','busy');if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}
-    else if(e.type==='artifact_created'){assistantNode=null;void addArtifact(e.artifact||{});setStatus(`Created ${(e.artifact&&e.artifact.name)||'file'}`,'busy');if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}
-    else if(e.type==='validator'){assistantNode=null;addValidator(e);}
-    else if(e.type==='recipe_suggestion'){assistantNode=null;addRecipeSuggestion(e);}
+    else if(e.type==='assistant_reset'){resetAssistantStream();resetThinkingStream();}
+    else if(e.type==='tool_start'){finalizeThinkingStream();finalizeAssistantStream();assistantNode=null;assistantStreamBuffer='';setStatus(`Running ${e.name}…`,'busy');}
+    else if(e.type==='tool_result'){addTool(e.name,e.status,e.content);addMedia(e.media);if(e.name==='set_profile_image'&&e.status==='ok')refreshProfileImage();setStatus(activeThinkingEnabled?'Thinking…':'Generating…','busy');if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}
+    else if(e.type==='artifact_created'){finalizeThinkingStream();finalizeAssistantStream();assistantNode=null;assistantStreamBuffer='';void addArtifact(e.artifact||{});setStatus(`Created ${(e.artifact&&e.artifact.name)||'file'}`,'busy');if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}
+    else if(e.type==='validator'){finalizeThinkingStream();finalizeAssistantStream();assistantNode=null;assistantStreamBuffer='';addValidator(e);}
+    else if(e.type==='recipe_suggestion'){finalizeThinkingStream();finalizeAssistantStream();assistantNode=null;assistantStreamBuffer='';addRecipeSuggestion(e);}
     else if(e.type==='requirements')setStatus('Completing requested checks…','busy');
     else if(e.type==='media_attached')setStatus('Inspecting media…','busy');
-    else if(e.type==='assistant_final'){if(!assistantNode&&e.content)assistantNode=addMessage('assistant',e.content);setStatus('Ready');}
+    else if(e.type==='assistant_final'){finalizeThinkingStream();finalizeAssistantStream(e.content||'');setStatus('Ready');}
     else if(e.type==='turn_cancelled'){setStatus('Cancelled');finishTurn();}
     else if(e.type==='turn_end')finishTurn();
     else if(e.type==='history_refresh'){loadState();loadConversations();loadJobs();if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}
@@ -406,7 +538,9 @@ function connect(){
   };
 }
 function finishTurn(){
-  stopTurnTimer();clearTurnStatus();activeTurn=null;assistantNode=null;activeUserMessageEl=null;$('#send').classList.remove('hidden');$('#stop').classList.add('hidden');
+  finalizeThinkingStream();
+  finalizeAssistantStream();
+  stopTurnTimer();clearTurnStatus();activeTurn=null;activeThinkingEnabled=false;assistantNode=null;assistantStreamBuffer='';thinkingNode=null;thinkingStreamBuffer='';activeUserMessageEl=null;$('#send').classList.remove('hidden');$('#stop').classList.add('hidden');
   if(pendingRecipeSubmission){const queued=pendingRecipeSubmission;pendingRecipeSubmission=null;queueMicrotask(()=>submitRecipeDecision(queued.record,queued.decision));}
 }
 
@@ -438,7 +572,8 @@ function submitChatMessage(text,mediaItems=[],{recordHistory=true,clearComposer=
   if((!content&&!items.length)||activeTurn||socket?.readyState!==WebSocket.OPEN)return false;
   closeSlashMenu();if(recordHistory&&content)commandHistory.push(content);
   const bubble=addMessage('user',content,{forceScroll:true,media:items});activeUserMessageEl=bubble.closest('.message');setStatus('Sending…','busy');
-  const turn_id=crypto.randomUUID();socket.send(JSON.stringify({type:'message',turn_id,conversation_id:activeConversationId,content,attachments:items.map(item=>item.path),thinking:$('#thinking').checked,defer_until_idle:Boolean(deferUntilIdle)}));
+  const thinkingEnabled=Boolean($('#thinking').checked);activeThinkingEnabled=thinkingEnabled;
+  const turn_id=crypto.randomUUID();socket.send(JSON.stringify({type:'message',turn_id,conversation_id:activeConversationId,content,attachments:items.map(item=>item.path),thinking:thinkingEnabled,defer_until_idle:Boolean(deferUntilIdle)}));
   if(clearComposer){setPromptValue('');resetHistoryNavigation();attachments=[];renderAttachments();}return true;
 }
 $('#composer').addEventListener('submit',(ev)=>{ev.preventDefault();submitChatMessage(promptEl.value,attachments.slice());});

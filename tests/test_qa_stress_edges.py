@@ -169,8 +169,11 @@ def test_time_request_uses_deterministic_pregrounding_and_skips_main_model(monke
             raise AssertionError("main model should not be called for a simple grounded time request")
 
     monkeypatch.setattr(agent, "OLLAMA", NoModel())
-    monkeypatch.setattr(agent, "_acquire_inference_lock", lambda: None)
-    monkeypatch.setattr(agent, "_release_inference_lock", lambda lock: None)
+    lock_events = []
+    monkeypatch.setattr(agent, "_acquire_turn_lock", lambda: lock_events.append("turn_acquire") or object())
+    monkeypatch.setattr(agent, "_release_turn_lock", lambda lock: lock_events.append("turn_release"))
+    monkeypatch.setattr(agent, "_acquire_inference_lock", lambda: lock_events.append("model_acquire") or object())
+    monkeypatch.setattr(agent, "_release_inference_lock", lambda lock: lock_events.append("model_release"))
     monkeypatch.setattr(agent, "record_monitor_state", lambda *a, **k: None)
     monkeypatch.setattr(agent, "_queue_compaction_if_needed", lambda *a, **k: None)
     monkeypatch.setattr(agent, "append_and_save", lambda messages, msg: messages.append(msg))
@@ -191,3 +194,4 @@ def test_time_request_uses_deterministic_pregrounding_and_skips_main_model(monke
     assert "10:00:00 PM JST" in messages[-1]["content"]
     assert "Tokyo" in messages[-1]["content"]
     assert any(event.get("type") == "assistant_final" and event.get("deterministic") for event in events)
+    assert lock_events == ["turn_acquire", "turn_release"]

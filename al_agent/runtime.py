@@ -25,6 +25,7 @@ from . import turn_engine as _turn_engine
 from . import turn_support as _turn_support
 from .events import (
     acquire_inference_lock as _default_acquire_inference_lock,
+    acquire_turn_lock as _default_acquire_turn_lock,
 )
 from .events import (
     cancel_requested as _cancel_requested,
@@ -35,6 +36,7 @@ from .events import (
 )
 from .events import (
     release_inference_lock as _default_release_inference_lock,
+    release_turn_lock as _default_release_turn_lock,
 )
 from .prompts import (
     IMAGE_REGEX,
@@ -70,6 +72,8 @@ OLLAMA = _state.OLLAMA
 LOOP_VALIDATOR_CLIENT = _state.LOOP_VALIDATOR_CLIENT
 _acquire_inference_lock = _default_acquire_inference_lock
 _release_inference_lock = _default_release_inference_lock
+_acquire_turn_lock = _default_acquire_turn_lock
+_release_turn_lock = _default_release_turn_lock
 _queue_compaction_if_needed = _turn_support._queue_compaction_if_needed
 
 
@@ -90,6 +94,8 @@ def _runtime_overrides() -> dict[str, object]:
         "append_and_save": globals().get("append_and_save", append_and_save),
         "acquire_inference_lock": globals().get("_acquire_inference_lock", _default_acquire_inference_lock),
         "release_inference_lock": globals().get("_release_inference_lock", _default_release_inference_lock),
+        "acquire_turn_lock": globals().get("_acquire_turn_lock", _default_acquire_turn_lock),
+        "release_turn_lock": globals().get("_release_turn_lock", _default_release_turn_lock),
         "queue_compaction_if_needed": globals().get("_queue_compaction_if_needed", _turn_support._queue_compaction_if_needed),
     }
 

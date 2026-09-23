@@ -103,6 +103,7 @@ def _empty_state() -> dict[str, Any]:
         "fact_requirements": [],
         "status": "idle",
         "objective": "",
+        "persistent_goal": {},
         "background": {"rolling_summary": "", "recent_context": "", "recalled_context": ""},
         "constraints": [],
         "requirements": [],
@@ -139,6 +140,7 @@ def _load(conversation_id: str | None = None) -> dict[str, Any]:
     merged.setdefault("fact_frames", {})
     merged.setdefault("fact_requirements", [])
     merged.setdefault("requirements", [])
+    merged.setdefault("persistent_goal", {})
     return merged
 
 
@@ -244,6 +246,50 @@ def _clean_requirements(items: list[dict[str, Any]], limit: int) -> list[dict[st
         })
     return clean
 
+def _bounded_observations(state: dict[str, Any], observations: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """Bound evidence while pinning proof for satisfied requirements.
+
+    A compound turn may generate many sibling observations. Dropping the only
+    observation that satisfied an already-closed requirement forces the model
+    to re-fetch work the ledger still considers complete. Keep the newest proof
+    row for every satisfied/partial requirement tool (and fact-ledger evidence
+    tool) before filling the remaining slots with the newest observations.
+    """
+    limit = max(1, int(limit))
+    rows = [dict(item) for item in observations if isinstance(item, dict)]
+    if len(rows) <= limit:
+        return rows
+
+    pinned_tools: set[str] = set()
+    for item in list(state.get("requirements") or []):
+        if not isinstance(item, dict) or str(item.get("status") or "") not in {"satisfied", "partial"}:
+            continue
+        tool = str(item.get("tool") or "").strip()
+        if tool:
+            pinned_tools.add(tool)
+    for item in list(state.get("fact_requirements") or []):
+        if not isinstance(item, dict) or not bool(item.get("satisfied")):
+            continue
+        for tool in item.get("evidence") or []:
+            value = str(tool or "").strip()
+            if value and not value.startswith("stored:"):
+                pinned_tools.add(value)
+
+    pinned_indexes: set[int] = set()
+    for tool in pinned_tools:
+        for index in range(len(rows) - 1, -1, -1):
+            if str(rows[index].get("tool") or "") == tool:
+                pinned_indexes.add(index)
+                break
+
+    selected = set(sorted(pinned_indexes)[-limit:])
+    for index in range(len(rows) - 1, -1, -1):
+        if len(selected) >= limit:
+            break
+        if index not in selected:
+            selected.add(index)
+    return [rows[index] for index in sorted(selected)]
+
 
 @dataclass
 class WorkingStateStore:
@@ -331,10 +377,21 @@ class WorkingStateStore:
         else:
             state_requirements = current_requirements
 
+        try:
+            from .goals import get_goal_record
+            persistent_goal = get_goal_record(self._cid())
+        except Exception:
+            persistent_goal = {}
+
         state.update({
             "turn_id": max(0, int(turn_id)),
             "status": "active",
             "objective": _clip(objective, self.limits["objective_chars"]),
+            "persistent_goal": {
+                "goal": _clip(persistent_goal.get("goal"), 1200),
+                "definition_of_done": _clip(persistent_goal.get("definition_of_done"), 900),
+                "status": _clip(persistent_goal.get("status"), 24),
+            } if persistent_goal else {},
             "task_frame": dict(task_frame or {}),
             "fact_frames": {str(key): dict(value or {}) for key, value in dict(fact_frames or {}).items() if isinstance(value, dict)},
             "fact_requirements": [dict(item) for item in list(fact_requirements or []) if isinstance(item, dict)][:16],
@@ -438,7 +495,9 @@ class WorkingStateStore:
                 observations.append(record)
             else:
                 duplicate.update(record)
-            state["verified_observations"] = observations[-self.limits["evidence_items"]:]
+            state["verified_observations"] = _bounded_observations(
+                state, observations, self.limits["evidence_items"]
+            )
         else:
             failures = list(state.get("failed_approaches") or [])
             failures.append({
@@ -484,9 +543,15 @@ class WorkingStateStore:
         state["current_plan"] = []
         _save(state, self._cid())
 
-    def render_evidence(self, max_chars: int | None = None) -> str:
-        """Render bounded untrusted evidence excerpts for a user-role prompt block."""
-        state = _load(self._cid())
+    def render_evidence(
+        self, max_chars: int | None = None, *, state: dict[str, Any] | None = None,
+    ) -> str:
+        """Render bounded untrusted evidence excerpts for a user-role prompt block.
+
+        Callers rebuilding one prompt may pass a snapshot so canonical state and
+        evidence are rendered from the same SQLite read.
+        """
+        state = _load(self._cid()) if state is None else state
         limit = max(400, int(max_chars or self.limits["evidence_render_chars"]))
         rows: list[dict[str, Any]] = []
         for item in list(state.get("verified_observations") or [])[-self.limits["evidence_items"]:]:
@@ -521,13 +586,17 @@ class WorkingStateStore:
                 excerpt_limit //= 2
         return "[]"
 
-    def render(self, *, include_tool_capabilities: bool = True) -> str:
+    def render(
+        self, *, include_tool_capabilities: bool = True, state: dict[str, Any] | None = None,
+    ) -> str:
         """Render valid bounded canonical metadata JSON.
 
         The main model already receives native tool schemas, so callers may omit
         the duplicate capability descriptions. The fast validator can retain them.
+        A supplied snapshot avoids a second database read when a prompt also needs
+        the evidence block.
         """
-        state = _load(self._cid())
+        state = _load(self._cid()) if state is None else state
         compact = {
             "turn_id": state.get("turn_id", 0),
             "task_epoch": state.get("task_epoch", 0),
@@ -536,6 +605,7 @@ class WorkingStateStore:
             "fact_requirements": [dict(item) for item in list(state.get("fact_requirements", []) or []) if isinstance(item, dict)],
             "status": state.get("status", "idle"),
             "objective": state.get("objective", ""),
+            "persistent_goal": dict(state.get("persistent_goal", {}) or {}),
             "background": dict(state.get("background", {}) or {}),
             "constraints": list(state.get("constraints", []) or []),
             "requirements": _clean_requirements(list(state.get("requirements", []) or []), self.limits["requirement_items"]),
@@ -601,6 +671,7 @@ class WorkingStateStore:
                 "task_epoch": compact.get("task_epoch", 0),
                 "status": compact.get("status", "idle"),
                 "objective": _clip(compact.get("objective"), 360),
+                "persistent_goal": compact.get("persistent_goal", {}),
                 "constraints": compact.get("constraints", [])[-3:],
                 "requirements": compact.get("requirements", [])[-8:],
                 "verified_observations": compact.get("verified_observations", [])[-3:],

@@ -62,7 +62,16 @@ _RULES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
         r"\bdiscover .*\bhosts?\b.*\b(?:lan|subnet|local network)\b",
     )),
     ("dns", "dns_diagnose", "DNS resolution/diagnosis", (r"\bresolve\s+[a-z0-9.-]+", r"\bdns (?:resolution|diagnos|lookup)", r"\bresolve dns\b")),
-    ("http", "http_probe", "HTTP/HTTPS connectivity probe", (r"\bprobe (?:https?|connectivity)", r"\bhttps? connectivity\b", r"\bhttp probe\b")),
+    ("http", "http_probe", "HTTP/HTTPS connectivity probe", (
+        r"\bprobe (?:https?|connectivity)",
+        r"\bhttps? connectivity\b",
+        r"\bhttp probe\b",
+        r"\b(?:check|test)\s+(?:whether\s+)?https?://[^\s<>\"']+[^.\n]{0,80}\b(?:reachable|available|up|responding)\b",
+        r"\bhttps?://[^\s<>\"']+[^.\n]{0,80}\b(?:reachable|available|up|responding)\b",
+    )),
+    ("read_file", "read_file", "requested file read", (
+        r"\bread\s+(?:the\s+)?(?:file\s+)?(?:/|\./|\.\./)[^\s,;]+[^\n]{0,140}\b(?:summari[sz]e|inspect|show|report|if it exists)\b",
+    )),
     ("path", "network_path", "network path/hop diagnosis", (r"\bnetwork path\b", r"\btraceroute\b", r"\bmtr\b", r"\broute tracing\b")),
     ("tool_health", "tool_health", "registered tool/dependency health", (r"\btool/?dependency health\b", r"\btool health\b", r"\bcurrent tool.*health\b")),
     ("dependency_audit", "dependency_audit", "runtime dependency audit", (r"\bdependency health\b", r"\bdependency audit\b", r"\btool/?dependency health\b")),
@@ -101,7 +110,7 @@ _EXPLICIT_TOOL_NAMES = {
     "service_health", "network_snapshot", "neighbor_snapshot", "connection_snapshot",
     "dns_diagnose", "network_path", "endpoint_probe", "http_probe", "tool_health",
     "dependency_audit", "news_search", "market_quote", "web_search", "browse_url", "take_web_screenshot", "geocode_location", "weather_forecast",
-    "repo_status", "repo_checks", "page_metadata", "page_links", "extract_document",
+    "repo_status", "repo_checks", "page_metadata", "page_links", "extract_document", "read_file",
     "current_time", "hostname", "environment_summary", "local_subnets", "scan_subnet",
     "gmail_search_messages", "gmail_read_message", "google_calendar_list_events",
     "google_calendar_get_event", "google_calendar_list_calendars",
@@ -390,6 +399,12 @@ def _extract_news_entity(
         candidate = _clean_news_entity(match.group(1))
         if candidate:
             return candidate
+    # Explicit local location before the noun: "latest 3 local London, Ontario headlines".
+    match = re.search(r"\blocal\s+(.{1,100}?)\s+(?:news|headlines?|stories?)\b", value, re.I)
+    if match and _looks_like_location_candidate(match.group(1)):
+        candidate = _clean_news_entity(match.group(1))
+        if candidate:
+            return candidate
     # Location before the noun: "London ON local news".
     match = re.search(r"^(?:what(?:'s| is| are)?\s+)?(?:the\s+)?(.{1,100}?)\s+(?:local\s+)?(?:news|headlines?)\b", value, re.I)
     if match:
@@ -640,15 +655,73 @@ def _compound_clause_ranges(text: str, fact_types: set[str]) -> list[tuple[int, 
     return [(start, end) for start, end in ranges if text[start:end].strip()] or [(0, len(text))]
 
 
+_STRUCTURED_ITEM_RE = re.compile(r"(?m)^[ \t]*(?:\d{1,3}[.)]|[-*])\s+")
+
+
+def _normalize_fact_source(user_text: str) -> str:
+    """Normalize horizontal whitespace while preserving task/list boundaries."""
+    text = str(user_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return ""
+    lines = [re.sub(r"[ \t]+", " ", line).rstrip() for line in text.split("\n")]
+    return "\n".join(lines)
+
+
+def _structured_item_ranges(text: str) -> list[tuple[int, int]]:
+    """Return content ranges for numbered/bulleted task items.
+
+    Markers are excluded so entity extraction never consumes the next item
+    number (for example ``London, Ontario. 2. Get the latest...``).
+    """
+    matches = list(_STRUCTURED_ITEM_RE.finditer(text))
+    if not matches:
+        return []
+    ranges: list[tuple[int, int]] = []
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        while end > start and text[end - 1].isspace():
+            end -= 1
+        if text[start:end].strip():
+            ranges.append((start, end))
+    return ranges
+
+
 def _fact_clause(text: str, fact_type: str, fact_types: set[str]) -> FactSpan:
     anchor = _first_fact_anchor(text, fact_type)
     if anchor is None:
         return FactSpan(fact_type, 0, len(text), text.strip())
-    for start, end in _compound_clause_ranges(text, fact_types):
-        if start <= anchor.start() < end:
-            source = text[start:end].strip(" ,;:-")
-            offset = text[start:end].find(source) if source else 0
-            return FactSpan(fact_type, start + max(0, offset), start + max(0, offset) + len(source), source)
+
+    # Numbered/bulleted requests are authoritative clause boundaries.  Resolve
+    # the fact within its own item before considering conjunction punctuation.
+    # This prevents item 1's location from swallowing item 2 and prevents later
+    # instructions from becoming part of news/market source text.
+    for item_start, item_end in _structured_item_ranges(text):
+        if item_start <= anchor.start() < item_end:
+            item_text = text[item_start:item_end]
+            local_types = {
+                name for name in fact_types
+                if (match := _first_fact_anchor(item_text, name)) is not None
+            }
+            if len(local_types) <= 1:
+                source = item_text.strip(" \t\n,;:-")
+                offset = item_text.find(source) if source else 0
+                return FactSpan(fact_type, item_start + max(0, offset), item_start + max(0, offset) + len(source), source)
+            local_anchor = _first_fact_anchor(item_text, fact_type)
+            if local_anchor is not None:
+                for local_start, local_end in _compound_clause_ranges(item_text, local_types):
+                    if local_start <= local_anchor.start() < local_end:
+                        raw = item_text[local_start:local_end]
+                        source = raw.strip(" \t\n,;:-")
+                        offset = raw.find(source) if source else 0
+                        absolute = item_start + local_start + max(0, offset)
+                        return FactSpan(fact_type, absolute, absolute + len(source), source)
+
+    for range_start, range_end in _compound_clause_ranges(text, fact_types):
+        if range_start <= anchor.start() < range_end:
+            source = text[range_start:range_end].strip(" \t\n,;:-")
+            offset = text[range_start:range_end].find(source) if source else 0
+            return FactSpan(fact_type, range_start + max(0, offset), range_start + max(0, offset) + len(source), source)
     return FactSpan(fact_type, anchor.start(), anchor.end(), anchor.group(0))
 
 
@@ -685,7 +758,7 @@ def derive_fact_frames(
     entity conjunctions from being mistaken for multiple intents and lets shared
     leading modifiers (for example ``today's``) propagate to coordinated facts.
     """
-    text = " ".join(str(user_text or "").strip().split())
+    text = _normalize_fact_source(user_text)
     previous = {str(k): dict(v or {}) for k, v in dict(previous_frames or {}).items() if isinstance(v, dict)}
     fact_types = set(required_fact_types or detect_fact_frame_types(text))
     if not fact_types:
@@ -789,7 +862,11 @@ def effective_request_for_frame(user_text: str, frame: dict[str, Any] | None) ->
         parts.append(str(frame["entity"]))
     if frame.get("time_scope"):
         parts.append(str(frame["time_scope"]))
-    parts.append(str(user_text or ""))
+    # Prefer the fact-specific source span for compound requests.  Re-appending
+    # the entire original prompt pollutes recovery queries with unrelated list
+    # items and policy prose (for example a weather geocode query containing
+    # news, market, network, and file instructions).
+    parts.append(str(frame.get("source_text") or user_text or ""))
     return " ".join(parts)
 
 
@@ -801,6 +878,9 @@ def _extract_target(tool: str, text: str) -> str:
     if tool in {"http_probe", "browse_url"}:
         match = re.search(r"https?://[^\s<>'\"]+", lower, re.I)
         return match.group(0).rstrip(".,)") if match else ""
+    if tool == "read_file":
+        match = re.search(r"\bread\s+(?:the\s+)?(?:file\s+)?((?:/|\./|\.\./)[^\s,;]+)", lower, re.I)
+        return match.group(1).rstrip(".,)") if match else ""
     if tool == "network_path":
         match = re.search(r"\b(?:traceroute|mtr|network path(?: to)?)\s+([a-z0-9.:-]+)", lower, re.I)
         return str(match.group(1)).lower() if match else ""
@@ -1025,7 +1105,7 @@ class TaskRequirementLedger:
     def required_tools(self, pending_only: bool = False) -> list[str]:
         rows = self.requirements
         if pending_only:
-            rows = [item for item in rows if item.status not in {"satisfied", "partial"}]
+            rows = [item for item in rows if item.status not in {"satisfied", "partial", "blocked"}]
         return [item.tool for item in rows]
 
     def record_tool(
@@ -1083,6 +1163,17 @@ class TaskRequirementLedger:
             if item.tool == tool_name and item.status not in {"satisfied", "partial"}:
                 item.status = "blocked"
                 item.last_reason = str(reason or "")[:120]
+
+    def block_exhausted(self, limit: int, reason: str = "per-requirement retry budget exhausted") -> list[str]:
+        """Freeze failed requirements after their bounded direct-attempt budget."""
+        limit = max(1, int(limit))
+        blocked: list[str] = []
+        for item in self.requirements:
+            if item.status == "failed" and item.attempts >= limit:
+                item.status = "blocked"
+                item.last_reason = str(reason or "")[:120]
+                blocked.append(item.tool)
+        return blocked
 
     def as_list(self) -> list[dict[str, Any]]:
         return [item.as_dict() for item in self.requirements]

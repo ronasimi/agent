@@ -203,6 +203,17 @@ def select_tool_schemas(user_text: str, max_tools: int = 12, context_text: str =
             break
         selected[name] = schema
 
+    # Progressive-discovery escape hatch: expose the tiny catalog search tool
+    # only when the request itself looks operational. Pure knowledge/chat turns
+    # keep a zero-tool prompt and therefore preserve the fastest TTFT path.
+    discovery_tokens = {
+        "tool", "tools", "capability", "file", "files", "repo", "system", "host",
+        "network", "web", "search", "find", "inspect", "check", "create", "write",
+        "run", "execute", "schedule", "remind", "email", "calendar", "image", "document",
+    }
+    if not selected and "tool_search" in by_name and current_tokens & discovery_tokens:
+        selected["tool_search"] = by_name["tool_search"]
+
     return [s for s in TOOL_SCHEMAS if s.get("function", {}).get("name") in selected]
 
 

@@ -18,6 +18,7 @@ def test_report_stage_swaps_models_and_restores_normal_residency(monkeypatch):
     monkeypatch.setattr(residency, "record_monitor_state", lambda key, value: state_updates.append((key, value)))
     monkeypatch.setattr(residency, "MODEL", "main:4b")
     monkeypatch.setattr(residency, "FAST_MODEL", "fast:2b")
+    monkeypatch.setattr(residency, "VISION_MODEL", "main:4b")
     monkeypatch.setattr(residency, "REPORT_MODEL", "report:9b")
     monkeypatch.setattr(residency, "REPORT_MODEL_KEEP_ALIVE", -1)
     monkeypatch.setattr(residency, "FAST_MODEL_KEEP_ALIVE", -1)

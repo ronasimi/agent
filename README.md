@@ -8,8 +8,9 @@
 
 The default configuration uses three base Qwen3.5 roles plus an embedding model:
 
-- **Main model:** `agent-main:4b` → `qwen3.5:4b`
-- **Fast model:** `agent-fast:2b` → `qwen3.5:2b`
+- **Main model:** `agent-main:4b` → `hf.co/empero-ai/Qwen3.8-4B-Distill-GGUF:Q4_K_M`
+- **Vision role:** `agent-main:4b` by default, reusing the warm main runner; may be pointed at a dedicated multimodal model later
+- **Fast model:** `agent-main:2b` → `hf.co/empero-ai/Qwen3.8-2B-Distill-GGUF:Q8_0`
 - **Report model:** `agent-report:9b` → `qwen3.5:9b`
 - **Embedding model:** `nomic-embed-text`
 - **Context window:** 16K for the main agent
@@ -35,8 +36,8 @@ Create the stable role aliases after pulling the base Qwen3.5 models:
 
 The aliases map to:
 
-- `agent-main:4b` → `qwen3.5:4b`
-- `agent-fast:2b` → `qwen3.5:2b`
+- `agent-main:4b` → `hf.co/empero-ai/Qwen3.8-4B-Distill-GGUF:Q4_K_M`
+- `agent-main:2b` → `hf.co/empero-ai/Qwen3.8-2B-Distill-GGUF:Q8_0`
 - `agent-report:9b` → `qwen3.5:9b`
 
 The harness passes explicit sampling/context settings per role, so behavior does not depend on alias-local Modelfile parameters.
@@ -387,7 +388,9 @@ Important defaults:
 ```yaml
 agent:
   model: "agent-main:4b"
-  fast_model: "agent-fast:2b"
+  fast_model: "agent-main:2b"
+  vision_model: "agent-main:4b"
+  vision_model_keep_alive: -1
   report_model: "agent-report:9b"
   fast_model_keep_alive: -1
   report_model_keep_alive: "10m"
@@ -437,6 +440,8 @@ agent:
     validator_fallback_max_stages: 4
     validator_fallback_max_tools: 12
 ```
+
+`vision_model` defaults to the same alias as `model`. In that configuration image-bearing turns remain single-pass and reuse the already-resident main Ollama runner with the same context size. If `vision_model` is changed to a distinct model, the harness automatically performs a no-tools vision sidecar pass, converts the pixels into a bounded visual observation, and returns text-only context to the main agent.
 
 `fast_model_keep_alive: -1` pins the canonical 4K fast runner after its first load. With `OLLAMA_MAX_LOADED_MODELS=2`, the 4B main and 2B fast roles can normally coexist. Startup warms main first and then schedules fast prewarming; report teardown restores main synchronously and schedules fast only after foreground inference is available again.
 
@@ -545,8 +550,9 @@ Some especially useful modules:
 
 The runtime deliberately keeps the model hierarchy small:
 
-- `agent-main:4b` handles interactive reasoning, coding, conversation, and tool orchestration.
-- `agent-fast:2b` handles tool-loop validation, recovery reasoning, research planning, source distillation, and other bounded auxiliary work.
+- `agent-main:4b` handles interactive reasoning, coding, conversation, tool orchestration, and the vision role by default.
+- `vision_model` is an explicit multimodal role. When configured to a different model it is restricted to no-tools visual interpretation; the main model retains tool selection and final reasoning.
+- `agent-main:2b` handles tool-loop validation, recovery reasoning, research planning, source distillation, and other bounded auxiliary work.
 - `agent-report:9b` is admitted only for long-form research synthesis and factuality repair.
 - `nomic-embed-text` supplies semantic vectors for memory, knowledge, and recipe retrieval.
 

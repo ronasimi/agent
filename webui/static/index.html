@@ -53,7 +53,7 @@
           <div class="agent-avatar" aria-label="User profile image"><img id="userProfileImage" alt="User profile image" /><span id="userProfileFallback">U</span></div>
           <div class="model-copy">
             <strong id="mainModel">—</strong>
-            <span><span id="fastModel">—</span> · <span id="contextSize">—</span></span>
+            <span><span id="fastModel">—</span> · <span id="visionModel">—</span> · <span id="contextSize">—</span></span>
           </div>
         </div>
       </div>
@@ -89,7 +89,7 @@
               <button id="composerAddFile" class="attach circle-button" type="button" title="Add files" aria-label="Add files"><span class="mdi mdi-plus mdi-ui" data-fallback="＋" aria-hidden="true"></span></button>
               <input id="fileInput" class="hidden-file-input" type="file" multiple />
               <textarea id="prompt" rows="1" placeholder="Ask anything" aria-controls="slashMenu" aria-autocomplete="list" aria-expanded="false"></textarea>
-              <label class="think-toggle" title="Ask the main model to reason longer"><input id="thinking" type="checkbox" /><span>Think</span></label>
+              <label class="think-toggle" title="Enable model thinking for this turn and stream it live"><input id="thinking" type="checkbox" autocomplete="off" /><span>Think</span></label>
               <button id="send" type="submit" class="send circle-button" title="Send" aria-label="Send"><span class="mdi mdi-arrow-up mdi-ui" data-fallback="↑" aria-hidden="true"></span></button>
               <button id="stop" type="button" class="stop circle-button hidden" title="Stop" aria-label="Stop"><span class="mdi mdi-stop mdi-ui" data-fallback="■" aria-hidden="true"></span></button>
               <div id="composerDropHint" class="composer-drop-hint" aria-hidden="true">Drop files here to attach</div>

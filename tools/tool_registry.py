@@ -23,6 +23,7 @@ _REQUIRED_OVERRIDES = {
     "schedule_reminder": {"title"},
     "cancel_reminder": {"reminder_id"},
     "web_search": {"query"},
+    "tool_search": {"query"},
     "news_search": {"query"},
     "wiki_search": {"query"},
     "market_quote": {"instruments"},
@@ -39,6 +40,7 @@ _REQUIRED_OVERRIDES = {
 }
 
 _SCHEMA_OVERRIDES: dict[tuple[str, str], dict[str, Any]] = {
+    ("set_goal", "status"): {"enum": ["active", "paused", "complete"]},
     ("list_background_jobs", "status"): {"enum": ["", "pending", "running", "completed", "failed", "cancelled"]},
     ("news_search", "timelimit"): {"enum": ["", "d", "w", "m"]},
     ("schedule_reminder", "repeat"): {"enum": ["once", "daily", "weekly"]},
@@ -103,6 +105,8 @@ _PARAMETER_HINTS = {
     "priority": "Tool-specific priority integer; larger usually means higher priority unless the tool says otherwise.",
     "status": "Status filter/value accepted by this specific tool.",
     "objective": "Bounded optimization objective describing the desired change.",
+    "goal": "Persistent conversation goal to retain across turns.",
+    "definition_of_done": "Concrete completion condition for the persistent goal.",
     "target_metric": "Optional measurable success criterion for optimization.",
     "candidate_id": "Self-optimization candidate identifier.",
     "work_id": "Legacy work-queue item identifier.",
@@ -162,6 +166,7 @@ _PARAMETER_HINTS = {
     "path_or_url": "Workspace-local file path or public HTTP(S) URL.",
     "max_pages": "Maximum number of PDF pages to extract.",
     "max_chars": "Maximum extracted text characters.",
+    "extract": "Targeted extraction instruction; return source passages relevant to this request instead of the full document.",
     "max_diff_chars": "Maximum characters of unified diff to return.",
     "checks": "Known repository checks only: compile, config, ruff, pytest.",
     "account": "Configured local account selector; use default unless the user chose another account.",
@@ -514,3 +519,59 @@ def normalize_arguments(func: Callable, args: Any) -> dict:
             continue
         normalized[name] = _coerce_value(value, hints.get(name, str), name)
     return normalized
+
+
+_QWEN_SCHEMA_ALLOWED_KEYS = {
+    "type", "description", "enum", "items", "properties", "required",
+    "additionalProperties", "minimum", "maximum", "minLength", "maxLength",
+    "minItems", "maxItems",
+}
+
+
+def adapt_schema_for_qwen(schema: dict[str, Any]) -> dict[str, Any]:
+    """Return a compact schema tuned for Qwen3.x/Ollama tool templates.
+
+    Qwen3.8's embedded template JSON-serializes each supplied tool definition but
+    emits invocations via XML.  Keep the schema simple and deterministic: required
+    parameters first, no redundant defaults, and only the JSON-schema subset the
+    harness itself validates.  This reduces prompt noise for a 2B model without
+    weakening runtime validation.
+    """
+    raw = json.loads(json.dumps(schema))
+    fn = raw.get("function") if isinstance(raw, dict) else None
+    if not isinstance(fn, dict):
+        return raw
+    params = fn.get("parameters") if isinstance(fn.get("parameters"), dict) else {}
+    props = params.get("properties") if isinstance(params.get("properties"), dict) else {}
+    required = [str(x) for x in params.get("required", []) if str(x) in props]
+    ordered_names = [*required, *[name for name in props if name not in required]]
+
+    clean_props: dict[str, Any] = {}
+    for name in ordered_names:
+        spec = props.get(name, {})
+        if not isinstance(spec, dict):
+            spec = {}
+        clean: dict[str, Any] = {}
+        for key, value in spec.items():
+            if key == "default" or key not in _QWEN_SCHEMA_ALLOWED_KEYS:
+                continue
+            if key == "description":
+                value = re.sub(r"\s+", " ", str(value or "")).strip()[:220]
+                if not value:
+                    continue
+            clean[key] = value
+        clean_props[name] = clean
+
+    fn["description"] = re.sub(r"\s+", " ", str(fn.get("description") or "")).strip()[:260]
+    fn["parameters"] = {
+        "type": "object",
+        "properties": clean_props,
+        "required": required,
+        "additionalProperties": False,
+    }
+    return {"type": "function", "function": fn}
+
+
+def adapt_tool_schemas_for_qwen(schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Adapt a stable tool list for the Qwen3.8 GGUF JSON-definition/XML-call protocol."""
+    return [adapt_schema_for_qwen(schema) for schema in schemas]

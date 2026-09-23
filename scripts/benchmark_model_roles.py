@@ -447,7 +447,7 @@ def main() -> int:
     host = str(agent.get("host") or "http://127.0.0.1:11434")
     client = Client(host=host, timeout=180)
     main_model = str(agent.get("model") or "agent-main:4b")
-    fast_model = str(agent.get("fast_model") or "agent-fast:2b")
+    fast_model = str(agent.get("fast_model") or "agent-main:2b")
     report_model = str(agent.get("report_model") or "agent-report:9b")
     embed_model = str(agent.get("embed_model") or "nomic-embed-text")
     main_options = dict(agent.get("main_options") or {})

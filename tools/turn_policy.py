@@ -100,9 +100,18 @@ def derive_turn_tool_policy(user_text: str, known_names: set[str], metadata_by_n
     # bundles and harness-owned pre-grounding so contradictory requests such as
     # "give me the exact current time without using tools" fail closed instead
     # of silently violating the user's constraint.
+    # Only treat *explicit tool-use prohibitions* as a global tool ban.  Do not
+    # infer this from phrases where "tool" modifies another noun, e.g.
+    # "without tool evidence" or "without tool output".  Those phrases require
+    # tools rather than prohibit them and previously caused compound evaluation
+    # prompts to disable the entire tool surface.
     no_tools = bool(
         re.search(r"\b(?:do not|don't|never)\s+use\s+(?:any\s+)?tools?\b", lower)
-        or re.search(r"\bwithout\s+(?:using\s+)?(?:any\s+)?tools?\b", lower)
+        or re.search(
+            r"\bwithout\s+(?:using\s+)?(?:any\s+)?tools?\b"
+            r"(?!\s+(?:evidence|observations?|outputs?|results?|calls?|data|support|verification|proof)\b)",
+            lower,
+        )
         or re.search(r"(?:^|[.;:!?]\s*)no\s+tools?\s*(?:[.;:!?]|$)", lower)
     )
     if no_tools:

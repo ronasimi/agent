@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Stable role aliases for the locally pulled base Qwen3.5 models.
-# `ollama cp` reuses the existing blobs instead of duplicating model storage.
-for alias in agent-main:4b agent-fast:2b agent-report:9b; do
-  ollama rm "$alias" >/dev/null 2>&1 || true
-done
+main_src="hf.co/empero-ai/Qwen3.8-4B-Distill-GGUF:Q4_K_M"
+fast_src="hf.co/empero-ai/Qwen3.8-2B-Distill-GGUF:Q8_0"
 
-ollama cp qwen3.5:4b agent-main:4b
-ollama cp qwen3.5:2b agent-fast:2b
-ollama cp qwen3.5:9b agent-report:9b
+ollama pull "$main_src"
+ollama cp "$main_src" agent-main:4b
 
-printf '\nCreated aliases:\n'
-ollama list | grep -E '^(agent-report|agent-main|agent-fast):' || true
+ollama pull "$fast_src"
+ollama cp "$fast_src" agent-main:2b
+
+printf '\nConfigured generation aliases:\n'
+ollama show agent-main:4b --modelfile
+ollama show agent-main:2b --modelfile

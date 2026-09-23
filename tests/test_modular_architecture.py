@@ -30,7 +30,7 @@ def test_primitive_domains_are_split_and_legacy_facade_remains():
 
 def test_background_jobs_are_provider_dispatched():
     from al_agent.background.handlers import JOB_HANDLERS
-    assert set(JOB_HANDLERS) == {"research", "context_compaction", "self_optimization"}
+    assert set(JOB_HANDLERS) == {"research", "context_compaction", "rethink", "self_optimization"}
     assert all(path.name.startswith("p") for path in Path("al_agent/background/job_providers").glob("p*.py"))
 
 

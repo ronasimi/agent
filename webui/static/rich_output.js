@@ -102,7 +102,7 @@
   }
 
   function extractWorkspaceAttachments(value){
-    const refs=[];const seen=new Set();const add=(path,name='')=>{const clean=String(path||'').trim();if(!clean.startsWith('/app/workspace/')||seen.has(clean))return;seen.add(clean);refs.push({path:clean,name:String(name||clean.split('/').pop()||'attachment')});};
+    const refs=[];const seen=new Set();const add=(path,name='')=>{const clean=String(path||'').trim();const base=clean.split('/').pop().toLowerCase();if(!clean.startsWith('/app/workspace/')||base.endsWith('.lock')||seen.has(clean))return;seen.add(clean);refs.push({path:clean,name:String(name||clean.split('/').pop()||'attachment')});};
     let text=String(value??'').replace(/(?:^|\n)Attached text file `([^`\n]+)` \((\/app\/workspace\/[^)\n]+)\):\n\n```text\n[\s\S]*?\n```(?=\n|$)/g,(_,name,path)=>{add(path,name);return'\n';});
     text=text.replace(/(?:^|\n)Attached file:\s*(\/app\/workspace\/[^\n]+)(?=\n|$)/g,(_,path)=>{add(path.trim());return'\n';});
     return{text:text.replace(/\n{3,}/g,'\n\n').trim(),attachments:refs};

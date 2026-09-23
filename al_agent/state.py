@@ -14,16 +14,26 @@ CONFIG_PATH = os.environ.get("AGENT_CONFIG", "/app/config/config.yaml")
 CONFIG = load_config()
 AGENT_CFG = CONFIG.get("agent", {})
 MODEL = AGENT_CFG.get("model", "agent-main:4b")
-FAST_MODEL = AGENT_CFG.get("fast_model", "agent-fast:2b")
+FAST_MODEL = AGENT_CFG.get("fast_model", MODEL)
 FAST_MODEL_KEEP_ALIVE = AGENT_CFG.get("fast_model_keep_alive", 0)
+VISION_MODEL = str(AGENT_CFG.get("vision_model") or MODEL)
+VISION_MODEL_KEEP_ALIVE = AGENT_CFG.get("vision_model_keep_alive", -1 if VISION_MODEL == MODEL else "2m")
 MAIN_OPTIONS = dict(AGENT_CFG.get("main_options") or {"num_ctx": 16384, "temperature": 0.6, "top_p": 0.95, "top_k": 20})
-FAST_OPTIONS = dict(AGENT_CFG.get("fast_options") or {"num_ctx": 4096, "temperature": 0.6, "top_p": 0.95, "top_k": 20})
+FAST_OPTIONS = dict(AGENT_CFG.get("fast_options") or {"num_ctx": 16384, "temperature": 0.1, "top_p": 0.95, "top_k": 20})
 # Ollama keys resident runners by model *and* context size.  If the fast role
 # reuses the interactive model, align its context before building validator
 # options so validator calls cannot evict/reload the warm main runner.
 if MODEL == FAST_MODEL and MAIN_OPTIONS.get("num_ctx"):
     FAST_OPTIONS["num_ctx"] = MAIN_OPTIONS["num_ctx"]
+VISION_OPTIONS = dict(AGENT_CFG.get("vision_options") or MAIN_OPTIONS)
+# Reusing the main model for vision must reuse the exact resident runner/context
+# rather than forcing Ollama to create a second runner for the same model.
+if VISION_MODEL == MODEL:
+    VISION_OPTIONS = {**MAIN_OPTIONS, **VISION_OPTIONS}
+    if MAIN_OPTIONS.get("num_ctx"):
+        VISION_OPTIONS["num_ctx"] = MAIN_OPTIONS["num_ctx"]
 MAX_TOOLS_PER_TURN = max(8, int(AGENT_CFG.get("max_tools_per_turn", 12)))
+REQUIREMENT_LED_SCHEMA_ONLY = bool(AGENT_CFG.get("requirement_led_schema_only", True))
 OLLAMA_HOST = AGENT_CFG.get("host", "http://127.0.0.1:11434")
 os.environ["OLLAMA_HOST"] = OLLAMA_HOST
 MAX_CTX = int(AGENT_CFG.get("context", {}).get("num_ctx", MAIN_OPTIONS.get("num_ctx", 16384)))
@@ -43,9 +53,29 @@ WARMUP_FAST_MODEL = WARMUP_ENABLED and bool(WARMUP_CFG.get("fast_model_prewarm",
 WARMUP_PRIME_PREFIX = WARMUP_ENABLED and bool(WARMUP_CFG.get("prime_system_prefix", True))
 MAX_ITERATIONS = int(AGENT_CFG.get("max_iterations", 12))
 MAX_ITERATIONS_HARD = max(MAX_ITERATIONS, int(AGENT_CFG.get("max_iterations_hard", 32)))
+
+TURN_SOFT_TIMEOUT_SECONDS = max(1.0, float(AGENT_CFG.get("turn_soft_timeout_seconds", 120)))
+TURN_HARD_TIMEOUT_SECONDS = max(TURN_SOFT_TIMEOUT_SECONDS, float(AGENT_CFG.get("turn_hard_timeout_seconds", 180)))
+MAX_MODEL_CALLS_PER_TURN = max(1, int(AGENT_CFG.get("max_model_calls_per_turn", 6)))
+MAX_VALIDATOR_CALLS_PER_TURN = max(0, int(AGENT_CFG.get("max_validator_calls_per_turn", 2)))
+MAX_RECOVERY_ATTEMPTS_PER_REQUIREMENT = max(1, int(AGENT_CFG.get("max_recovery_attempts_per_requirement", 2)))
+TOOL_TURN_NUM_PREDICT = max(64, int(AGENT_CFG.get("tool_turn_num_predict", 384)))
+FINAL_NUM_PREDICT = max(128, int(AGENT_CFG.get("final_num_predict", 1024)))
+TOOL_TURN_TEMPERATURE = max(0.0, float(AGENT_CFG.get("tool_turn_temperature", 0.2)))
 SEMANTIC_MEMORY = bool(AGENT_CFG.get("semantic_memory_enabled", False))
 THINKING_DEFAULT = bool(AGENT_CFG.get("thinking_default", False))
+# Per-token reasoning traces are useful for terminal debugging but expensive in
+# containerized/WebUI deployments because every fragment otherwise performs a
+# synchronous stdout flush. Keep disabled unless explicitly requested.
+LOG_THINKING_TRACE = bool(AGENT_CFG.get("log_thinking_trace", False))
 SHOW_PERF_STATS = bool(AGENT_CFG.get("show_perf_stats", True))
+MODEL_TRACE_CFG = AGENT_CFG.get("model_traces", {})
+MODEL_TRACE_ENABLED = bool(MODEL_TRACE_CFG.get("enabled", True))
+MODEL_TRACE_PATH = str(MODEL_TRACE_CFG.get("path") or "/app/memory/model_calls.jsonl")
+MODEL_TRACE_MAX_BYTES = max(1024 * 1024, int(MODEL_TRACE_CFG.get("max_bytes", 268435456)))
+RETHINK_CFG = AGENT_CFG.get("background_rethink", {})
+RETHINK_ENABLED = bool(RETHINK_CFG.get("enabled", True))
+RETHINK_MIN_TOOL_ITERATIONS = max(1, int(RETHINK_CFG.get("min_tool_iterations", 4)))
 MODEL_TRANSPORT_CFG = AGENT_CFG.get("model_transport", {})
 MODEL_PREFLIGHT_RETRIES = max(0, min(int(MODEL_TRANSPORT_CFG.get("preflight_retries", 1)), 4))
 MODEL_RETRY_BASE_DELAY = max(0.0, float(MODEL_TRANSPORT_CFG.get("base_delay_seconds", 0.15)))
@@ -65,7 +95,10 @@ MAX_TOOL_CALLS_PER_ITERATION = max(1, int(AGENT_CFG.get("max_tool_calls_per_iter
 MAX_MUTATING_CALLS_PER_ITERATION = max(1, int(AGENT_CFG.get("max_mutating_calls_per_iteration", 1)))
 MAX_PARALLEL_READONLY_TOOLS = max(1, min(int(AGENT_CFG.get("max_parallel_readonly_tools", 3)), MAX_TOOL_CALLS_PER_ITERATION))
 VISION_CFG = AGENT_CFG.get("vision", {})
-AUTO_ATTACH_TOOL_MEDIA = bool(VISION_CFG.get("auto_attach_tool_media", True))
+VISION_SUPPORTS_IMAGES = bool(VISION_CFG.get("supports_images", True))
+VISION_SIDECAR_WHEN_DISTINCT = bool(VISION_CFG.get("sidecar_when_distinct", True))
+VISION_MAX_OBSERVATION_CHARS = max(1000, int(VISION_CFG.get("max_observation_chars", 5000)))
+AUTO_ATTACH_TOOL_MEDIA = bool(VISION_CFG.get("auto_attach_tool_media", True)) and VISION_SUPPORTS_IMAGES
 MAX_TOOL_MEDIA_PER_TURN = max(1, int(VISION_CFG.get("max_images_per_turn", 4)))
 MAX_MEDIA_BYTES = max(262144, int(VISION_CFG.get("max_image_bytes", 4 * 1024 * 1024)))
 SHARED_CTX_CFG = AGENT_CFG.get("model_context_sharing", {})

@@ -10,6 +10,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from .netutil import fetch_text
+from .extraction import targeted_extract
 from .task_requirements import canonicalize_location, is_implementation_request
 
 _TRACKING_SEARCH_HOSTS = {"googleadservices.com", "www.googleadservices.com"}
@@ -449,21 +450,145 @@ def is_simple_encyclopedic_request(user_request: str) -> bool:
     )
 
 
-def browse_url(url: str = "") -> str:
-    """Fetch a public HTTP(S) URL with redirect, size, and private-network protections and extract readable text."""
+_BOILERPLATE_TAGS = {"script", "style", "nav", "footer", "header", "aside", "noscript", "form", "template", "svg"}
+_BOILERPLATE_HINT_RE = re.compile(
+    r"(?:^|[-_\s])(?:advert|ads?|banner|breadcrumb|cookie|footer|header|menu|nav|newsletter|promo|"
+    r"recommend|related|share|sharing|sidebar|social|sponsor|subscribe|subscription|shopping|"
+    r"carousel|gallery|comment|modal|popup)(?:$|[-_\s])",
+    re.I,
+)
+_MAIN_CONTENT_SELECTORS = (
+    "article",
+    "main",
+    "[role='main']",
+    "#main-content",
+    "#main_content",
+    ".main-content",
+    ".main_content",
+    ".article-content",
+    ".article-body",
+    ".article__body",
+    ".story-body",
+    ".story-content",
+    ".entry-content",
+    ".post-content",
+)
+
+
+def _node_identity_text(node) -> str:
+    # BeautifulSoup may leave descendants from a decomposed parent in a list
+    # snapshot with ``attrs=None``. Treat those as already removed.
+    if not getattr(node, "attrs", None):
+        return ""
+    classes = " ".join(str(item) for item in (node.get("class") or []))
+    return f"{node.get('id') or ''} {classes}".strip()
+
+
+def _remove_page_boilerplate(soup: BeautifulSoup) -> None:
+    """Remove navigation/advertising chrome before article scoring.
+
+    BeautifulSoup is intentionally kept as the only HTML dependency.  The old
+    implementation removed semantic nav tags but then joined *all* remaining
+    strings, which still admitted large recommendation, shopping, gallery, ad,
+    and newsletter blocks on modern news sites.
+    """
+    for element in list(soup.find_all(_BOILERPLATE_TAGS)):
+        element.decompose()
+    for element in list(soup.find_all(True)):
+        identity = _node_identity_text(element)
+        if identity and _BOILERPLATE_HINT_RE.search(identity):
+            element.decompose()
+
+
+def _node_readable_text(node) -> str:
+    """Render one candidate node as bounded human-readable block text."""
+    blocks: list[str] = []
+    for child in node.find_all(["h1", "h2", "h3", "p", "blockquote", "pre", "li"]):
+        text = " ".join(child.stripped_strings)
+        if text and (not blocks or blocks[-1] != text):
+            blocks.append(text)
+    if not blocks:
+        raw = " ".join(node.stripped_strings)
+        return re.sub(r"\s+", " ", raw).strip()
+    return "\n".join(blocks)
+
+
+def _content_score(node) -> tuple[float, str]:
+    """Score an article/main candidate using prose density and link penalty."""
+    text = _node_readable_text(node)
+    if not text:
+        return -1.0, ""
+    text_len = len(text)
+    paragraphs = [p for p in node.find_all("p") if len(" ".join(p.stripped_strings)) >= 40]
+    sentences = len(re.findall(r"[.!?](?:\s|$)", text))
+    link_chars = sum(len(" ".join(link.stripped_strings)) for link in node.find_all("a"))
+    link_density = min(1.0, link_chars / max(1, text_len))
+    # Prose-heavy nodes win; link farms and index pages lose heavily.
+    score = (text_len * (1.0 - 0.85 * link_density)) + (len(paragraphs) * 180) + (sentences * 12)
+    tag_name = str(getattr(node, "name", "") or "").lower()
+    if tag_name in {"article", "main"} or str(node.get("role") or "").lower() == "main":
+        score += 600
+    return score, text
+
+
+def extract_main_text(html: str, *, max_chars: int = 20000) -> str:
+    """Extract the main article/document body from HTML using BeautifulSoup.
+
+    Preference is given to semantic article/main containers.  If a page lacks
+    those, sufficiently large ``section``/``div`` candidates are scored by prose
+    density and link density.  Sparse/simple pages safely fall back to the
+    cleaned body rather than returning nothing.
+    """
+    soup = BeautifulSoup(str(html or ""), "html.parser")
+    _remove_page_boilerplate(soup)
+
+    candidates = []
+    seen: set[int] = set()
+    for selector in _MAIN_CONTENT_SELECTORS:
+        for node in soup.select(selector):
+            if id(node) not in seen:
+                seen.add(id(node))
+                candidates.append(node)
+    for node in soup.find_all(["section", "div"]):
+        if id(node) in seen:
+            continue
+        # Avoid scoring every tiny layout wrapper.
+        if len(" ".join(node.stripped_strings)) >= 300 and len(node.find_all("p")) >= 2:
+            seen.add(id(node))
+            candidates.append(node)
+
+    best_text = ""
+    best_score = -1.0
+    for node in candidates:
+        score, text = _content_score(node)
+        if score > best_score:
+            best_score, best_text = score, text
+
+    if len(best_text) < 120:
+        root = soup.body or soup
+        best_text = _node_readable_text(root)
+    return best_text[:max(500, int(max_chars))].strip()
+
+
+def browse_url(url: str = "", extract: str = "", max_chars: int = 20000) -> str:
+    """Fetch a public URL; optionally return only source passages relevant to an extraction instruction."""
     if not str(url).strip():
         return "Error: Missing required 'url' parameter."
     try:
         final_url, content_type, body = fetch_text(url, max_bytes=2 * 1024 * 1024)
+        max_chars = max(1000, min(int(max_chars), 50000))
         if content_type in {"application/json", "application/xml", "text/xml", "text/plain"}:
-            text = body
+            text = body[:50000]
         else:
-            soup = BeautifulSoup(body, "html.parser")
-            for element in soup(["script", "style", "nav", "footer", "header", "aside", "noscript", "form"]):
-                element.decompose()
-            text = "\n".join(soup.stripped_strings)
-        text = text[:20000]
-        return f"URL: {final_url}\nContent-Type: {content_type}\n\n{text or 'The page returned no readable text content.'}"
+            text = extract_main_text(body, max_chars=50000)
+        extraction = " ".join(str(extract or "").split())
+        if extraction:
+            text = targeted_extract(text, extraction, max_chars=min(max_chars, 10000))
+            mode = f"\nExtraction: {extraction[:500]}"
+        else:
+            text = text[:max_chars]
+            mode = ""
+        return f"URL: {final_url}\nContent-Type: {content_type}{mode}\n\n{text or 'The page returned no readable text content.'}"
     except Exception as exc:
         return f"Error: browsing URL failed: {exc}"
 

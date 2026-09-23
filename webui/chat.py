@@ -19,6 +19,14 @@ from .workspace_ops import _build_user_content, _new_artifacts, _workspace_file_
 RUNS: dict[str, threading.Event] = {}
 RUNS_LOCK = threading.Lock()
 
+# Thinking is opt-in per turn. When the WebUI Think checkbox is disabled, keep
+# any accidental/empty reasoning fragments off the wire. When it is enabled,
+# forward thinking_delta events so the browser can render the model's reasoning
+# live in a dedicated, non-persistent stream.
+def _should_forward_event(event: dict[str, Any], *, thinking_enabled: bool = False) -> bool:
+    event_type = str(event.get("type") or "")
+    return event_type != "thinking_delta" or bool(thinking_enabled)
+
 async def _run_turn(websocket: WebSocket, payload: dict[str, Any]) -> None:
     turn_id = str(payload.get("turn_id") or uuid.uuid4().hex)
     conversation_id = normalize_conversation_id(payload.get("conversation_id"))
@@ -81,14 +89,15 @@ async def _run_turn(websocket: WebSocket, payload: dict[str, Any]) -> None:
 
     def sink(event: dict[str, Any]) -> None:
         event = {**event, "turn_id": turn_id}
-        loop.call_soon_threadsafe(queue.put_nowait, event)
+        if _should_forward_event(event, thinking_enabled=thinking):
+            loop.call_soon_threadsafe(queue.put_nowait, event)
         if event.get("type") == "tool_result":
             queue_new_artifacts()
 
     def work() -> None:
-        # The history snapshot is refreshed *after* the cross-process inference
-        # lock is acquired by the turn engine. That prevents a queued browser tab
-        # from running with history captured before the preceding turn finished.
+        # The history snapshot is refreshed after the per-conversation turn lock
+        # is acquired. That preserves same-chat ordering without occupying the
+        # global Ollama queue during history/preflight/tool I/O.
         messages = [{"role": "system", "content": agent_runtime.build_system_prompt()}]
         with conversation_context(conversation_id), agent_runtime.frontend_event_context(sink, cancel_event):
             handler = agent_runtime.handle_user_turn

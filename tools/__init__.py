@@ -14,7 +14,7 @@ from .catalog import (
     load_tools,
     select_tool_schemas,
 )
-from .tool_registry import agent_tool, normalize_arguments
+from .tool_registry import agent_tool, adapt_tool_schemas_for_qwen, normalize_arguments
 from .memory import (
     _init_chat_db,
     _init_checkpoint_db,
@@ -41,7 +41,7 @@ from .memory import (
 
 __all__ = [
     "ALL_TOOLS", "AVAILABLE_TOOLS_MAP", "TOOL_SCHEMAS", "TOOL_METADATA",
-    "load_tools", "get_tools_prompt_summary", "select_tool_schemas", "get_tool_schema", "normalize_arguments",
+    "load_tools", "get_tools_prompt_summary", "select_tool_schemas", "get_tool_schema", "adapt_tool_schemas_for_qwen", "normalize_arguments",
     "init_db", "_init_chat_db", "_init_checkpoint_db", "_load_chat_history_from_db",
     "_save_message_to_db", "clear_chat_history", "create_conversation", "delete_conversation", "ensure_conversation", "list_conversations", "rename_conversation", "get_all_memories_prompt_summary",
     "get_conversation_summary", "set_conversation_summary", "get_compacted_through_id",

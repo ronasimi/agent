@@ -5,7 +5,7 @@ import importlib
 import pkgutil
 from . import provider_groups
 
-MUTATING_TOOLS = {'set_user_identity', 'set_research_preference', 'set_profile_image', 'image_crop', 'enqueue_self_optimization', 'write_file', 'execute_python', 'reload_tools', 'render_document_page', 'remember_semantic', 'cancel_reminder', 'create_or_update_tool', 'install_package', 'enqueue_research', 'cancel_background_job', 'schedule_reminder', 'queue_work', 'generate_pdf_report', 'save_recipe', 'image_convert', 'execute_shell', 'page_diff', 'take_web_screenshot', 'map_network', 'notify_desktop', 'archive_extract', 'update_work_status', 'remember', 'image_resize'}
+MUTATING_TOOLS = {'set_goal', 'clear_goal', 'set_user_identity', 'set_research_preference', 'set_profile_image', 'image_crop', 'enqueue_self_optimization', 'write_file', 'execute_python', 'reload_tools', 'render_document_page', 'remember_semantic', 'cancel_reminder', 'create_or_update_tool', 'install_package', 'enqueue_research', 'cancel_background_job', 'schedule_reminder', 'queue_work', 'generate_pdf_report', 'save_recipe', 'image_convert', 'execute_shell', 'page_diff', 'take_web_screenshot', 'map_network', 'notify_desktop', 'archive_extract', 'update_work_status', 'remember', 'image_resize'}
 
 REPEAT_SAFE_TOOLS = {'generate_pdf_report', 'take_web_screenshot', 'map_network'}
 
@@ -68,12 +68,14 @@ TOOL_BUNDLES = (
      ('local_subnets', 'scan_subnet', 'network_snapshot', 'neighbor_snapshot', 'connection_snapshot', 'dns_diagnose', 'network_path', 'endpoint_probe', 'http_probe', 'map_network', 'scan_mdns', 'resolve_host', 'route_lookup', 'tcp_connect', 'tls_handshake', 'ping_host', 'http_request', 'interface_list', 'interface_info', 'neighbor_list', 'socket_list')),
     ({'internet', 'online', 'external'},
      ('network_reachability', 'dns_diagnose', 'http_probe')),
-    ({'tools', 'tooling', 'capabilities'},
-     ('tool_health',)),
+    ({'tools', 'tooling', 'capabilities', 'capability', 'find'},
+     ('tool_search', 'tool_health')),
     ({'recipes', 'reuse', 'pipeline', 'workflow', 'recipe', 'reusable'},
      ('search_recipes', 'list_recipes', 'run_recipe', 'run_pipeline', 'save_recipe', 'recipe_coverage')),
     ({'path', 'hash', 'mime', 'folder', 'directory', 'find', 'json', 'tail', 'diff', 'regex', 'grep'},
      ('find_paths', 'list_directory', 'path_stat', 'read_text', 'read_lines', 'directory_size', 'tail_file', 'file_hash', 'mime_type', 'text_search', 'regex_extract', 'regex_replace', 'text_split', 'text_head', 'text_tail', 'text_count', 'text_sort', 'text_unique', 'json_query', 'json_filter', 'json_sort', 'json_head', 'json_count', 'json_keys', 'json_diff', 'yaml_query', 'csv_query', 'csv_summary', 'jsonl_summary', 'text_diff', 'run_pipeline')),
+    ({'goal', 'goals', 'objective', 'done', 'project'},
+     ('get_goal', 'set_goal', 'clear_goal')),
     ({'remember', 'preference', 'recall', 'profile', 'identity'},
      ('search_memory', 'remember', 'set_user_identity', 'set_research_preference', 'profile_image_info')),
     ({'timer', 'schedule', 'remind', 'reminder'},

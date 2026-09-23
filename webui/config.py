@@ -24,4 +24,5 @@ ARTIFACT_MAX_PER_TURN = max(1, min(int(os.environ.get("WEBUI_ARTIFACT_MAX_PER_TU
 MARKDOWN_EXT = {".md", ".markdown"}
 TEXT_PREVIEW_EXT = ALLOWED_TEXT_EXT | {".xml", ".rst", ".cfg", ".conf"}
 ARTIFACT_IGNORE_RELATIVE = {".agent_inference.lock"}
+ARTIFACT_IGNORE_SUFFIXES = {".lock"}
 PDF_PREVIEW_DIR = Path(os.environ.get("WEBUI_PDF_PREVIEW_DIR", "/tmp/agent_webui_pdf_previews"))

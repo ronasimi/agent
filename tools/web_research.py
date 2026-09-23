@@ -15,6 +15,7 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 
 from .netutil import fetch_bytes, fetch_text, validate_public_url
+from .extraction import targeted_extract
 from .runtime import get_monitor_state, record_monitor_state, utc_now
 
 WORKSPACE = Path("/app/workspace").resolve()
@@ -227,7 +228,7 @@ def _pdf_extract(path: Path, max_pages: int, max_chars: int) -> dict:
         except OSError: pass
 
 
-def extract_document(path_or_url: str, max_pages: int = 30, max_chars: int = 30000) -> str:
+def extract_document(path_or_url: str, max_pages: int = 30, max_chars: int = 30000, extract: str = "") -> str:
     """Extract bounded text and metadata from a workspace document or public PDF/text/HTML URL."""
     value = str(path_or_url or "").strip()
     if not value:
@@ -265,6 +266,12 @@ def extract_document(path_or_url: str, max_pages: int = 30, max_chars: int = 300
                 payload = {"path": str(path), "format": suffix.lstrip("."), "text": text[:max_chars], "truncated": len(text) > max_chars}
             else:
                 return "Error: supported local document types are PDF and text/HTML/JSON/XML/CSV/Markdown/YAML/log files."
+        extraction = " ".join(str(extract or "").split())
+        if extraction and isinstance(payload, dict) and isinstance(payload.get("text"), str):
+            original = payload["text"]
+            payload["text"] = targeted_extract(original, extraction, max_chars=min(max_chars, 10000))
+            payload["extraction"] = extraction[:500]
+            payload["source_chars"] = len(original)
         return json.dumps(payload, ensure_ascii=False, indent=2)
     except Exception as exc:
         return f"Error: document extraction failed: {exc}"

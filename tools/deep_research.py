@@ -23,8 +23,8 @@ from .runtime import DB_PATH, DB_TIMEOUT, init_runtime_db
 
 config = load_config()
 
-FAST_MODEL = config.get("agent", {}).get("fast_model", "agent-fast:2b")
-FAST_OPTIONS = config.get("agent", {}).get("fast_options", {"num_ctx": 4096, "temperature": 0.6, "top_p": 0.95, "top_k": 20})
+FAST_MODEL = config.get("agent", {}).get("fast_model", "agent-main:2b")
+FAST_OPTIONS = config.get("agent", {}).get("fast_options", {"num_ctx": 16384, "temperature": 0.1, "top_p": 0.95, "top_k": 20})
 FAST_KEEP_ALIVE = config.get("agent", {}).get("fast_model_keep_alive", config.get("worker", {}).get("fast_model_keep_alive", 0))
 RESEARCH_CFG = config.get("research", {})
 REPORT_CFG = RESEARCH_CFG.get("report", {})

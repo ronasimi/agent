@@ -217,3 +217,14 @@ def test_news_current_scope_accepts_latest_query_and_empty_completed_retrieval()
     )
     assert ledger.status_for_tool("news_search") == "satisfied"
     assert ledger.pending() == []
+
+
+def test_effective_request_uses_fact_specific_source_for_compound_prompt():
+    from tools.task_requirements import derive_fact_frames, effective_request_for_frame
+
+    request = """Tasks:\n1. Get the current weather for London, Ontario.\n2. Get the latest local London, Ontario headlines.\n3. Get the current Brent crude price."""
+    frame = derive_fact_frames(request, default_location="London, ON")["weather"]
+    effective = effective_request_for_frame(request, frame)
+    assert "Get the current weather for London, Ontario." in effective
+    assert "headlines" not in effective.lower()
+    assert "brent" not in effective.lower()

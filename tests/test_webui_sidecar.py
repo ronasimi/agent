@@ -214,13 +214,25 @@ def test_user_and_agent_media_share_inline_responsive_renderer():
     assert ".artifact-preview audio" in css
 
 
+def test_inline_attachment_parser_filters_lock_files():
+    root = Path(__file__).resolve().parents[1]
+    js = (root / "webui" / "static" / "rich_output.js").read_text(encoding="utf-8")
+    assert "base.endsWith('.lock')" in js
+
+
 def test_artifact_snapshot_detects_only_new_workspace_files(tmp_path, monkeypatch):
     from webui import server
 
     workspace = tmp_path.resolve()
     monkeypatch.setattr(server, "WORKSPACE", workspace)
     (workspace / "existing.txt").write_text("old", encoding="utf-8")
-    (workspace / ".agent_inference.lock").write_text("", encoding="utf-8")
+    for lock_name in (
+        ".agent_inference.lock",
+        ".agent_model_maintenance.lock",
+        ".agent_turn_deadbeef.lock",
+        "custom.lock",
+    ):
+        (workspace / lock_name).write_text("", encoding="utf-8")
     before = server._workspace_file_snapshot()
 
     report = workspace / "reports" / "result.md"
@@ -229,7 +241,7 @@ def test_artifact_snapshot_detects_only_new_workspace_files(tmp_path, monkeypatc
     after = server._workspace_file_snapshot()
     artifacts = server._new_artifacts(before, after)
 
-    assert ".agent_inference.lock" not in before
+    assert not any(name.endswith(".lock") for name in before)
     assert [a["relative"] for a in artifacts] == ["reports/result.md"]
     assert artifacts[0]["preview_kind"] == "markdown"
 
@@ -512,6 +524,7 @@ def test_health_endpoint_reports_current_model_roles_without_removed_micro_role(
     assert payload["ok"] is True
     assert payload["main_model"] == server.agent_runtime.MODEL
     assert payload["fast_model"] == server.agent_runtime.FAST_MODEL
+    assert payload["vision_model"] == server.agent_runtime.VISION_MODEL
     assert payload["context"] == server.agent_runtime.MAX_CTX
     assert payload["report_model"] == str(server.agent_runtime.AGENT_CFG.get("report_model") or "")
     assert "micro_model" not in payload
@@ -525,3 +538,62 @@ def test_webui_health_failure_isolated_from_chat_bootstrap():
     assert "Health load failed" in js
     assert "Promise.allSettled([loadTheme(),loadHealth(),loadSlashCommands(),loadJobs(),loadReminders(),loadWorkspace('')])" in js
     assert "Promise.allSettled([loadHistory(),loadState()])" in js
+
+
+def test_webui_forwards_thinking_only_when_turn_opted_in():
+    from webui.chat import _should_forward_event
+
+    event = {"type": "thinking_delta", "content": "reasoning"}
+    assert _should_forward_event(event, thinking_enabled=False) is False
+    assert _should_forward_event(event, thinking_enabled=True) is True
+    assert _should_forward_event({"type": "assistant_delta", "content": "visible"}) is True
+    assert _should_forward_event({"type": "tool_result"}) is True
+
+
+def test_webui_think_toggle_streams_reasoning_and_defaults_off():
+    root = Path(__file__).resolve().parents[1]
+    js = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
+    html = (root / "webui" / "static" / "index.html").read_text(encoding="utf-8")
+
+    assert 'id="thinking" type="checkbox"' in html
+    assert 'id="thinking" type="checkbox" checked' not in html
+    assert "const thinkingEnabled=Boolean($('#thinking').checked);activeThinkingEnabled=thinkingEnabled;" in js
+    assert "thinking:thinkingEnabled" in js
+    assert "e.type==='thinking_delta'" in js
+    assert "appendThinking(e.content||'')" in js
+    assert "requestAnimationFrame(paintThinkingStream)" in js
+
+
+def test_experimental_main_model_image_support_enabled():
+    from al_agent import state
+
+    assert state.VISION_SUPPORTS_IMAGES is True
+    assert state.AUTO_ATTACH_TOOL_MEDIA is True
+
+
+def test_reasoning_status_updates_do_not_force_scroll_layout():
+    root = Path(__file__).resolve().parents[1]
+    js = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
+    start = js.index("function setStatus(")
+    end = js.index("function startTurnTimer", start)
+    status_impl = js[start:end]
+    assert "scrollBottom()" not in status_impl
+
+
+def test_per_token_thinking_stdout_trace_is_opt_in():
+    from al_agent import state
+
+    assert state.LOG_THINKING_TRACE is False
+
+
+def test_active_chat_can_be_reopened_while_turn_is_streaming():
+    root = Path(__file__).resolve().parents[1]
+    js = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
+    start = js.index("async function activateConversation(conversationId){")
+    end = js.index("async function renameSavedConversation", start)
+    impl = js[start:end]
+    current_chat = impl.index("if(target===activeConversationId){")
+    busy_guard = impl.index("if(activeTurn)return false;")
+    assert current_chat < busy_guard
+    assert "showPanel('chat');" in impl
+

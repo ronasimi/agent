@@ -55,6 +55,7 @@ SLASH_COMMANDS: tuple[SlashCommandSpec, ...] = (
     SlashCommandSpec("/help", "Show all available slash commands.", "/help", "General"),
     SlashCommandSpec("/forget", "Clear this conversation's history, summary, evidence, and working state.", "/forget", "Conversation"),
     SlashCommandSpec("/think", "Toggle extended thinking, or explicitly turn it on/off.", "/think [on|off]", "Conversation", "on|off"),
+    SlashCommandSpec("/set", "Set Ollama-compatible thinking mode (`/set nothink` or `/set think`).", "/set <nothink|think>", "Conversation", "nothink|think"),
     SlashCommandSpec("/profile", "Open the user profile/onboarding editor and overwrite saved profile data when submitted.", "/profile", "Profile"),
     SlashCommandSpec("/tools", "Show the currently registered native tool inventory.", "/tools", "Agent"),
     SlashCommandSpec("/reload", "Reload dynamically discovered tools from disk.", "/reload", "Agent"),
@@ -163,6 +164,17 @@ def _execute_slash_command_impl(
         if value and value not in {"on", "off", "true", "false", "1", "0"}:
             return _usage(spec, "Accepted values are `on` or `off`.")
         enabled = (value in {"on", "true", "1"}) if value else (not bool(thinking_enabled))
+        return SlashCommandResult(
+            True, True, name,
+            f"Thinking is **{'ON' if enabled else 'OFF'}**.",
+            "set_thinking", {"thinking": enabled},
+        )
+
+    if name == "/set":
+        value = " ".join(args.lower().split())
+        if value not in {"nothink", "think"}:
+            return _usage(spec, "Accepted values are `nothink` or `think`.")
+        enabled = value == "think"
         return SlashCommandResult(
             True, True, name,
             f"Thinking is **{'ON' if enabled else 'OFF'}**.",

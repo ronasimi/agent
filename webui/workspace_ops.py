@@ -15,6 +15,7 @@ from .config import (
     ALLOWED_MEDIA_EXT,
     ALLOWED_TEXT_EXT,
     ARTIFACT_IGNORE_RELATIVE,
+    ARTIFACT_IGNORE_SUFFIXES,
     ARTIFACT_MAX_PER_TURN,
     ARTIFACT_SCAN_LIMIT,
     AUDIO_PREVIEW_EXT,
@@ -200,6 +201,22 @@ def _document_preview_text(
     result = "\n\n".join(chunks).strip()
     return result[:limit], truncated or len(result) > limit
 
+def _artifact_is_internal(relative: str) -> bool:
+    """Return whether a workspace file is harness-internal and must not surface as an artifact.
+
+    Advisory lock files are implementation details.  They change as turns and
+    model-maintenance operations start, so treating them as user artifacts both
+    clutters the chat and can trigger needless preview/render work.
+    """
+    value = str(relative or "").replace("\\", "/").strip("/")
+    if not value:
+        return True
+    if value in ARTIFACT_IGNORE_RELATIVE:
+        return True
+    name = Path(value).name.lower()
+    return any(name.endswith(suffix.lower()) for suffix in ARTIFACT_IGNORE_SUFFIXES)
+
+
 def _artifact_payload(path: Path) -> dict[str, Any]:
     resolved = path.resolve()
     if os.path.commonpath([str(WORKSPACE), str(resolved)]) != str(WORKSPACE):
@@ -233,7 +250,7 @@ def _workspace_file_snapshot(limit: int = ARTIFACT_SCAN_LIMIT) -> dict[str, tupl
                 if path.is_symlink():
                     continue
                 relative = str(path.relative_to(WORKSPACE))
-                if relative in ARTIFACT_IGNORE_RELATIVE:
+                if _artifact_is_internal(relative):
                     continue
                 stat = path.stat()
             except (OSError, ValueError):
@@ -275,6 +292,8 @@ def _workspace_listing(relative: str = "") -> dict[str, Any]:
         except (OSError, ValueError):
             continue
         rel = str(child.relative_to(WORKSPACE))
+        if not child.is_dir() and _artifact_is_internal(rel):
+            continue
         items.append({
             "name": child.name,
             "path": "/app/workspace/" + rel,
