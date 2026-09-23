@@ -60,6 +60,10 @@ def test_durable_compute_resumes_until_halt_without_spending_retries(monkeypatch
         assert first["attempts"] == 0
         assert first["state"]["steps"] == 2
         assert first["state"]["checkpoint_generation"] == 1
+        assert "tape" not in first["state"]
+        assert runtime.get_compute_tape_window(job_id, 0, 8) == {
+            "0": "1", "1": "1", "2": "1", "3": "1", "4": "1"
+        }
 
         while runtime.get_job(job_id)["status"] != "completed":
             _claim_and_run(job_id)
@@ -115,6 +119,8 @@ def test_non_halting_durable_compute_runs_across_many_claims_until_cancelled(mon
         job = runtime.get_job(job_id)
         assert job["state"]["steps"] == 75
         assert job["state"]["yield_count"] == 25
+        assert "tape" not in job["state"]
+        assert runtime.get_compute_tape_cell_count(job_id) == 75
         assert runtime.cancel_job(job_id)
         assert runtime.get_job(job_id)["status"] == "cancelled"
     finally:
@@ -136,5 +142,46 @@ def test_optional_step_policy_is_explicit_and_terminal(monkeypatch):
         job = _claim_and_run(job_id)
         assert job["status"] == "failed"
         assert "max_steps" in job["error"]
+    finally:
+        td.cleanup()
+
+
+def test_legacy_inline_tape_checkpoint_migrates_to_sparse_table(monkeypatch):
+    td = _db(monkeypatch)
+    try:
+        monkeypatch.setattr(p15_compute, "DURABLE_COMPUTE_YIELD_DELAY_SECONDS", 0)
+        job_id = runtime.create_job(
+            "durable_compute",
+            "legacy-inline",
+            {"program": _scan_program(), "quantum": 10},
+        )
+        legacy_state = {
+            "checkpoint_version": 1,
+            "machine_state": "scan",
+            "head": 2,
+            "steps": 2,
+            "yield_count": 1,
+            "checkpoint_generation": 1,
+            "status": "yielded",
+            "tape": {"0": "1", "1": "1", "2": "1"},
+            "tape_cells": 3,
+            "last_quantum_transitions": 2,
+            "last_error": None,
+        }
+        import json
+        with runtime._connect() as conn:
+            conn.execute(
+                "INSERT INTO agent_job_checkpoints(job_id, step, state_json, created_at) VALUES (?, ?, ?, ?)",
+                (job_id, 1, json.dumps(legacy_state), runtime.utc_now()),
+            )
+            conn.execute(
+                "UPDATE agent_jobs SET state_json = ? WHERE id = ?",
+                (json.dumps(legacy_state), job_id),
+            )
+
+        finished = _claim_and_run(job_id)
+        assert finished["status"] == "completed"
+        assert "tape" not in finished["state"]
+        assert runtime.get_compute_tape_window(job_id, 0, 4) == {"0": "1", "1": "1", "2": "1"}
     finally:
         td.cleanup()

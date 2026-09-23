@@ -5,7 +5,7 @@ import importlib
 import pkgutil
 from . import provider_groups
 
-MUTATING_TOOLS = {'set_goal', 'clear_goal', 'set_user_identity', 'set_research_preference', 'set_profile_image', 'image_crop', 'enqueue_self_optimization', 'write_file', 'remove_path', 'execute_python', 'reload_tools', 'render_document_page', 'remember_semantic', 'cancel_reminder', 'create_or_update_tool', 'install_package', 'enqueue_research', 'cancel_background_job', 'start_computation', 'cancel_computation', 'schedule_reminder', 'queue_work', 'generate_pdf_report', 'save_recipe', 'image_convert', 'execute_shell', 'page_diff', 'take_web_screenshot', 'map_network', 'notify_desktop', 'archive_extract', 'update_work_status', 'remember', 'image_resize'}
+MUTATING_TOOLS = {'set_goal', 'clear_goal', 'set_user_identity', 'set_research_preference', 'set_profile_image', 'image_crop', 'enqueue_self_optimization', 'write_file', 'remove_path', 'execute_python', 'reload_tools', 'render_document_page', 'remember_semantic', 'cancel_reminder', 'create_or_update_tool', 'install_package', 'enqueue_research', 'cancel_background_job', 'start_computation', 'cancel_computation', 'schedule_reminder', 'queue_work', 'generate_pdf_report', 'save_recipe', 'image_convert', 'execute_shell', 'page_diff', 'browser_step', 'take_web_screenshot', 'map_network', 'notify_desktop', 'archive_extract', 'update_work_status', 'remember', 'image_resize'}
 
 REPEAT_SAFE_TOOLS = {'generate_pdf_report', 'take_web_screenshot', 'map_network'}
 
@@ -35,6 +35,8 @@ TOOL_SELECTION_STOPWORDS = {'for', 'of', 'show', 'it', 'with', 'in', 'do', 'woul
 ALWAYS_TOOL_NAMES: set[str] = set()
 
 TOOL_BUNDLES = (
+    ({'browser', 'ui', 'click', 'button', 'form', 'dropdown', 'scroll', 'webpage', 'website interaction', 'fill'},
+     ('browser_step', 'take_web_screenshot', 'read_observation')),
     ({'jsonl', 'ndjson', 'newline'}, ('jsonl_summary', 'read_text', 'read_lines')),
     ({'repo', 'script', 'project', 'python', 'file', 'files', 'coding', 'code'},
      ('read_file', 'path_stat', 'list_directory', 'find_paths', 'read_text', 'read_lines', 'directory_size', 'tail_file', 'file_hash', 'mime_type', 'text_search', 'regex_extract', 'regex_replace', 'json_query', 'run_pipeline', 'get_repo_map', 'search_repo_symbols', 'repo_status', 'repo_diff', 'repo_checks')),

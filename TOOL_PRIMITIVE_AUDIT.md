@@ -34,12 +34,14 @@ This repository-wide audit covers the generated builtin manifest and the shared 
 19. **Observation recovery is metadata-driven and bounded.** Preview `…[clipped]…` text is never treated as middle truncation. Genuine structured middle truncations are recovered with `read_observation` before evidence audits, and failed/non-progressing recovery becomes terminally unresolved instead of consuming the model-call budget.
 20. **Recipe learning generalizes successful traces conservatively.** Task-defining literals can become shared parameters and derived strings can become `$template` references; operational constants and secret-like values remain fixed/excluded unless the objective explicitly requires otherwise. Fast-model naming hints are advisory and deterministically validated.
 21. **Recipe retrieval does not depend on embeddings.** Recipe candidates are found locally with SQLite FTS5 and token-overlap scoring. `nomic-embed-text` is used only by optional semantic-memory paths.
+22. **Durable compute checkpoints scale with changed tape cells.** Machine metadata remains in versioned checkpoints, while sparse tape cells live in an indexed SQLite table. Each quantum hydrates only its reachable address range and commits tape deltas atomically with the queue transition; legacy inline-tape checkpoints migrate on resume.
+23. **Durable input and recovery semantics are explicit.** Transition targets are validated before queueing; initial state can come from sparse maps or hash-pinned workspace files; and worker/stale-process recovery uses a dedicated consecutive recovery budget rather than consuming normal handler attempts.
 
 ## Validation
 
-Current repository baseline after the durable-compute, routing, recipe-generalization, truncation-recovery, ledger/provenance, and WebUI observability changes:
+Current repository baseline after the durable-compute sparse-tape/input/recovery follow-up, routing, recipe-generalization, truncation-recovery, ledger/provenance, and WebUI observability changes:
 
-- `pytest`: **545 passed, 1 skipped**
+- `pytest`: **560 passed, 1 skipped**
 - `compileall`: passed
 - WebUI JavaScript `node --check`: passed
 - builtin manifest check: current (**235 tools**)

@@ -16,6 +16,7 @@ from tools.runtime import (
     heartbeat_job,
     init_runtime_db,
     maintain_runtime,
+    recover_job_after_infrastructure_failure,
     recover_stale_jobs,
 )
 from tools.self_optimization import mark_self_optimization_failed
@@ -70,12 +71,12 @@ def _timeout_job_and_restart(job: dict, worker_id: str) -> None:
     if job.get("job_type") == "self_optimization":
         candidate_id = str((job.get("payload") or {}).get("candidate_id") or "")
         mark_self_optimization_failed(candidate_id, detail)
-    retry = int(job.get("attempts", 1)) < int(job.get("max_attempts", 3))
-    fail_job(
-        job["id"], detail, retry=retry,
-        retry_delay_seconds=min(300, 30 * int(job.get("attempts", 1))),
+    recover_job_after_infrastructure_failure(
+        job["id"], detail,
+        retry_delay_seconds=min(300, 30 * max(1, int(job.get("recovery_failures", 0)) + 1)),
     )
-    if not retry:
+    updated = get_job(job["id"]) or {}
+    if updated.get("status") == "failed":
         _notify("Agent Job Failed", f"{job['title']}: {detail}")
     # os._exit is deliberate: normal interpreter shutdown waits for executor
     # threads and would hang on the very thread we are trying to terminate.

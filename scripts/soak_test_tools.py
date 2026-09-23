@@ -144,14 +144,14 @@ ISOLATABLE_MUTATORS = {
 NONISOLATABLE_MUTATORS = {
     "install_package", "schedule_reminder", "cancel_reminder", "notify_desktop",
     "queue_work", "update_work_status", "create_or_update_tool",
-    "enqueue_self_optimization", "map_network", "take_web_screenshot",
+    "enqueue_self_optimization", "map_network", "take_web_screenshot", "browser_step",
 }
 
 # Expensive/active probes get a slightly larger child timeout when the global
 # timeout is smaller.  This still remains bounded by the controller.
 SLOW_TOOLS = {
     "repo_checks", "dependency_audit", "scan_subnet", "map_network", "scan_mdns",
-    "network_path", "trace_route", "take_web_screenshot", "generate_pdf_report",
+    "network_path", "trace_route", "take_web_screenshot", "browser_step", "generate_pdf_report",
     "extract_document", "weather_forecast", "web_search", "news_search",
     "wiki_search", "market_quote", "browse_url", "discover_site", "page_diff",
 }

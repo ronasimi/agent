@@ -33,6 +33,7 @@ from tools import (
     rename_conversation,
 )
 from tools.reminders import list_reminders
+from tools.browser_benchmark import browsergym_available, regression_dashboard
 from tools.runtime import cancel_job, get_job, list_jobs
 from tools.user_profile import (
     complete_onboarding_profile,
@@ -196,6 +197,14 @@ def health() -> dict[str, Any]:
         "context": agent_runtime.MAX_CTX,
         "working_state": agent_runtime.WORKING_STATE_ENABLED,
     }
+
+
+@app.get("/api/browser-benchmarks")
+def browser_benchmarks(limit: int = Query(default=100, ge=1, le=1000)) -> dict[str, Any]:
+    """Return P2 UI/browser regression metrics for the local dashboard."""
+    data = regression_dashboard(limit=limit)
+    data["browsergym"] = browsergym_available()
+    return data
 
 
 @app.get("/api/history")

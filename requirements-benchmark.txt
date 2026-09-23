@@ -1,0 +1,3 @@
+# Optional P2 UI benchmark dependencies. Normal harness operation does not need these.
+browsergym
+gymnasium

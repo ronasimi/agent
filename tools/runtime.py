@@ -60,6 +60,8 @@ def init_runtime_db() -> None:
                 priority INTEGER NOT NULL DEFAULT 0,
                 attempts INTEGER NOT NULL DEFAULT 0,
                 max_attempts INTEGER NOT NULL DEFAULT 3,
+                recovery_failures INTEGER NOT NULL DEFAULT 0,
+                max_recovery_failures INTEGER NOT NULL DEFAULT 3,
                 worker_id TEXT,
                 heartbeat_at TEXT,
                 next_run_at TEXT,
@@ -87,6 +89,16 @@ def init_runtime_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_job_checkpoints_job
               ON agent_job_checkpoints(job_id, step DESC);
+
+            CREATE TABLE IF NOT EXISTS durable_compute_tape (
+                job_id TEXT NOT NULL,
+                address INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                PRIMARY KEY(job_id, address),
+                FOREIGN KEY(job_id) REFERENCES agent_jobs(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_durable_compute_tape_range
+              ON durable_compute_tape(job_id, address);
 
             CREATE TABLE IF NOT EXISTS monitor_state (
                 key TEXT PRIMARY KEY,
@@ -140,6 +152,14 @@ def init_runtime_db() -> None:
               ON optimization_candidates(status, created_at DESC);
             """
         )
+        # Existing installations predate the separate infrastructure-recovery
+        # budget. Keep migrations additive so current runtime databases upgrade
+        # in place without requiring an external migration command.
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(agent_jobs)").fetchall()}
+        if "recovery_failures" not in columns:
+            conn.execute("ALTER TABLE agent_jobs ADD COLUMN recovery_failures INTEGER NOT NULL DEFAULT 0")
+        if "max_recovery_failures" not in columns:
+            conn.execute("ALTER TABLE agent_jobs ADD COLUMN max_recovery_failures INTEGER NOT NULL DEFAULT 3")
 
 
 def _json(value: Any) -> str:
@@ -155,6 +175,116 @@ def _parse_json(value: Optional[str], fallback: Any) -> Any:
         return fallback
 
 
+def _compute_checkpoint_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Return the lightweight durable-compute checkpoint representation.
+
+    Tape cells live in ``durable_compute_tape`` and are updated in the same
+    transaction as checkpoint metadata.  Keeping them out of ``state_json``
+    makes checkpoint cost proportional to cells changed in a quantum rather
+    than to the total historical tape size.
+    """
+    compact = dict(state or {})
+    compact.pop("tape", None)
+    return compact
+
+
+def _apply_compute_tape_updates(
+    conn: sqlite3.Connection,
+    job_id: str,
+    updates: Optional[dict[int | str, Optional[str]]],
+) -> None:
+    """Apply sparse tape deltas inside an existing SQLite transaction."""
+    if not updates:
+        return
+    deletes: list[tuple[str, int]] = []
+    upserts: list[tuple[str, int, str]] = []
+    for raw_address, raw_symbol in updates.items():
+        address = int(raw_address)
+        if raw_symbol is None:
+            deletes.append((job_id, address))
+        else:
+            symbol = str(raw_symbol)
+            if not symbol:
+                raise ValueError("durable compute tape symbols must be non-empty strings")
+            upserts.append((job_id, address, symbol))
+    if deletes:
+        conn.executemany(
+            "DELETE FROM durable_compute_tape WHERE job_id = ? AND address = ?",
+            deletes,
+        )
+    if upserts:
+        conn.executemany(
+            """
+            INSERT INTO durable_compute_tape(job_id, address, symbol)
+            VALUES (?, ?, ?)
+            ON CONFLICT(job_id, address) DO UPDATE SET symbol = excluded.symbol
+            """,
+            upserts,
+        )
+
+
+def replace_compute_tape(job_id: str, tape: dict[int | str, str]) -> int:
+    """Atomically replace one durable-compute job's sparse tape."""
+    init_runtime_db()
+    rows = [(str(job_id), int(address), str(symbol)) for address, symbol in (tape or {}).items()]
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM durable_compute_tape WHERE job_id = ?", (str(job_id),))
+        if rows:
+            conn.executemany(
+                "INSERT INTO durable_compute_tape(job_id, address, symbol) VALUES (?, ?, ?)",
+                rows,
+            )
+        conn.commit()
+    return len(rows)
+
+
+def get_compute_tape_window(job_id: str, start: int, end_exclusive: int) -> dict[str, str]:
+    """Return populated cells in ``[start, end_exclusive)`` for one compute job."""
+    init_runtime_db()
+    start_i, end_i = int(start), int(end_exclusive)
+    if end_i <= start_i:
+        return {}
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT address, symbol
+            FROM durable_compute_tape
+            WHERE job_id = ? AND address >= ? AND address < ?
+            ORDER BY address ASC
+            """,
+            (str(job_id), start_i, end_i),
+        ).fetchall()
+    return {str(int(row[0])): str(row[1]) for row in rows}
+
+
+def get_compute_tape_cell_count(job_id: str) -> int:
+    """Return the number of populated sparse tape cells for one compute job."""
+    init_runtime_db()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM durable_compute_tape WHERE job_id = ?",
+            (str(job_id),),
+        ).fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def migrate_inline_compute_tape(job_id: str, state: dict[str, Any]) -> dict[str, Any]:
+    """Migrate a pre-sparse-storage checkpoint containing an inline tape.
+
+    This compatibility path runs only when an old checkpoint still embeds tape
+    cells and the new table has not been populated.  The returned state is the
+    lightweight metadata form used by current workers.
+    """
+    if not isinstance(state, dict) or not isinstance(state.get("tape"), dict):
+        return dict(state or {})
+    if get_compute_tape_cell_count(job_id) == 0 and state.get("tape"):
+        replace_compute_tape(job_id, state["tape"])
+    compact = _compute_checkpoint_state(state)
+    compact["tape_cells"] = get_compute_tape_cell_count(job_id)
+    return compact
+
+
 def create_job(
     job_type: str,
     title: str,
@@ -162,6 +292,7 @@ def create_job(
     priority: int = 0,
     max_attempts: int = 3,
     run_at: Optional[str] = None,
+    max_recovery_failures: int = 3,
 ) -> str:
     """Create a durable job and return its UUID."""
     init_runtime_db()
@@ -172,9 +303,9 @@ def create_job(
             """
             INSERT INTO agent_jobs (
                 id, job_type, title, payload_json, state_json, status,
-                priority, attempts, max_attempts, next_run_at,
+                priority, attempts, max_attempts, recovery_failures, max_recovery_failures, next_run_at,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, '{}', ?, ?, 0, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, '{}', ?, ?, 0, ?, 0, ?, ?, ?, ?)
             """,
             (
                 job_id,
@@ -184,6 +315,7 @@ def create_job(
                 JobStatus.PENDING.value,
                 int(priority),
                 max(1, int(max_attempts)),
+                max(0, int(max_recovery_failures)),
                 run_at or now,
                 now,
                 now,
@@ -199,6 +331,7 @@ def create_singleton_job(
     priority: int = 0,
     max_attempts: int = 3,
     singleton_key: str = "",
+    max_recovery_failures: int = 3,
 ) -> Optional[str]:
     """Create one pending/running job per type, optionally scoped by a stable key."""
     init_runtime_db()
@@ -226,9 +359,9 @@ def create_singleton_job(
             """
             INSERT INTO agent_jobs (
                 id, job_type, title, payload_json, state_json, status,
-                priority, attempts, max_attempts, next_run_at,
+                priority, attempts, max_attempts, recovery_failures, max_recovery_failures, next_run_at,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, '{}', ?, ?, 0, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, '{}', ?, ?, 0, ?, 0, ?, ?, ?, ?)
             """,
             (
                 job_id,
@@ -238,6 +371,7 @@ def create_singleton_job(
                 JobStatus.PENDING.value,
                 int(priority),
                 max(1, int(max_attempts)),
+                max(0, int(max_recovery_failures)),
                 now,
                 now,
                 now,
@@ -290,6 +424,7 @@ def list_jobs(status: str = "", limit: int = 25) -> list[dict[str, Any]]:
             rows = conn.execute(
                 """
                 SELECT id, job_type, title, status, priority, attempts, max_attempts,
+                       recovery_failures, max_recovery_failures,
                        worker_id, next_run_at, created_at, updated_at, started_at,
                        completed_at, result, error, state_json
                 FROM agent_jobs
@@ -303,6 +438,7 @@ def list_jobs(status: str = "", limit: int = 25) -> list[dict[str, Any]]:
             rows = conn.execute(
                 """
                 SELECT id, job_type, title, status, priority, attempts, max_attempts,
+                       recovery_failures, max_recovery_failures,
                        worker_id, next_run_at, created_at, updated_at, started_at,
                        completed_at, result, error, state_json
                 FROM agent_jobs
@@ -326,6 +462,8 @@ def list_jobs(status: str = "", limit: int = 25) -> list[dict[str, Any]]:
                 "checkpoint_generation": int(state.get("checkpoint_generation", 0) or 0),
                 "head": int(state.get("head", 0) or 0),
                 "tape_cells": int(state.get("tape_cells", 0) or 0),
+                "recovery_failures": int(item.get("recovery_failures", 0) or 0),
+                "max_recovery_failures": int(item.get("max_recovery_failures", 0) or 0),
             }
         out.append(item)
     return out
@@ -392,10 +530,18 @@ def heartbeat_job(job_id: str, worker_id: str, state: Optional[dict[str, Any]] =
     return cur.rowcount == 1
 
 
-def save_checkpoint(job_id: str, state: dict[str, Any], step: Optional[int] = None) -> bool:
+def save_checkpoint(
+    job_id: str,
+    state: dict[str, Any],
+    step: Optional[int] = None,
+    *,
+    tape_updates: Optional[dict[int | str, Optional[str]]] = None,
+) -> bool:
     init_runtime_db()
     state = state or {}
     with _connect() as conn:
+        job_row = conn.execute("SELECT job_type FROM agent_jobs WHERE id = ?", (job_id,)).fetchone()
+        stored_state = _compute_checkpoint_state(state) if job_row and job_row[0] == "durable_compute" else state
         if step is None:
             row = conn.execute(
                 "SELECT COALESCE(MAX(step), 0) + 1 FROM agent_job_checkpoints WHERE job_id = ?",
@@ -403,13 +549,14 @@ def save_checkpoint(job_id: str, state: dict[str, Any], step: Optional[int] = No
             ).fetchone()
             step = int(row[0] or 1)
         now = utc_now()
+        _apply_compute_tape_updates(conn, job_id, tape_updates)
         conn.execute(
             "INSERT OR REPLACE INTO agent_job_checkpoints (job_id, step, state_json, created_at) VALUES (?, ?, ?, ?)",
-            (job_id, int(step), _json(state), now),
+            (job_id, int(step), _json(stored_state), now),
         )
         conn.execute(
             "UPDATE agent_jobs SET state_json = ?, updated_at = ? WHERE id = ?",
-            (_json(state), now, job_id),
+            (_json(stored_state), now, job_id),
         )
     return True
 
@@ -432,6 +579,7 @@ def checkpoint_and_defer_job(
     *,
     step: Optional[int] = None,
     delay_seconds: float = 1.0,
+    tape_updates: Optional[dict[int | str, Optional[str]]] = None,
 ) -> bool:
     """Atomically checkpoint healthy progress and release a running job.
 
@@ -446,24 +594,26 @@ def checkpoint_and_defer_job(
     now_iso = now.isoformat(timespec="seconds")
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute("SELECT status FROM agent_jobs WHERE id = ?", (job_id,)).fetchone()
+        row = conn.execute("SELECT status, job_type FROM agent_jobs WHERE id = ?", (job_id,)).fetchone()
         if not row or row[0] != JobStatus.RUNNING.value:
             conn.rollback()
             return False
+        stored_state = _compute_checkpoint_state(state) if row[1] == "durable_compute" else dict(state or {})
         checkpoint_step = _next_checkpoint_step(conn, job_id, step)
+        _apply_compute_tape_updates(conn, job_id, tape_updates)
         conn.execute(
             "INSERT OR REPLACE INTO agent_job_checkpoints (job_id, step, state_json, created_at) VALUES (?, ?, ?, ?)",
-            (job_id, checkpoint_step, _json(state or {}), now_iso),
+            (job_id, checkpoint_step, _json(stored_state), now_iso),
         )
         cur = conn.execute(
             """
             UPDATE agent_jobs
             SET status = ?, worker_id = NULL, heartbeat_at = NULL,
-                attempts = MAX(0, attempts - 1), next_run_at = ?,
-                updated_at = ?, state_json = ?, error = NULL
+                attempts = MAX(0, attempts - 1), recovery_failures = 0,
+                next_run_at = ?, updated_at = ?, state_json = ?, error = NULL
             WHERE id = ? AND status = ?
             """,
-            (JobStatus.PENDING.value, next_run, now_iso, _json(state or {}), job_id, JobStatus.RUNNING.value),
+            (JobStatus.PENDING.value, next_run, now_iso, _json(stored_state), job_id, JobStatus.RUNNING.value),
         )
         if cur.rowcount != 1:
             conn.rollback()
@@ -478,29 +628,33 @@ def checkpoint_and_complete_job(
     result: str = "",
     *,
     step: Optional[int] = None,
+    tape_updates: Optional[dict[int | str, Optional[str]]] = None,
 ) -> bool:
     """Atomically persist the terminal checkpoint and mark a job completed."""
     init_runtime_db()
     now = utc_now()
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute("SELECT status FROM agent_jobs WHERE id = ?", (job_id,)).fetchone()
+        row = conn.execute("SELECT status, job_type FROM agent_jobs WHERE id = ?", (job_id,)).fetchone()
         if not row or row[0] != JobStatus.RUNNING.value:
             conn.rollback()
             return False
+        stored_state = _compute_checkpoint_state(state) if row[1] == "durable_compute" else dict(state or {})
         checkpoint_step = _next_checkpoint_step(conn, job_id, step)
+        _apply_compute_tape_updates(conn, job_id, tape_updates)
         conn.execute(
             "INSERT OR REPLACE INTO agent_job_checkpoints (job_id, step, state_json, created_at) VALUES (?, ?, ?, ?)",
-            (job_id, checkpoint_step, _json(state or {}), now),
+            (job_id, checkpoint_step, _json(stored_state), now),
         )
         cur = conn.execute(
             """
             UPDATE agent_jobs
             SET status = ?, result = ?, completed_at = ?, heartbeat_at = NULL,
-                worker_id = NULL, updated_at = ?, state_json = ?, error = NULL
+                worker_id = NULL, updated_at = ?, state_json = ?, error = NULL,
+                recovery_failures = 0
             WHERE id = ? AND status = ?
             """,
-            (JobStatus.COMPLETED.value, str(result), now, now, _json(state or {}), job_id, JobStatus.RUNNING.value),
+            (JobStatus.COMPLETED.value, str(result), now, now, _json(stored_state), job_id, JobStatus.RUNNING.value),
         )
         if cur.rowcount != 1:
             conn.rollback()
@@ -515,29 +669,32 @@ def checkpoint_and_fail_job(
     error: str,
     *,
     step: Optional[int] = None,
+    tape_updates: Optional[dict[int | str, Optional[str]]] = None,
 ) -> bool:
     """Atomically persist a terminal machine failure without retrying it."""
     init_runtime_db()
     now = utc_now()
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute("SELECT status FROM agent_jobs WHERE id = ?", (job_id,)).fetchone()
+        row = conn.execute("SELECT status, job_type FROM agent_jobs WHERE id = ?", (job_id,)).fetchone()
         if not row or row[0] != JobStatus.RUNNING.value:
             conn.rollback()
             return False
+        stored_state = _compute_checkpoint_state(state) if row[1] == "durable_compute" else dict(state or {})
         checkpoint_step = _next_checkpoint_step(conn, job_id, step)
+        _apply_compute_tape_updates(conn, job_id, tape_updates)
         conn.execute(
             "INSERT OR REPLACE INTO agent_job_checkpoints (job_id, step, state_json, created_at) VALUES (?, ?, ?, ?)",
-            (job_id, checkpoint_step, _json(state or {}), now),
+            (job_id, checkpoint_step, _json(stored_state), now),
         )
         cur = conn.execute(
             """
             UPDATE agent_jobs
             SET status = ?, heartbeat_at = NULL, worker_id = NULL, updated_at = ?,
-                state_json = ?, error = ?
+                state_json = ?, error = ?, recovery_failures = 0
             WHERE id = ? AND status = ?
             """,
-            (JobStatus.FAILED.value, now, _json(state or {}), str(error), job_id, JobStatus.RUNNING.value),
+            (JobStatus.FAILED.value, now, _json(stored_state), str(error), job_id, JobStatus.RUNNING.value),
         )
         if cur.rowcount != 1:
             conn.rollback()
@@ -607,6 +764,67 @@ def fail_job(job_id: str, error: str, retry: bool = True, retry_delay_seconds: i
     return cur.rowcount == 1
 
 
+def recover_job_after_infrastructure_failure(
+    job_id: str,
+    error: str,
+    retry_delay_seconds: int = 30,
+) -> bool:
+    """Handle a worker/process failure without spending the job-attempt budget.
+
+    Infrastructure recovery is intentionally distinct from a deterministic job
+    handler failure. The claim's ordinary attempt is returned, a separate
+    recovery counter is incremented, and the job is requeued until its
+    ``max_recovery_failures`` policy is reached. A value of zero means the
+    operator explicitly requested unlimited infrastructure recovery.
+    """
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat(timespec="seconds")
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """
+            SELECT recovery_failures, max_recovery_failures
+            FROM agent_jobs
+            WHERE id = ? AND status = 'running'
+            """,
+            (job_id,),
+        ).fetchone()
+        if not row:
+            conn.rollback()
+            return False
+        failures = int(row[0] or 0) + 1
+        maximum = int(row[1] or 0)
+        can_retry = maximum == 0 or failures < maximum
+        if can_retry:
+            next_run = (now + timedelta(seconds=max(1, int(retry_delay_seconds)))).isoformat(timespec="seconds")
+            cur = conn.execute(
+                """
+                UPDATE agent_jobs
+                SET status = 'pending', worker_id = NULL, heartbeat_at = NULL,
+                    attempts = MAX(0, attempts - 1), recovery_failures = ?,
+                    next_run_at = ?, updated_at = ?, error = ?
+                WHERE id = ? AND status = 'running'
+                """,
+                (failures, next_run, now_iso, str(error), job_id),
+            )
+        else:
+            cur = conn.execute(
+                """
+                UPDATE agent_jobs
+                SET status = 'failed', worker_id = NULL, heartbeat_at = NULL,
+                    attempts = MAX(0, attempts - 1), recovery_failures = ?,
+                    updated_at = ?, error = ?
+                WHERE id = ? AND status = 'running'
+                """,
+                (failures, now_iso, str(error), job_id),
+            )
+        if cur.rowcount != 1:
+            conn.rollback()
+            return False
+        conn.commit()
+    return True
+
+
 def defer_job(job_id: str, delay_seconds: int = 3, state: Optional[dict[str, Any]] = None) -> bool:
     """Release a running job without consuming another retry after foreground contention."""
     now = datetime.now(timezone.utc)
@@ -617,7 +835,8 @@ def defer_job(job_id: str, delay_seconds: int = 3, state: Optional[dict[str, Any
                 """
                 UPDATE agent_jobs
                 SET status = 'pending', worker_id = NULL, heartbeat_at = NULL,
-                    attempts = MAX(0, attempts - 1), next_run_at = ?, updated_at = ?
+                    attempts = MAX(0, attempts - 1), recovery_failures = 0,
+                    next_run_at = ?, updated_at = ?
                 WHERE id = ? AND status = 'running'
                 """,
                 (next_run, now.isoformat(timespec="seconds"), job_id),
@@ -627,7 +846,8 @@ def defer_job(job_id: str, delay_seconds: int = 3, state: Optional[dict[str, Any
                 """
                 UPDATE agent_jobs
                 SET status = 'pending', worker_id = NULL, heartbeat_at = NULL,
-                    attempts = MAX(0, attempts - 1), next_run_at = ?, updated_at = ?, state_json = ?
+                    attempts = MAX(0, attempts - 1), recovery_failures = 0,
+                    next_run_at = ?, updated_at = ?, state_json = ?
                 WHERE id = ? AND status = 'running'
                 """,
                 (next_run, now.isoformat(timespec="seconds"), _json(state), job_id),
@@ -646,22 +866,43 @@ def cancel_job(job_id: str) -> bool:
 
 
 def recover_stale_jobs(stale_after_seconds: int = 180) -> int:
-    """Return stale running jobs to pending after a process crash."""
+    """Recover stale claims using the separate infrastructure-failure budget."""
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=max(30, int(stale_after_seconds)))
     cutoff_iso = cutoff.isoformat(timespec="seconds")
     now = utc_now()
     with _connect() as conn:
-        cur = conn.execute(
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
             """
-            UPDATE agent_jobs
-            SET status = ?, worker_id = NULL, heartbeat_at = NULL,
-                next_run_at = ?, updated_at = ?, error = COALESCE(error, 'Recovered after stale worker heartbeat.')
+            SELECT id, recovery_failures, max_recovery_failures
+            FROM agent_jobs
             WHERE status = 'running'
               AND (heartbeat_at IS NULL OR heartbeat_at < ?)
             """,
-            (JobStatus.PENDING.value, now, now, cutoff_iso),
-        )
-    return cur.rowcount
+            (cutoff_iso,),
+        ).fetchall()
+        for row in rows:
+            failures = int(row[1] or 0) + 1
+            maximum = int(row[2] or 0)
+            status = JobStatus.PENDING.value if maximum == 0 or failures < maximum else JobStatus.FAILED.value
+            error = (
+                "Recovered after stale worker heartbeat."
+                if status == JobStatus.PENDING.value
+                else "Infrastructure recovery limit reached after stale worker heartbeat."
+            )
+            conn.execute(
+                """
+                UPDATE agent_jobs
+                SET status = ?, worker_id = NULL, heartbeat_at = NULL,
+                    attempts = MAX(0, attempts - 1), recovery_failures = ?,
+                    next_run_at = ?, updated_at = ?,
+                    error = ?
+                WHERE id = ? AND status = 'running'
+                """,
+                (status, failures, now, now, error, row[0]),
+            )
+        conn.commit()
+    return len(rows)
 
 
 def record_monitor_state(key: str, value: Any) -> None:

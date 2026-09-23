@@ -340,3 +340,26 @@ def test_direct_requirement_retains_durable_evidence_reference_and_excerpt():
     assert evidence["evidence_ref"] == "observation-clock-1"
     assert "2026-09-23" in evidence["evidence_preview"]
     assert evidence["arguments_digest"]
+
+
+def test_ui_requirements_are_derived_and_only_closed_by_verifier():
+    from tools.task_requirements import TaskRequirementLedger
+
+    ledger = TaskRequirementLedger([])
+    checks = [{"type": "text_present", "value": "Saved"}]
+    ledger.ensure_ui_requirements(checks)
+    assert "browser_step" not in ledger.required_tools()
+    assert len(ledger.pending()) == 2  # outcome + explicit predicate
+
+    # Ordinary successful browser actions cannot satisfy independent UI proof.
+    ledger.record_tool("browser_step", status="ok", arguments={"op": "click"}, result_text='{"ok":true}')
+    assert len(ledger.pending()) == 2
+
+    ledger.record_ui_verification({
+        "passed": True,
+        "checks": [{"check": checks[0], "passed": True, "actual": "Saved"}],
+    })
+    assert ledger.pending() == []
+
+    ledger.invalidate_ui_outcome()
+    assert len(ledger.pending()) == 2

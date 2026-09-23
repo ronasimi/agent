@@ -1866,7 +1866,10 @@ BUILTIN_MANIFEST = [{'module': 'memory',
              'function': {'name': 'git_show',
                           'description': 'Show a Git object/file from /app/source with bounded output.',
                           'parameters': {'type': 'object',
-                                         'properties': {'ref': {'type': 'string', 'default': 'HEAD'},
+                                         'properties': {'ref': {'type': 'string',
+                                                                'description': 'Stable semantic browser element '
+                                                                               'reference such as e23.',
+                                                                'default': 'HEAD'},
                                                         'path': {'type': 'string',
                                                                  'description': 'Path or URL expected by this tool.',
                                                                  'default': '',
@@ -3418,8 +3421,7 @@ BUILTIN_MANIFEST = [{'module': 'memory',
   'function': 'browse_url',
   'schema': {'type': 'function',
              'function': {'name': 'browse_url',
-                          'description': 'Fetch a public URL; optionally return only source passages relevant to an '
-                                         'extraction instruction.',
+                          'description': 'Read a public URL, reusing the live browser page when it is already loaded.',
                           'parameters': {'type': 'object',
                                          'properties': {'url': {'type': 'string',
                                                                 'description': 'HTTP(S) URL.',
@@ -3444,7 +3446,7 @@ BUILTIN_MANIFEST = [{'module': 'memory',
   'function': 'page_metadata',
   'schema': {'type': 'function',
              'function': {'name': 'page_metadata',
-                          'description': 'Extract status/title/canonical URL and bounded metadata from a public page.',
+                          'description': 'Extract page metadata, reusing the active browser document when possible.',
                           'parameters': {'type': 'object',
                                          'properties': {'url': {'type': 'string',
                                                                 'description': 'HTTP(S) URL.',
@@ -3459,8 +3461,7 @@ BUILTIN_MANIFEST = [{'module': 'memory',
   'function': 'page_links',
   'schema': {'type': 'function',
              'function': {'name': 'page_links',
-                          'description': 'Extract and categorize bounded HTTP(S) links from a public page without '
-                                         'dumping page prose.',
+                          'description': 'Extract links, preferring the live browser DOM for an already-loaded page.',
                           'parameters': {'type': 'object',
                                          'properties': {'url': {'type': 'string',
                                                                 'description': 'HTTP(S) URL.',
@@ -3587,12 +3588,139 @@ BUILTIN_MANIFEST = [{'module': 'memory',
   'repeat_safe': False,
   'safe_artifact': False,
   'timeout': None},
+ {'module': 'browser_ui',
+  'function': 'browser_step',
+  'schema': {'type': 'function',
+             'function': {'name': 'browser_step',
+                          'description': 'Execute one browser action and return its fused post-action semantic state.',
+                          'parameters': {'type': 'object',
+                                         'properties': {'op': {'type': 'string',
+                                                               'enum': ['observe',
+                                                                        'navigate',
+                                                                        'click',
+                                                                        'type',
+                                                                        'select',
+                                                                        'scroll',
+                                                                        'key',
+                                                                        'back',
+                                                                        'verify',
+                                                                        'new_tab',
+                                                                        'list_tabs',
+                                                                        'switch_tab',
+                                                                        'close_tab',
+                                                                        'wait_download'],
+                                                               'default': 'observe'},
+                                                        'expected_state_version': {'type': 'integer',
+                                                                                   'description': 'State version from '
+                                                                                                  'the latest browser '
+                                                                                                  'observation; '
+                                                                                                  'required for '
+                                                                                                  'interactive actions '
+                                                                                                  'to reject stale '
+                                                                                                  'plans.',
+                                                                                   'default': -1,
+                                                                                   'minimum': -1},
+                                                        'url': {'type': 'string',
+                                                                'description': 'HTTP(S) URL.',
+                                                                'default': '',
+                                                                'maxLength': 8192},
+                                                        'ref': {'type': 'string',
+                                                                'description': 'Stable semantic browser element '
+                                                                               'reference such as e23.',
+                                                                'default': ''},
+                                                        'value': {'type': 'string', 'default': ''},
+                                                        'direction': {'type': 'string',
+                                                                      'description': 'Scroll direction for '
+                                                                                     'browser_step.',
+                                                                      'default': 'down',
+                                                                      'enum': ['up', 'down', 'left', 'right']},
+                                                        'amount': {'type': 'integer',
+                                                                   'description': 'Scroll amount in pixels for '
+                                                                                  'browser_step.',
+                                                                   'default': 700,
+                                                                   'minimum': 100,
+                                                                   'maximum': 5000},
+                                                        'checks': {'type': 'array',
+                                                                   'items': {'type': 'object'},
+                                                                   'description': 'Machine-verifiable predicates. For '
+                                                                                  'verify these prove final task '
+                                                                                  'completion; for consequential '
+                                                                                  'click/Enter actions they are '
+                                                                                  'mandatory pre-submit checks of '
+                                                                                  'current target/form state. Types: '
+                                                                                  'url_equals/url_contains/url_matches, '
+                                                                                  'title_contains/page_title_matches, '
+                                                                                  'text_present/text_absent, '
+                                                                                  'element_visible/element_not_visible, '
+                                                                                  'element_value_equals, '
+                                                                                  'element_checked, element_disabled, '
+                                                                                  'element_expanded, element_selected, '
+                                                                                  'tab_open, download_exists.',
+                                                                   'default': [],
+                                                                   'maxItems': 32},
+                                                        'x': {'type': 'integer',
+                                                              'description': 'Viewport x-coordinate for click '
+                                                                             'fallback; prefer ref whenever a semantic '
+                                                                             'element ref exists.',
+                                                              'default': -1,
+                                                              'minimum': -1,
+                                                              'maximum': 10000},
+                                                        'y': {'type': 'integer',
+                                                              'description': 'Viewport y-coordinate for click '
+                                                                             'fallback; prefer ref whenever a semantic '
+                                                                             'element ref exists.',
+                                                              'default': -1,
+                                                              'minimum': -1,
+                                                              'maximum': 10000},
+                                                        'max_candidates': {'type': 'integer',
+                                                                           'description': 'Maximum semantic UI '
+                                                                                          'candidates to expose '
+                                                                                          '(8-200); increase only when '
+                                                                                          'the default pruned view '
+                                                                                          'omits a needed control.',
+                                                                           'default': 60,
+                                                                           'minimum': 8,
+                                                                           'maximum': 200},
+                                                        'include_offscreen': {'type': 'boolean',
+                                                                              'description': 'Include off-screen UI '
+                                                                                             'candidates in the '
+                                                                                             'semantic observation; '
+                                                                                             'normally false for token '
+                                                                                             'efficiency.',
+                                                                              'default': False},
+                                                        'screenshot': {'type': 'boolean',
+                                                                       'description': 'Attach a viewport screenshot '
+                                                                                      'after this browser step only '
+                                                                                      'when visual pixels are '
+                                                                                      'materially useful.',
+                                                                       'default': False},
+                                                        'tab_index': {'type': 'integer',
+                                                                      'description': 'Zero-based browser tab index for '
+                                                                                     'switch_tab/close_tab; -1 means '
+                                                                                     'the active tab for close_tab.',
+                                                                      'default': -1,
+                                                                      'minimum': -1,
+                                                                      'maximum': 64},
+                                                        'timeout_ms': {'type': 'integer',
+                                                                       'description': 'Bounded browser wait timeout in '
+                                                                                      'milliseconds (250-15000), '
+                                                                                      'including navigation/download '
+                                                                                      'waits.',
+                                                                       'default': 10000,
+                                                                       'minimum': 250,
+                                                                       'maximum': 15000}},
+                                         'required': [],
+                                         'additionalProperties': False}}},
+  'readonly': False,
+  'repeat_safe': False,
+  'safe_artifact': False,
+  'timeout': None},
  {'module': 'web_screenshot',
   'function': 'take_web_screenshot',
   'schema': {'type': 'function',
              'function': {'name': 'take_web_screenshot',
-                          'description': 'Render a public webpage, save a PNG, and attach it with visible page text '
-                                         'for visual analysis.',
+                          'description': 'Capture the current persistent browser page as PNG plus grounded semantic '
+                                         'state.',
                           'parameters': {'type': 'object',
                                          'properties': {'url': {'type': 'string',
                                                                 'description': 'HTTP(S) URL.',
@@ -3967,6 +4095,28 @@ BUILTIN_MANIFEST = [{'module': 'memory',
                                                                        'description': 'Initial tape input written from '
                                                                                       'cell zero to the right.',
                                                                        'default': ''},
+                                                        'initial_tape': {'type': 'object',
+                                                                         'description': 'Optional sparse '
+                                                                                        'address-to-symbol map applied '
+                                                                                        'over input_text or file '
+                                                                                        'input; addresses may be '
+                                                                                        'negative.'},
+                                                        'initial_head': {'type': 'integer',
+                                                                         'description': 'Initial integer tape-head '
+                                                                                        'address.',
+                                                                         'default': 0},
+                                                        'input_file': {'type': 'string',
+                                                                       'description': 'Optional workspace text or JSON '
+                                                                                      'sparse-tape file used as '
+                                                                                      'initial input without placing '
+                                                                                      'its contents in model context.',
+                                                                       'default': ''},
+                                                        'input_file_format': {'type': 'string',
+                                                                              'enum': ['auto', 'text', 'tape_json'],
+                                                                              'description': 'External input format: '
+                                                                                             'auto, text, or '
+                                                                                             'tape_json.',
+                                                                              'default': 'auto'},
                                                         'quantum': {'type': 'integer',
                                                                     'description': 'Transitions per worker slice; zero '
                                                                                    'uses the configured default and '
@@ -3995,6 +4145,15 @@ BUILTIN_MANIFEST = [{'module': 'memory',
                                                                                                  'harness-imposed '
                                                                                                  'lifetime limit.',
                                                                                   'default': 0,
+                                                                                  'minimum': 0},
+                                                        'max_recovery_failures': {'type': 'integer',
+                                                                                  'description': 'Consecutive '
+                                                                                                 'worker/infrastructure '
+                                                                                                 'recoveries allowed '
+                                                                                                 'before failure; zero '
+                                                                                                 'explicitly means '
+                                                                                                 'unlimited recovery.',
+                                                                                  'default': 10,
                                                                                   'minimum': 0},
                                                         'idempotency_key': {'type': 'string',
                                                                             'description': 'Optional stable key used '

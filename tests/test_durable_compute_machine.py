@@ -94,3 +94,58 @@ def test_invalid_program_and_corrupt_checkpoint_are_rejected_cleanly():
     # rejected before any transition executes rather than silently resetting.
     with pytest.raises(MachineProgramError):
         run_quantum(program, {"checkpoint_version": 999}, quantum=1)
+
+
+def test_transition_targets_must_reference_defined_or_halt_states():
+    with pytest.raises(MachineProgramError, match="undefined state"):
+        validate_program(
+            {
+                "initial_state": "q0",
+                "halt_states": ["HALT"],
+                "transitions": {
+                    "q0": {"_": {"write": "_", "move": "N", "next": "typo"}}
+                },
+            }
+        )
+
+
+def test_initial_tape_map_supports_negative_addresses_tokens_and_head_offset():
+    program = {
+        "initial_state": "read",
+        "blank": "_",
+        "halt_states": ["HALT"],
+        "transitions": {
+            "read": {"TOKEN": {"write": "DONE", "move": "N", "next": "HALT"}}
+        },
+    }
+    state = initialize_state(
+        program,
+        input_text="ab",
+        initial_tape={-2: "LEFT", 0: "TOKEN", 4: "_"},
+        initial_head=0,
+    )
+    assert state["head"] == 0
+    assert state["tape"] == {"-2": "LEFT", "0": "TOKEN", "1": "b"}
+    assert state["tape_cells"] == 3
+    result = run_quantum(program, state, quantum=1)
+    assert result.status == "halted"
+    assert result.state["tape"] == {"-2": "LEFT", "0": "DONE", "1": "b"}
+    assert result.state["tape_cells"] == 3
+
+
+@pytest.mark.parametrize("input_text,quantum", [("", 1), ("1", 2), ("10101", 3), ("111111", 8)])
+def test_quantum_partitioning_does_not_change_machine_semantics(input_text, quantum):
+    program = scan_to_end_program()
+    initial = initialize_state(program, input_text)
+
+    whole = run_quantum(program, initial, quantum=10_000)
+
+    sliced_state = initial
+    while True:
+        sliced = run_quantum(program, sliced_state, quantum=quantum)
+        sliced_state = sliced.state
+        if sliced.status == "halted":
+            break
+
+    for key in ("machine_state", "head", "steps", "tape", "tape_cells"):
+        assert sliced_state[key] == whole.state[key]

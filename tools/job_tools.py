@@ -3,14 +3,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+from typing import Any, Literal
 
-from al_agent.compute.machine import MachineProgramError, validate_program
+from al_agent.compute.inputs import describe_input_file, load_input_file
+from al_agent.compute.machine import MachineProgramError, normalize_initial_tape, validate_program
 
 from .runtime import (
     cancel_job,
     create_job,
     find_active_job_by_idempotency,
+    get_compute_tape_cell_count,
+    get_compute_tape_window,
     get_job,
     list_jobs,
 )
@@ -60,19 +63,27 @@ def cancel_background_job(job_id: str = "") -> str:
 def _compute_idempotency_payload(
     program: dict[str, Any],
     input_text: str,
+    initial_tape: dict[str, str],
+    initial_head: int,
+    input_file: dict[str, str] | None,
     quantum: int,
     max_steps: int,
     max_tape_cells: int,
     max_wall_time_seconds: float,
+    max_recovery_failures: int,
 ) -> str:
     encoded = json.dumps(
         {
             "program": program,
             "input_text": input_text,
+            "initial_tape": initial_tape,
+            "initial_head": initial_head,
+            "input_file": input_file,
             "quantum": quantum,
             "max_steps": max_steps,
             "max_tape_cells": max_tape_cells,
             "max_wall_time_seconds": max_wall_time_seconds,
+            "max_recovery_failures": max_recovery_failures,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -84,29 +95,53 @@ def _compute_idempotency_payload(
 def start_computation(
     program: dict[str, Any] | None = None,
     input_text: str = "",
+    initial_tape: dict[str, str] | None = None,
+    initial_head: int = 0,
+    input_file: str = "",
+    input_file_format: Literal["auto", "text", "tape_json"] = "auto",
     quantum: int = 0,
     max_steps: int = 0,
     max_tape_cells: int = 0,
     max_wall_time_seconds: float = 0,
+    max_recovery_failures: int = 10,
     idempotency_key: str = "",
 ) -> str:
     """Start a durable deterministic computation that resumes until HALT or cancellation.
 
-    ``quantum`` limits one worker slice only. The max_* values are optional
-    resource policies; zero leaves that dimension unbounded by harness policy.
+    ``input_text`` seeds cells from address zero, ``initial_tape`` can overlay
+    arbitrary integer addresses, and ``input_file`` may reference a hash-pinned
+    workspace text/JSON source. ``quantum`` limits one worker slice only. The
+    resource max_* values are optional policies; zero leaves that dimension
+    unbounded. ``max_recovery_failures`` is a separate infrastructure-failure
+    budget; zero explicitly requests unlimited recovery.
     """
     try:
         normalized = validate_program(program or {})
+        canonical_initial_tape = normalize_initial_tape(normalized, "", initial_tape or {})
+        initial_head = int(initial_head)
+        input_descriptor = describe_input_file(input_file, input_file_format) if str(input_file).strip() else None
+        # JSON tape sources are validated at queue time so malformed input is a
+        # user-facing tool error rather than a delayed worker failure.
+        if input_descriptor and input_descriptor["format"] == "tape_json":
+            _text, file_tape = load_input_file(input_descriptor)
+            normalize_initial_tape(normalized, "", file_tape)
     except (MachineProgramError, TypeError, ValueError) as exc:
-        return f"Error: invalid computation program: {exc}"
+        return f"Error: invalid computation setup: {exc}"
     try:
         quantum = int(quantum)
         max_steps = int(max_steps)
         max_tape_cells = int(max_tape_cells)
         max_wall_time_seconds = float(max_wall_time_seconds)
+        max_recovery_failures = int(max_recovery_failures)
     except (TypeError, ValueError):
-        return "Error: quantum and resource limits must be numeric."
-    if quantum < 0 or max_steps < 0 or max_tape_cells < 0 or max_wall_time_seconds < 0:
+        return "Error: quantum, resource limits, and recovery limits must be numeric."
+    if (
+        quantum < 0
+        or max_steps < 0
+        or max_tape_cells < 0
+        or max_wall_time_seconds < 0
+        or max_recovery_failures < 0
+    ):
         return "Error: quantum and resource limits cannot be negative."
     if quantum > 100000:
         return "Error: quantum cannot exceed 100000 transitions per worker slice."
@@ -114,10 +149,14 @@ def start_computation(
     key = str(idempotency_key or "").strip() or _compute_idempotency_payload(
         normalized,
         str(input_text),
+        canonical_initial_tape,
+        initial_head,
+        input_descriptor,
         quantum,
         max_steps,
         max_tape_cells,
         max_wall_time_seconds,
+        max_recovery_failures,
     )
     existing = find_active_job_by_idempotency("durable_compute", key)
     if existing:
@@ -134,11 +173,15 @@ def start_computation(
     payload = {
         "program": normalized,
         "input_text": str(input_text),
+        "initial_tape": canonical_initial_tape,
+        "initial_head": initial_head,
+        "input_file": input_descriptor,
         "idempotency_key": key,
         "quantum": quantum,
         "max_steps": max_steps,
         "max_tape_cells": max_tape_cells,
         "max_wall_time_seconds": max_wall_time_seconds,
+        "max_recovery_failures": max_recovery_failures,
     }
     job_id = create_job(
         "durable_compute",
@@ -146,6 +189,7 @@ def start_computation(
         payload=payload,
         priority=0,
         max_attempts=3,
+        max_recovery_failures=max_recovery_failures,
     )
     return json.dumps(
         {
@@ -171,16 +215,15 @@ def get_computation_status(job_id: str = "", tape_start: int | None = None, tape
 
     state = job.get("state") or {}
     payload = job.get("payload") or {}
-    tape = state.get("tape") if isinstance(state.get("tape"), dict) else {}
     head = int(state.get("head", 0) or 0)
     cells = max(1, min(int(tape_cells), 256))
     start = int(tape_start) if tape_start is not None else head - (cells // 2)
     stop = start + cells
-    window = {
-        str(index): tape[str(index)]
-        for index in range(start, stop)
-        if str(index) in tape
-    }
+    window = get_compute_tape_window(job["id"], start, stop)
+    # Compatibility fallback for jobs that have not yet been claimed/migrated.
+    if not window and isinstance(state.get("tape"), dict):
+        inline = state["tape"]
+        window = {str(index): inline[str(index)] for index in range(start, stop) if str(index) in inline}
     result_value: Any = job.get("result")
     if isinstance(result_value, str) and result_value.strip().startswith("{"):
         try:
@@ -196,14 +239,16 @@ def get_computation_status(job_id: str = "", tape_start: int | None = None, tape
         "yield_count": int(state.get("yield_count", 0) or 0),
         "checkpoint_generation": int(state.get("checkpoint_generation", 0) or 0),
         "head": head,
-        "tape_cells": int(state.get("tape_cells", len(tape)) or 0),
+        "tape_cells": int(state.get("tape_cells", get_compute_tape_cell_count(job["id"])) or 0),
         "tape_window": {"start": start, "end_exclusive": stop, "cells": window},
         "policy": {
             "quantum": int(payload.get("quantum", 0) or 0),
             "max_steps": int(payload.get("max_steps", 0) or 0),
             "max_tape_cells": int(payload.get("max_tape_cells", 0) or 0),
             "max_wall_time_seconds": float(payload.get("max_wall_time_seconds", 0) or 0),
+            "max_recovery_failures": int(job.get("max_recovery_failures", 0) or 0),
         },
+        "recovery_failures": int(job.get("recovery_failures", 0) or 0),
         "created_at": job.get("created_at"),
         "updated_at": job.get("updated_at"),
         "completed_at": job.get("completed_at"),

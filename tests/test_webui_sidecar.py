@@ -635,7 +635,7 @@ def test_jobs_panel_surfaces_compute_progress_and_cancel_controls():
     server = (root / "webui" / "server.py").read_text(encoding="utf-8")
 
     assert "jobProgress" in js
-    assert "yield_count" in js and "tape_cells" in js
+    assert "yield_count" in js and "tape_cells" in js and "recovery_failures" in js
     assert "/api/jobs/${encodeURIComponent(jobId)}/cancel" in js
     assert "stop-circle-outline" in js
     assert "if(panel&&!panel.classList.contains('hidden'))loadJobs()" in js
@@ -667,4 +667,5 @@ def test_list_jobs_exposes_bounded_compute_progress_not_full_tape(tmp_path, monk
     assert row["progress"]["steps"] == 12
     assert row["progress"]["yield_count"] == 3
     assert row["progress"]["tape_cells"] == 99
+    assert row["progress"]["recovery_failures"] == 0
     assert "state" not in row and "tape" not in row

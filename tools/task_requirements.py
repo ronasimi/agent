@@ -1642,12 +1642,19 @@ class TaskRequirementLedger:
         targets = {tool_name}
         if status in {"ok", "partial"}:
             targets.update(_EQUIVALENT_REQUIREMENT_TOOLS.get(tool_name, ()))
-        direct_rows = [item for item in self.requirements if item.tool == tool_name]
+        direct_rows = [
+            item for item in self.requirements
+            if item.tool == tool_name and not bool((item.scope or {}).get("ui_requirement"))
+        ]
         direct_match_exists = any(
             _scope_matches(item.scope, arguments, result_text, result_metadata) for item in direct_rows
         )
         for item in self.requirements:
             if item.tool not in targets:
+                continue
+            # UI outcome/predicate requirements are closed only by the independent
+            # browser verifier. A successful click/type must never satisfy them.
+            if bool((item.scope or {}).get("ui_requirement")):
                 continue
             direct = item.tool == tool_name
             scoped = _scope_matches(item.scope, arguments, result_text, result_metadata)
@@ -1741,6 +1748,89 @@ class TaskRequirementLedger:
                 evidence_ref=evidence_ref, evidence_preview=evidence_preview,
             )
             return
+
+    @staticmethod
+    def _ui_requirement_key(check: dict[str, Any]) -> str:
+        try:
+            encoded = json.dumps(check, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError):
+            encoded = str(check)
+        return "ui:" + hashlib.sha256(encoded.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+    def ensure_ui_outcome_requirement(self) -> None:
+        """Add the derived requirement representing independently verified UI completion."""
+        if any(item.key == "ui:outcome" for item in self.requirements):
+            return
+        self.requirements.append(Requirement(
+            key="ui:outcome",
+            tool="browser_step",
+            label="machine-verified UI task outcome",
+            scope={"derived": True, "ui_requirement": True, "ui_outcome": True},
+        ))
+
+    def ensure_ui_requirements(self, checks: list[dict[str, Any]]) -> None:
+        """Represent explicit browser verifier predicates in the ordinary ledger."""
+        self.ensure_ui_outcome_requirement()
+        existing = {item.key for item in self.requirements}
+        for raw in list(checks or [])[:32]:
+            if not isinstance(raw, dict):
+                continue
+            check = dict(raw)
+            key = self._ui_requirement_key(check)
+            if key in existing:
+                continue
+            kind = str(check.get("type") or "ui predicate").replace("_", " ")
+            self.requirements.append(Requirement(
+                key=key,
+                tool="browser_step",
+                label=f"UI completion predicate: {kind}",
+                scope={"derived": True, "ui_requirement": True, "ui_predicate": check},
+            ))
+            existing.add(key)
+
+    def invalidate_ui_outcome(self, reason: str = "browser state changed after verification") -> None:
+        """Invalidate previous UI proof whenever a later browser mutation occurs."""
+        for item in self.requirements:
+            if not bool((item.scope or {}).get("ui_requirement")):
+                continue
+            item.status = "pending"
+            item.last_reason = str(reason or "")[:120]
+
+    def record_ui_verification(self, verification: dict[str, Any]) -> None:
+        """Close UI requirements only from machine-verifier results, never model prose."""
+        rows = [row for row in list((verification or {}).get("checks") or []) if isinstance(row, dict)]
+        self.ensure_ui_requirements([dict(row.get("check") or {}) for row in rows if isinstance(row.get("check"), dict)])
+        by_key = {
+            self._ui_requirement_key(dict(row.get("check") or {})): row
+            for row in rows if isinstance(row.get("check"), dict)
+        }
+        for item in self.requirements:
+            scope = item.scope or {}
+            if not bool(scope.get("ui_requirement")):
+                continue
+            if scope.get("ui_outcome"):
+                item.attempts += 1
+                passed = bool((verification or {}).get("passed"))
+                item.status = "satisfied" if passed else "failed"
+                item.last_reason = "ui completion verified" if passed else "one or more UI completion predicates failed"
+                _append_requirement_evidence(
+                    item, source="browser_verifier", tool_name="browser_step",
+                    status="ok" if passed else "error", reason=item.last_reason,
+                    evidence_preview=json.dumps(verification, ensure_ascii=False)[:320],
+                )
+                continue
+            row = by_key.get(item.key)
+            if row is None:
+                continue
+            item.attempts += 1
+            passed = bool(row.get("passed"))
+            item.status = "satisfied" if passed else "failed"
+            item.last_reason = "ui predicate verified" if passed else str(row.get("error") or "ui predicate did not match")[:120]
+            _append_requirement_evidence(
+                item, source="browser_verifier", tool_name="browser_step",
+                status="ok" if passed else "error", reason=item.last_reason,
+                evidence_preview=json.dumps(row, ensure_ascii=False)[:320],
+            )
 
     def mark_fact_satisfied(self, fact_type: str, reason: str = "grounding_evidence") -> None:
         """Close tool requirements whose requested fact was grounded by any valid path."""

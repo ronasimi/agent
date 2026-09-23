@@ -96,6 +96,7 @@ _JSON_DICT_RESULT_TOOLS = {
     "network_path", "endpoint_probe", "http_probe",
     "repo_status", "repo_diff", "repo_checks", "git_status", "git_diff",
     "start_computation", "get_computation_status", "cancel_computation",
+    "browser_step",
 }
 
 
@@ -133,6 +134,22 @@ def classify_tool_outcome(
 
     lowered = text.lower().lstrip()
     name = str(tool_name or "")
+
+    # browser_step returns structured machine-readable failures rather than an
+    # English "Error:" prefix. Feed its normalized code directly into the
+    # existing stall tracker/validator so retries can pivot on the actual UI
+    # failure class.
+    if name == "browser_step" and text.startswith("{"):
+        try:
+            payload = json.loads(text)
+            if isinstance(payload, dict) and payload.get("ok") is False:
+                error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+                code = re.sub(r"[^a-z0-9_]+", "_", str(error.get("code") or "browser_error").lower()).strip("_")
+                return {"success": False, "status": "error", "reason": f"browser_{code}", "fingerprint": result_fingerprint(text)}
+            if isinstance(payload, dict) and payload.get("ok") is True:
+                return {"success": True, "status": "ok", "reason": "ok", "fingerprint": result_fingerprint(text)}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {"success": False, "status": "error", "reason": "malformed_structured_result", "fingerprint": result_fingerprint(text)}
 
     # Recognize explicit textual control/status prefixes before enforcing a
     # structured success schema. Otherwise a legitimate ``Error: ...`` emitted

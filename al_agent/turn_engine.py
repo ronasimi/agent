@@ -105,6 +105,8 @@ def handle_user_turn(
     inference_lock = None
     model_lock_requested_at: float | None = None
     model_lock_acquired_at: float | None = None
+    first_model_lock_requested_at: float | None = None
+    model_queue_wait_total_ms = 0.0
 
     # Serialize history/state only with other turns from this conversation.
     # The global Ollama lock is deliberately deferred until model inference is
@@ -128,9 +130,12 @@ def handle_user_turn(
 
     def ensure_inference_lock() -> None:
         nonlocal inference_lock, model_lock_requested_at, model_lock_acquired_at
+        nonlocal first_model_lock_requested_at, model_queue_wait_total_ms
         if inference_lock is not None:
             return
         model_lock_requested_at = time.monotonic()
+        if first_model_lock_requested_at is None:
+            first_model_lock_requested_at = model_lock_requested_at
         _record_monitor_state_fn(
             "agent.interaction_waiting",
             {"pid": os.getpid(), "started_at": utc_now(), "phase": "model_queue"},
@@ -141,6 +146,8 @@ def handle_user_turn(
             _record_monitor_state_fn("agent.interaction_waiting", False)
             raise
         model_lock_acquired_at = time.monotonic()
+        queue_wait_ms = (model_lock_acquired_at - model_lock_requested_at) * 1000.0
+        model_queue_wait_total_ms += queue_wait_ms
         _record_monitor_state_fn("agent.interaction_waiting", False)
         # A large report model may have been left resident. Evict only when this
         # turn truly needs Ollama; deterministic fast paths never pay this cost.
@@ -148,10 +155,21 @@ def handle_user_turn(
             evict_report_model_for_interactive()
         except Exception:
             pass
-        emit_event(
-            "model_queue_acquired",
-            queue_wait_ms=(model_lock_acquired_at - model_lock_requested_at) * 1000.0,
-        )
+        emit_event("model_queue_acquired", queue_wait_ms=queue_wait_ms)
+
+    def release_inference_lock_for_external_io(reason: str) -> None:
+        """Release only the inference mutex while slow browser/network UI I/O runs.
+
+        The per-conversation turn lock remains held, so task/history ordering is
+        unchanged. Ollama residency is not altered; another conversation can use
+        the already-resident model while Playwright waits on rendering/network.
+        """
+        nonlocal inference_lock
+        if inference_lock is None:
+            return
+        _release_lock_fn(inference_lock)
+        inference_lock = None
+        emit_event("model_queue_released_for_io", reason=str(reason or "external_io")[:80])
 
     try:
         if refresh_history:
@@ -607,6 +625,12 @@ def handle_user_turn(
         active_stall_recovery: dict[str, Any] | None = None
         validator_interventions = 0
         tracker = StepFailureTracker(STALL_VALIDATOR_AFTER)
+        # UI automation completion is independently verified. Any successful
+        # interactive browser mutation invalidates an older verification until
+        # browser_step(op="verify") passes explicit end-state checks.
+        browser_interaction_performed = False
+        browser_completion_verified = False
+        browser_last_state_version = -1
         successful_execution_trace: list[dict[str, Any]] = []
         # observation_id -> recovery cursor/size. A truncated tool result creates
         # a hard read_observation requirement before that result is summarized.
@@ -1029,6 +1053,7 @@ def handle_user_turn(
                         note_missing_grounding(report, "forced_finalization")
                     emit_grounding_blocked(report)
                     return False
+            ensure_inference_lock()
             _finalize_after_limit(
                 messages,
                 turn_tail,
@@ -1083,6 +1108,7 @@ def handle_user_turn(
                 if len(recovery_schemas) >= RECIPE_VALIDATOR_MAX_TOOLS:
                     break
 
+            ensure_inference_lock()
             with OperationStatus("Fast-model final recipe recovery"):
                 report = suggest_recovery_recipe(
                     _validator_client,
@@ -3905,6 +3931,9 @@ def handle_user_turn(
             if soft_turn_budget_exhausted() and (tool_iterations or model_calls):
                 emit_budget_partial("soft interactive turn deadline reached")
                 break
+            # Browser/UI I/O releases the global inference mutex. Reacquire only
+            # when this iteration is about to use the main/fast model again.
+            ensure_inference_lock()
             emit_event("iteration", iteration=iteration, limit=iteration_limit, pending_requirements=len(requirement_ledger.pending()))
             # Mid-loop validator: run before a fourth unvalidated attempt after
             # three deterministic failed/no-progress attempts on one step.
@@ -4234,14 +4263,10 @@ def handle_user_turn(
             cache_hit_pct = (cached * 100.0 / cache_total) if cache_total else 0.0
             log_perf_stats(perf_stats)
             turn_queue_wait_ms = (turn_lock_acquired - turn_started) * 1000.0
-            model_queue_wait_ms = (
-                (model_lock_acquired_at - model_lock_requested_at) * 1000.0
-                if model_lock_acquired_at is not None and model_lock_requested_at is not None
-                else 0.0
-            )
+            model_queue_wait_ms = model_queue_wait_total_ms
             preparation_ms = (
-                (model_lock_requested_at - turn_lock_acquired) * 1000.0
-                if model_lock_requested_at is not None
+                (first_model_lock_requested_at - turn_lock_acquired) * 1000.0
+                if first_model_lock_requested_at is not None
                 else (request_started - turn_lock_acquired) * 1000.0
             )
             last_model_metrics = {
@@ -4341,6 +4366,35 @@ def handle_user_turn(
                 safe = (
                     "I can't safely summarize the truncated tool result because the omitted observation data "
                     "was not retrieved before the execution limit was reached."
+                )
+                _append_and_save_fn(messages, {"role": "assistant", "content": safe})
+                if WORKING_STATE_ENABLED:
+                    WORKING_STATE.complete_turn(blocked=True)
+                answer_first_visible_at = answer_first_visible_at or time.monotonic()
+                emit_event("assistant_final", content=safe, finalization=True, blocked=True)
+                break
+
+            # Hard UI outcome gate. Process success (a click/type/navigation call
+            # executed) is not equivalent to task success. After any successful
+            # interactive browser action, require an independent machine-checked
+            # verify operation before a candidate final answer may leave the loop.
+            if not tool_calls and full_content and browser_interaction_performed and not browser_completion_verified:
+                _ensure_tool_schemas(tool_schemas, ["browser_step"], turn_tool_policy)
+                if WORKING_STATE_ENABLED:
+                    WORKING_STATE.update_tools(tool_schemas)
+                if iteration < iteration_limit:
+                    turn_prefix, tool_prompt_tokens = rebuild_prefix()
+                    append_control_note(
+                        "[Harness UI outcome gate] The previous candidate answer was discarded because browser "
+                        "interaction occurred without independent end-state verification. Execute browser_step with "
+                        "op='verify' and non-empty machine-checkable checks derived from the user's requested final "
+                        "UI state. Do not treat a successful click/type/navigation as proof of task completion."
+                    )
+                    full_content = ""
+                    continue
+                safe = (
+                    "The browser interaction ran, but I can't confirm the requested UI task completed because "
+                    "its final state was not independently verified before the execution limit was reached."
                 )
                 _append_and_save_fn(messages, {"role": "assistant", "content": safe})
                 if WORKING_STATE_ENABLED:
@@ -4581,9 +4635,14 @@ def handle_user_turn(
             parallel_batch = bool(
                 len(tool_calls) > 1
                 and MAX_PARALLEL_READONLY_TOOLS > 1
+                and not any(str(call.get("function", {}).get("name") or "") in {"browser_step", "take_web_screenshot"} for call in tool_calls)
                 and all(bool(TOOL_METADATA.get(str(call.get("function", {}).get("name") or ""), {}).get("readonly", True)) for call in tool_calls)
             )
             if parallel_batch:
+                batch_names = {str(call.get("function", {}).get("name") or "") for call in tool_calls}
+                if batch_names & {"browse_url", "page_metadata", "page_links"}:
+                    release_inference_lock_for_external_io("browser_read_batch")
+
                 def _run_parallel_call(call: dict[str, Any]):
                     name = str(call.get("function", {}).get("name") or "")
                     raw = call.get("function", {}).get("arguments", {})
@@ -4634,6 +4693,8 @@ def handle_user_turn(
                         if arguments_reference_sensitive_path(canonical_args) and not sensitive_access_allowed:
                             raise PermissionError("sensitive file access requires the user to name the sensitive target explicitly")
                         args = normalize_arguments(AVAILABLE_TOOLS_MAP[name], canonical_args)
+                        if name in {"browser_step", "take_web_screenshot", "browse_url", "page_metadata", "page_links"}:
+                            release_inference_lock_for_external_io(name)
                         with OperationStatus(f"Executing {name}"):
                             result = _execute_registered_tool(name, args)
                 except Exception as exc:
@@ -4685,6 +4746,55 @@ def handle_user_turn(
                 reason = str(outcome.get("reason") or ("ok" if success else "tool_error"))
                 if error_reason and not success:
                     reason = error_reason
+
+                if name == "browser_step":
+                    browser_payload: dict[str, Any] = {}
+                    try:
+                        parsed_browser = json.loads(result_content)
+                        if isinstance(parsed_browser, dict):
+                            browser_payload = parsed_browser
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        browser_payload = {}
+                    try:
+                        browser_last_state_version = int(browser_payload.get("state_version", browser_last_state_version))
+                    except (TypeError, ValueError):
+                        pass
+                    browser_op = str((args if isinstance(args, dict) else {}).get("op") or "observe").lower()
+                    browser_metrics = browser_payload.get("metrics") if isinstance(browser_payload.get("metrics"), dict) else {}
+                    browser_scores = browser_payload.get("scores") if isinstance(browser_payload.get("scores"), dict) else {}
+                    if browser_metrics:
+                        _record_monitor_state_fn("agent.last_browser_metrics", browser_metrics)
+                        emit_event("browser_metrics", operation=browser_op, state_version=browser_last_state_version, **browser_metrics)
+                    if browser_scores:
+                        emit_event("browser_score", operation=browser_op, state_version=browser_last_state_version, **browser_scores)
+                    browser_safety = browser_payload.get("safety") if isinstance(browser_payload.get("safety"), dict) else {}
+                    browser_recovery = browser_payload.get("recovery") if isinstance(browser_payload.get("recovery"), dict) else {}
+                    if browser_safety:
+                        _record_monitor_state_fn("agent.last_browser_safety", browser_safety)
+                        emit_event("browser_safety", operation=browser_op, state_version=browser_last_state_version, **browser_safety)
+                    if browser_recovery.get("attempted"):
+                        _record_monitor_state_fn("agent.last_browser_recovery", browser_recovery)
+                        emit_event("browser_recovery", operation=browser_op, state_version=browser_last_state_version, **browser_recovery)
+                    if success and browser_op in {"navigate", "click", "type", "select", "scroll", "key", "back", "new_tab", "switch_tab", "close_tab"}:
+                        browser_interaction_performed = True
+                        # A later mutation always invalidates prior outcome proof
+                        # both in the hard UI gate and the ordinary requirement ledger.
+                        browser_completion_verified = False
+                        try:
+                            requirement_ledger.ensure_ui_outcome_requirement()
+                            requirement_ledger.invalidate_ui_outcome()
+                        except Exception:
+                            pass
+                    elif browser_op == "verify":
+                        verification = browser_payload.get("verification") if isinstance(browser_payload.get("verification"), dict) else {}
+                        browser_completion_verified = bool(verification.get("passed"))
+                        try:
+                            check_args = list((args if isinstance(args, dict) else {}).get("checks") or [])
+                            requirement_ledger.ensure_ui_requirements(check_args)
+                            requirement_ledger.record_ui_verification(verification)
+                        except Exception:
+                            pass
+
                 if not success:
                     try:
                         lesson_id = record_failure_lesson(
@@ -4953,17 +5063,13 @@ def handle_user_turn(
             inference_lock = None
         total_turn_ms = (time.monotonic() - turn_started) * 1000.0
         turn_queue_wait_ms = (turn_lock_acquired - turn_started) * 1000.0
-        model_queue_wait_ms = (
-            (model_lock_acquired_at - model_lock_requested_at) * 1000.0
-            if model_lock_acquired_at is not None and model_lock_requested_at is not None
-            else 0.0
-        )
+        model_queue_wait_ms = model_queue_wait_total_ms
         turn_metrics = {
+            **last_model_metrics,
             "total_turn_ms": total_turn_ms,
             "queue_wait_ms": turn_queue_wait_ms + model_queue_wait_ms,
             "turn_queue_wait_ms": turn_queue_wait_ms,
             "model_queue_wait_ms": model_queue_wait_ms,
-            **last_model_metrics,
         }
         if answer_first_visible_at is not None:
             turn_metrics["answer_first_visible_ms"] = (answer_first_visible_at - turn_started) * 1000.0

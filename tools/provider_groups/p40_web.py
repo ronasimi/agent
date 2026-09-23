@@ -14,6 +14,7 @@ TOOL_SPECS = [
     ('web_research', 'extract_document'),
     ('web_research', 'page_fingerprint'),
     ('web_research', 'page_diff'),
+    ('browser_ui', 'browser_step'),
     ('web_screenshot', 'take_web_screenshot'),
     ('media', 'attach_media'),
     ('pdf_generator', 'generate_pdf_report'),

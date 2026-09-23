@@ -45,6 +45,19 @@ _REQUIRED_OVERRIDES = {
 }
 
 _SCHEMA_OVERRIDES: dict[tuple[str, str], dict[str, Any]] = {
+    ("browser_step", "op"): {"enum": ["observe", "navigate", "click", "type", "select", "scroll", "key", "back", "verify", "new_tab", "list_tabs", "switch_tab", "close_tab", "wait_download"]},
+    ("browser_step", "direction"): {"enum": ["up", "down", "left", "right"]},
+    ("browser_step", "expected_state_version"): {"minimum": -1},
+    ("browser_step", "amount"): {"minimum": 100, "maximum": 5000},
+    ("browser_step", "checks"): {
+        "description": "Machine-verifiable predicates. For verify these prove final task completion; for consequential click/Enter actions they are mandatory pre-submit checks of current target/form state. Types: url_equals/url_contains/url_matches, title_contains/page_title_matches, text_present/text_absent, element_visible/element_not_visible, element_value_equals, element_checked, element_disabled, element_expanded, element_selected, tab_open, download_exists.",
+        "maxItems": 32,
+    },
+    ("browser_step", "x"): {"minimum": -1, "maximum": 10000},
+    ("browser_step", "y"): {"minimum": -1, "maximum": 10000},
+    ("browser_step", "max_candidates"): {"minimum": 8, "maximum": 200},
+    ("browser_step", "tab_index"): {"minimum": -1, "maximum": 64},
+    ("browser_step", "timeout_ms"): {"minimum": 250, "maximum": 15000},
     ("set_goal", "status"): {"enum": ["active", "paused", "complete"]},
     ("list_background_jobs", "status"): {"enum": ["", "pending", "running", "completed", "failed", "cancelled"]},
     ("news_search", "timelimit"): {"enum": ["", "d", "w", "m"]},
@@ -86,6 +99,7 @@ _SCHEMA_OVERRIDES: dict[tuple[str, str], dict[str, Any]] = {
     ("start_computation", "max_steps"): {"minimum": 0},
     ("start_computation", "max_tape_cells"): {"minimum": 0},
     ("start_computation", "max_wall_time_seconds"): {"minimum": 0},
+    ("start_computation", "max_recovery_failures"): {"minimum": 0},
     ("get_computation_status", "tape_cells"): {"minimum": 1, "maximum": 256},
 }
 
@@ -110,6 +124,17 @@ _SCHEMA_LIMITS_BY_NAME: dict[str, dict[str, Any]] = {
 }
 
 _PARAMETER_HINTS = {
+    "expected_state_version": "State version from the latest browser observation; required for interactive actions to reject stale plans.",
+    "ref": "Stable semantic browser element reference such as e23.",
+    "direction": "Scroll direction for browser_step.",
+    "amount": "Scroll amount in pixels for browser_step.",
+    "x": "Viewport x-coordinate for click fallback; prefer ref whenever a semantic element ref exists.",
+    "y": "Viewport y-coordinate for click fallback; prefer ref whenever a semantic element ref exists.",
+    "max_candidates": "Maximum semantic UI candidates to expose (8-200); increase only when the default pruned view omits a needed control.",
+    "include_offscreen": "Include off-screen UI candidates in the semantic observation; normally false for token efficiency.",
+    "screenshot": "Attach a viewport screenshot after this browser step only when visual pixels are materially useful.",
+    "tab_index": "Zero-based browser tab index for switch_tab/close_tab; -1 means the active tab for close_tab.",
+    "timeout_ms": "Bounded browser wait timeout in milliseconds (250-15000), including navigation/download waits.",
     "query": "Search query text.",
     "instruments": "List of market instruments or explicit ticker/futures symbols to quote.",
     "topic": "Short topic/category label, or the research topic where applicable.",
@@ -164,10 +189,15 @@ _PARAMETER_HINTS = {
     "job_id": "Durable job identifier.",
     "program": "Deterministic machine program object with initial_state, halt_states, blank, and transitions.",
     "input_text": "Initial tape input written from cell zero to the right.",
+    "initial_tape": "Optional sparse address-to-symbol map applied over input_text or file input; addresses may be negative.",
+    "initial_head": "Initial integer tape-head address.",
+    "input_file": "Optional workspace text or JSON sparse-tape file used as initial input without placing its contents in model context.",
+    "input_file_format": "External input format: auto, text, or tape_json.",
     "quantum": "Transitions per worker slice; zero uses the configured default and does not cap total steps.",
     "max_steps": "Optional total transition policy; zero means no harness-imposed step limit.",
     "max_tape_cells": "Optional populated-tape-cell policy; zero means no harness-imposed tape-cell limit.",
     "max_wall_time_seconds": "Optional total wall-clock policy; zero means no harness-imposed lifetime limit.",
+    "max_recovery_failures": "Consecutive worker/infrastructure recoveries allowed before failure; zero explicitly means unlimited recovery.",
     "idempotency_key": "Optional stable key used to deduplicate active computation creation retries.",
     "tape_start": "Optional first tape address for a bounded inspection window; omit to center around the head.",
     "tape_cells": "Number of tape addresses to inspect in the bounded status window.",

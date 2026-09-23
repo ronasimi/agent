@@ -1,3 +1,5 @@
+import json
+
 from al_agent.prompts import SYSTEM_POLICY
 from al_agent.turn_support import _bounded_tool_result_with_ref
 from tools import web
@@ -168,3 +170,43 @@ def test_generic_execution_timeout_schema_matches_runtime_clamp():
         timeout = function_schema(func)["function"]["parameters"]["properties"]["timeout"]
         assert timeout["minimum"] == 1
         assert timeout["maximum"] == 120
+
+
+def test_browse_url_reuses_active_browser_page_before_network_fetch(monkeypatch):
+    from tools import web
+    import tools.browser_ui as browser_ui
+
+    monkeypatch.setattr(browser_ui, "reuse_loaded_page", lambda url, mode="text", limit=50000: {
+        "source": "browser_session", "url": url, "content_type": "text/html", "text": "Dynamic SPA state"
+    })
+    monkeypatch.setattr(web, "fetch_text", lambda *a, **k: (_ for _ in ()).throw(AssertionError("network fetch should not run")))
+    result = web.browse_url("https://example.com/app")
+    assert "Dynamic SPA state" in result
+    assert "source=browser-session" in result
+
+
+def test_page_metadata_and_links_reuse_active_browser_dom(monkeypatch):
+    from tools import web_research
+    import tools.browser_ui as browser_ui
+
+    def fake_reuse(url, *, mode="text", limit=50000):
+        if mode == "metadata":
+            return {"url": url, "title": "Live App", "meta": {"description": "live"}, "canonical": url, "source": "browser_session"}
+        if mode == "links":
+            return {"source": url, "source_kind": "browser_session", "links": [
+                {"url": "https://example.com/next#frag", "text": "Next"},
+                {"url": "https://other.test/skip", "text": "Other"},
+            ]}
+        return None
+
+    monkeypatch.setattr(browser_ui, "reuse_loaded_page", fake_reuse)
+    monkeypatch.setattr(web_research, "fetch_bytes", lambda *a, **k: (_ for _ in ()).throw(AssertionError("metadata refetch should not run")))
+    monkeypatch.setattr(web_research, "_page", lambda *a, **k: (_ for _ in ()).throw(AssertionError("link refetch should not run")))
+
+    metadata = json.loads(web_research.page_metadata("https://example.com/app"))
+    assert metadata["title"] == "Live App"
+    assert metadata["source"] == "browser_session"
+
+    links = json.loads(web_research.page_links("https://example.com/app", same_domain=True, limit=10))
+    assert links["source_kind"] == "browser_session"
+    assert links["links"] == [{"url": "https://example.com/next", "text": "Next", "same_domain": True}]

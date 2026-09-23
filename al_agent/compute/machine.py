@@ -14,7 +14,7 @@ and optional runtime policy remain external concerns.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 PROGRAM_VERSION = 1
 CHECKPOINT_VERSION = 1
@@ -104,6 +104,18 @@ def validate_program(program: dict[str, Any]) -> dict[str, Any]:
     if initial_state not in halt_states and initial_state not in transitions:
         raise MachineProgramError(f"initial state '{initial_state}' has no transition table")
 
+    # Catch misspelled/unreachable transition targets before a long-running
+    # durable job is queued.  A target is valid only when it has its own
+    # transition table or is explicitly terminal.
+    defined_states = set(transitions) | set(halt_states)
+    for state, rules in transitions.items():
+        for symbol, action in rules.items():
+            target = action["next"]
+            if target not in defined_states:
+                raise MachineProgramError(
+                    f"transition {state}/{symbol} references undefined state {target!r}"
+                )
+
     return {
         "version": PROGRAM_VERSION,
         "initial_state": initial_state,
@@ -113,15 +125,55 @@ def validate_program(program: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def initialize_state(program: dict[str, Any], input_text: str = "") -> dict[str, Any]:
-    """Return a fresh JSON-serializable checkpoint for ``program`` and input."""
+def normalize_initial_tape(
+    program: dict[str, Any],
+    input_text: str = "",
+    initial_tape: Mapping[int | str, str] | None = None,
+) -> dict[str, str]:
+    """Build the canonical sparse initial tape.
+
+    ``input_text`` is written character-by-character from address zero.  An
+    optional ``initial_tape`` map is then applied as an overlay, so callers can
+    initialize arbitrary positive or negative addresses and use multi-character
+    symbols.  Blank symbols are omitted from the sparse representation.
+    """
     normalized = validate_program(program)
     tape = {str(index): symbol for index, symbol in enumerate(str(input_text)) if symbol != normalized["blank"]}
+    if initial_tape is not None:
+        if not isinstance(initial_tape, Mapping):
+            raise MachineProgramError("initial_tape must be an object mapping integer addresses to symbols")
+        for raw_address, raw_symbol in initial_tape.items():
+            try:
+                address = int(raw_address)
+            except (TypeError, ValueError) as exc:
+                raise MachineProgramError(f"invalid initial tape address {raw_address!r}") from exc
+            symbol = _nonempty_text(raw_symbol, f"initial_tape[{raw_address}]")
+            key = str(address)
+            if symbol == normalized["blank"]:
+                tape.pop(key, None)
+            else:
+                tape[key] = symbol
+    return {key: tape[key] for key in sorted(tape, key=int)}
+
+
+def initialize_state(
+    program: dict[str, Any],
+    input_text: str = "",
+    initial_tape: Mapping[int | str, str] | None = None,
+    initial_head: int = 0,
+) -> dict[str, Any]:
+    """Return a fresh JSON-serializable checkpoint for ``program`` and input."""
+    normalized = validate_program(program)
+    tape = normalize_initial_tape(normalized, input_text, initial_tape)
+    try:
+        head = int(initial_head)
+    except (TypeError, ValueError) as exc:
+        raise MachineProgramError("initial_head must be an integer") from exc
     status = "halted" if normalized["initial_state"] in normalized["halt_states"] else "running"
     return {
         "checkpoint_version": CHECKPOINT_VERSION,
         "machine_state": normalized["initial_state"],
-        "head": 0,
+        "head": head,
         "steps": 0,
         "yield_count": 0,
         "checkpoint_generation": 0,
@@ -159,6 +211,12 @@ def _normalize_checkpoint(state: dict[str, Any]) -> dict[str, Any]:
         raise MachineProgramError("checkpoint counters must be integers") from exc
     if steps < 0 or yield_count < 0 or checkpoint_generation < 0:
         raise MachineProgramError("checkpoint counters cannot be negative")
+    try:
+        tape_cells = int(state.get("tape_cells", len(tape)))
+    except (TypeError, ValueError) as exc:
+        raise MachineProgramError("checkpoint tape_cells must be an integer") from exc
+    if tape_cells < 0:
+        raise MachineProgramError("checkpoint tape_cells cannot be negative")
     return {
         "checkpoint_version": CHECKPOINT_VERSION,
         "machine_state": machine_state,
@@ -168,6 +226,10 @@ def _normalize_checkpoint(state: dict[str, Any]) -> dict[str, Any]:
         "checkpoint_generation": checkpoint_generation,
         "status": str(state.get("status") or "running"),
         "tape": tape,
+        # In the pure in-memory machine this equals len(tape).  Durable workers
+        # may hydrate only the scheduler-reachable tape window and preserve the
+        # total populated-cell count separately.
+        "tape_cells": tape_cells,
         "last_error": state.get("last_error"),
     }
 
@@ -183,7 +245,7 @@ def _serialize_checkpoint(state: dict[str, Any], *, transitions: int, status: st
         "checkpoint_generation": int(state.get("checkpoint_generation", 0)) + 1,
         "status": status,
         "tape": {str(key): tape[key] for key in sorted(tape)},
-        "tape_cells": len(tape),
+        "tape_cells": int(state.get("tape_cells", len(tape))),
         "last_quantum_transitions": int(transitions),
         "last_error": error,
     }
@@ -221,10 +283,15 @@ def run_quantum(program: dict[str, Any], state: dict[str, Any], quantum: int = 1
             if action is None:
                 raise MachineProgramError(f"no transition for state {current!r} reading {symbol!r}")
 
+            address = work["head"]
+            was_populated = address in work["tape"]
             if action["write"] == blank:
                 work["tape"].pop(work["head"], None)
             else:
                 work["tape"][work["head"]] = action["write"]
+            is_populated = action["write"] != blank
+            if was_populated != is_populated:
+                work["tape_cells"] += 1 if is_populated else -1
 
             if action["move"] == "L":
                 work["head"] -= 1

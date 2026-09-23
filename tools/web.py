@@ -573,16 +573,32 @@ def extract_main_text(html: str, *, max_chars: int = 20000) -> str:
 
 
 def browse_url(url: str = "", extract: str = "", max_chars: int = 20000) -> str:
-    """Fetch a public URL; optionally return only source passages relevant to an extraction instruction."""
+    """Read a public URL, reusing the live browser page when it is already loaded.
+
+    Interactive tasks should not pay for a duplicate HTTP fetch or lose SPA/form
+    state merely to inspect the current page. A normal network fetch remains the
+    fallback for research URLs that are not the active browser page.
+    """
     if not str(url).strip():
         return "Error: Missing required 'url' parameter."
     try:
-        final_url, content_type, body = fetch_text(url, max_bytes=2 * 1024 * 1024)
         max_chars = max(1000, min(int(max_chars), 50000))
-        if content_type in {"application/json", "application/xml", "text/xml", "text/plain"}:
-            text = body[:50000]
+        reused = None
+        try:
+            from .browser_ui import reuse_loaded_page
+            reused = reuse_loaded_page(str(url), mode="text", limit=50000)
+        except Exception:
+            reused = None
+        if isinstance(reused, dict):
+            final_url = str(reused.get("url") or url)
+            content_type = str(reused.get("content_type") or "text/html") + "; source=browser-session"
+            text = str(reused.get("text") or "")[:50000]
         else:
-            text = extract_main_text(body, max_chars=50000)
+            final_url, content_type, body = fetch_text(url, max_bytes=2 * 1024 * 1024)
+            if content_type in {"application/json", "application/xml", "text/xml", "text/plain"}:
+                text = body[:50000]
+            else:
+                text = extract_main_text(body, max_chars=50000)
         extraction = " ".join(str(extract or "").split())
         if extraction:
             text = targeted_extract(text, extraction, max_chars=min(max_chars, 10000))

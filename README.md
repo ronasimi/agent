@@ -319,9 +319,9 @@ is controlled by `agent.report_model`, `agent.report_options`, and
 
 ## Durable deterministic computation
 
-The foreground LLM/tool loop remains deliberately bounded for responsiveness and recovery safety. For deterministic workloads that may need more work than one turn or subprocess timeout can provide, the harness exposes a checkpointed `durable_compute` worker. Each claim executes a finite transition quantum, atomically saves the continuation state, and yields back to the queue; there is no mandatory total transition or yield count. A program ends on `HALT`, explicit cancellation, failure, or an optional resource policy supplied when the job is created.
+The foreground LLM/tool loop remains deliberately bounded for responsiveness and recovery safety. For deterministic workloads that may need more work than one turn or subprocess timeout can provide, the harness exposes a checkpointed `durable_compute` worker. Each claim executes a finite transition quantum, hydrates only the tape range reachable in that slice, and atomically commits lightweight continuation metadata plus changed sparse tape cells before yielding back to the queue; there is no mandatory total transition or yield count. A program ends on `HALT`, explicit cancellation, failure, or an optional resource policy supplied when the job is created.
 
-Model-facing tools are `start_computation`, `get_computation_status`, and `cancel_computation`. Starts are idempotency-protected, status returns bounded progress/tape windows, and the Jobs view shows machine state, transitions, yields, tape-cell count, and cancellation for active jobs. The deterministic machine format, recovery semantics, safety model, and examples are documented in [`DURABLE_COMPUTE.md`](DURABLE_COMPUTE.md).
+Model-facing tools are `start_computation`, `get_computation_status`, and `cancel_computation`. Starts are idempotency-protected and may seed the machine from inline text, an arbitrary sparse initial-tape map, or a SHA-256-pinned workspace text/JSON file without putting the file contents in model context. Status returns bounded progress/tape windows, and the Jobs view shows machine state, transitions, yields, tape-cell count, infrastructure-recovery count, and cancellation for active jobs. Transition targets are validated statically before queueing. The deterministic machine format, recovery semantics, safety model, input formats, and examples are documented in [`DURABLE_COMPUTE.md`](DURABLE_COMPUTE.md).
 
 Generic `execute_shell` and `execute_python` calls remain bounded to **120 seconds**; durable computation does not weaken those subprocess safeguards or the recipe/foreground iteration limits.
 
@@ -634,11 +634,11 @@ Benchmark the deterministic durable-compute core and SQLite checkpoint path inde
 python scripts/benchmark_durable_compute.py
 ```
 
-The benchmark reports transition throughput at several quantum sizes plus checkpoint/defer persistence latency. It uses a temporary database and imposes no production-state side effects.
+The benchmark reports transition throughput at several quantum sizes plus lightweight checkpoint + sparse tape-delta persistence latency. It uses a temporary database and imposes no production-state side effects.
 
 ## Testing
 
-Current repository baseline: **545 passed, 1 skipped**, with the generated builtin manifest current at **235 tools**. Historical engineering notes elsewhere in the repository retain the test/tool counts from the revisions they documented; `CURRENT_STATE.md` and this section describe the current tree.
+Current repository baseline: **560 passed, 1 skipped**, with the generated builtin manifest current at **235 tools**. Historical engineering notes elsewhere in the repository retain the test/tool counts from the revisions they documented; `CURRENT_STATE.md` and this section describe the current tree.
 
 Run the unit suite with:
 

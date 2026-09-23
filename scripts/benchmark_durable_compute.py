@@ -2,18 +2,23 @@
 """Benchmark the deterministic durable-compute execution substrate.
 
 This benchmark does not call Ollama. It measures exact machine transitions per
-second for representative cooperative quantum sizes and the SQLite checkpoint
-write cost for a small machine state. Run it on the deployment host when tuning
-``worker.durable_compute_quantum``.
+second for representative cooperative quantum sizes and the SQLite cost of a
+lightweight checkpoint plus sparse tape delta. Run it on the deployment host
+when tuning ``worker.durable_compute_quantum``.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import statistics
+import sys
 import tempfile
 import time
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from al_agent.compute.machine import initialize_state, run_quantum
 from tools import runtime
@@ -61,7 +66,7 @@ def benchmark_quantum(quantum: int, runs: int = 5) -> dict:
 
 
 def benchmark_checkpoint(runs: int = 20) -> dict:
-    """Measure a representative SQLite checkpoint write using an isolated DB."""
+    """Measure a metadata checkpoint plus one-cell sparse tape delta."""
     old_db = runtime.DB_PATH
     samples = []
     try:
@@ -70,10 +75,23 @@ def benchmark_checkpoint(runs: int = 20) -> dict:
             runtime.init_runtime_db()
             job_id = runtime.create_job("durable_compute", "benchmark", {"benchmark": True})
             state = initialize_state(oscillator_program())
+            initial_tape = dict(state.pop("tape", {}))
+            runtime.replace_compute_tape(job_id, initial_tape)
             for step in range(1, max(1, int(runs)) + 1):
-                state = run_quantum(oscillator_program(), state, quantum=100).state
+                hydrated = dict(state)
+                before = runtime.get_compute_tape_window(job_id, -1, 2)
+                hydrated["tape"] = before
+                result = run_quantum(oscillator_program(), hydrated, quantum=101)
+                after = dict(result.state.get("tape") or {})
+                updates = {
+                    int(key): after.get(key)
+                    for key in set(before) | set(after)
+                    if before.get(key) != after.get(key)
+                }
+                state = dict(result.state)
+                state.pop("tape", None)
                 start = time.perf_counter()
-                runtime.save_checkpoint(job_id, state, step=step)
+                runtime.save_checkpoint(job_id, state, step=step, tape_updates=updates)
                 samples.append(time.perf_counter() - start)
     finally:
         runtime.DB_PATH = old_db
@@ -92,7 +110,7 @@ def run_benchmark(quanta: tuple[int, ...] = DEFAULT_QUANTA, runs: int = 5, check
         "quantum_results": [benchmark_quantum(q, runs=runs) for q in quanta],
         "checkpoint_write": benchmark_checkpoint(runs=checkpoint_runs),
         "guidance": (
-            "Choose a quantum large enough that checkpoint overhead is small relative to compute time, "
+            "Choose a quantum large enough that sparse-delta checkpoint overhead is small relative to compute time, "
             "but small enough that cancellation and queue fairness remain responsive. The quantum bounds "
             "one slice only and must not be treated as a total computation limit."
         ),

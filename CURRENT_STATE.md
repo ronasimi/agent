@@ -60,9 +60,11 @@ The hard per-turn model-call budget remains a safety bound. Deterministic eviden
 
 ### Durable deterministic compute
 
-Universal-duration deterministic work is deliberately separated from that bounded foreground loop. `start_computation` queues a `durable_compute` job whose versioned machine state and sparse bidirectional tape are persisted in SQLite. Each worker claim executes a bounded quantum (10,000 transitions by default), then atomically checkpoints and either completes or defers the job. A healthy defer does not consume retry attempts, and there is no mandatory total transition/yield ceiling. Optional `max_steps`, `max_tape_cells`, and `max_wall_time_seconds` policies default to `0` (unbounded) and are explicit job policy rather than hidden runtime limits.
+Universal-duration deterministic work is deliberately separated from that bounded foreground loop. `start_computation` queues a `durable_compute` job whose versioned machine metadata and sparse bidirectional tape are persisted in SQLite. Tape cells live in their own indexed table; each worker claim hydrates only the addresses reachable during its bounded quantum (10,000 transitions by default), then atomically commits changed cells plus lightweight checkpoint metadata and either completes or defers the job. A healthy defer does not consume retry attempts, and there is no mandatory total transition/yield ceiling. Optional `max_steps`, `max_tape_cells`, and `max_wall_time_seconds` policies default to `0` (unbounded) and are explicit job policy rather than hidden runtime limits.
 
-`get_computation_status` exposes bounded progress and a bounded tape window; `cancel_computation` is the operator escape hatch. Active start requests are idempotency-protected so ambiguous/retried tool calls do not create duplicate jobs. Stale worker claims resume from the latest durable checkpoint. The Web UI Jobs panel shows machine state, transitions, yields, tape-cell count, and a cancel action. See `DURABLE_COMPUTE.md` for the machine schema and recovery contract.
+`start_computation` statically rejects undefined transition targets and supports direct sparse `initial_tape` maps, negative/non-zero `initial_head` positions, and SHA-256-pinned workspace `input_file` sources (`text` or `tape_json`) so large finite inputs do not have to traverse model context. `get_computation_status` exposes bounded progress and a bounded tape window; `cancel_computation` is the operator escape hatch. Active start requests are idempotency-protected so ambiguous/retried tool calls do not create duplicate jobs.
+
+Infrastructure recovery is tracked separately from ordinary job attempts. Stale claims and worker watchdog restarts increment a consecutive `recovery_failures` counter and return the ordinary claim attempt; healthy compute progress resets that counter. Durable starts default to `max_recovery_failures=10`, while `0` explicitly selects unlimited infrastructure recovery. The Web UI Jobs panel shows machine state, transitions, yields, tape-cell count, recovery count, and a cancel action. See `DURABLE_COMPUTE.md` for the machine schema and recovery contract.
 
 The generic `execute_shell` / `execute_python` capability contract and implementation both cap one subprocess call at **120 seconds**. Recipes and the foreground LLM loop remain bounded; practical Turing completeness comes from arbitrarily many resumable deterministic worker quanta, not from removing those safeguards.
 
@@ -179,7 +181,7 @@ Drive metadata access also requires the Google Drive API to be enabled in the OA
 
 For this repository state:
 
-- full deterministic/offline test suite: **545 passed, 1 skipped**;
+- full deterministic/offline test suite: **560 passed, 1 skipped**;
 - Python byte-compilation: pass;
 - Web UI JavaScript `node --check`: pass;
 - generated builtin manifest: current at **235 tools**.

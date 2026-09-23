@@ -31,7 +31,24 @@ def _page(url: str, max_bytes: int = 2 * 1024 * 1024) -> tuple[str, str, Beautif
 
 
 def page_metadata(url: str) -> str:
-    """Extract status/title/canonical URL and bounded metadata from a public page."""
+    """Extract page metadata, reusing the active browser document when possible."""
+    try:
+        from .browser_ui import reuse_loaded_page
+        reused = reuse_loaded_page(str(url), mode="metadata", limit=50000)
+    except Exception:
+        reused = None
+    if isinstance(reused, dict):
+        allowed = {
+            "description", "author", "date", "article:published_time", "article:modified_time",
+            "og:title", "og:description", "og:image", "og:type", "og:site_name",
+            "twitter:title", "twitter:description", "twitter:image", "twitter:card",
+        }
+        reused["meta"] = {
+            str(k): str(v)[:2000] for k, v in dict(reused.get("meta") or {}).items()
+            if str(k).lower() in allowed
+        }
+        reused.setdefault("json_ld", [])
+        return json.dumps(reused, ensure_ascii=False, indent=2)
     try:
         final_url, response, raw = fetch_bytes(
             str(url), max_bytes=2 * 1024 * 1024,
@@ -82,8 +99,34 @@ def page_metadata(url: str) -> str:
 
 
 def page_links(url: str, same_domain: bool = True, limit: int = 50) -> str:
-    """Extract and categorize bounded HTTP(S) links from a public page without dumping page prose."""
+    """Extract links, preferring the live browser DOM for an already-loaded page."""
     limit = max(1, min(int(limit), 200))
+    try:
+        from .browser_ui import reuse_loaded_page
+        reused = reuse_loaded_page(str(url), mode="links", limit=limit * 2)
+    except Exception:
+        reused = None
+    if isinstance(reused, dict):
+        final_url = str(reused.get("source") or url)
+        origin = urlparse(final_url).hostname or ""
+        rows, seen = [], set()
+        for item in reused.get("links") or []:
+            if not isinstance(item, dict):
+                continue
+            absolute = str(item.get("url") or "")
+            parsed = urlparse(absolute)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                continue
+            if same_domain and parsed.hostname.lower() != origin.lower():
+                continue
+            clean = parsed._replace(fragment="").geturl()
+            if clean in seen:
+                continue
+            seen.add(clean)
+            rows.append({"url": clean, "text": str(item.get("text") or "")[:300], "same_domain": parsed.hostname.lower() == origin.lower()})
+            if len(rows) >= limit:
+                break
+        return json.dumps({"source": final_url, "source_kind": "browser_session", "links": rows}, ensure_ascii=False, indent=2)
     try:
         final_url, _, soup, _ = _page(url)
     except Exception as exc:
