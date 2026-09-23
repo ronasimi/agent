@@ -21,6 +21,7 @@ GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
 DRIVE_METADATA_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.metadata.readonly"
 GOOGLE_WORKSPACE_SCOPES = (GMAIL_READONLY_SCOPE, CALENDAR_READONLY_SCOPE, DRIVE_METADATA_READONLY_SCOPE)
+GOOGLE_WORKSPACE_SCOPE_SET = frozenset(GOOGLE_WORKSPACE_SCOPES)
 
 GOOGLE_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
@@ -221,6 +222,10 @@ class GoogleWorkspaceOAuth:
             "response_type": "code",
             "scope": " ".join(GOOGLE_WORKSPACE_SCOPES),
             "access_type": "offline",
+            # Preserve previously granted Gmail/Calendar permissions when an
+            # existing connection is upgraded with a newly added read-only
+            # capability such as Drive metadata.
+            "include_granted_scopes": "true",
             "prompt": "consent",
             "state": state,
             "code_challenge": challenge,
@@ -296,10 +301,11 @@ class GoogleWorkspaceOAuth:
             raise GoogleWorkspaceAuthError("missing_refresh_token", "Google did not return offline access. Revoke access and connect again.")
         returned_scope = str(token_payload.get("scope") or "").split()
         scopes = set(returned_scope or pending.get("scopes") or [])
-        if scopes != set(GOOGLE_WORKSPACE_SCOPES):
+        requested_scopes = set(pending.get("scopes") or GOOGLE_WORKSPACE_SCOPES)
+        if scopes - GOOGLE_WORKSPACE_SCOPE_SET or not requested_scopes.issubset(scopes):
             raise GoogleWorkspaceAuthError(
                 "scope_mismatch",
-                "Google did not return exactly the two required read-only scopes.",
+                "Google did not return the requested read-only Workspace scopes.",
             )
         expires_in = _expires_in(token_payload, "token_exchange_failed")
         access_token = str(token_payload["access_token"])
@@ -325,17 +331,32 @@ class GoogleWorkspaceOAuth:
         )
         return self.status(account=account)
 
-    def get_access_token(self, *, account: str = _DEFAULT_ACCOUNT, force_refresh: bool = False) -> str:
+    def get_access_token(
+        self,
+        *,
+        account: str = _DEFAULT_ACCOUNT,
+        force_refresh: bool = False,
+        required_scopes: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
+    ) -> str:
         account = self._account(account)
+        required = set(required_scopes or ())
+        if required - GOOGLE_WORKSPACE_SCOPE_SET:
+            raise GoogleWorkspaceAuthError("invalid_scope", "Unsupported Google Workspace scope requested by the harness.")
         with self._refresh_lock:
             token = self._token(account)
             if not token:
                 raise GoogleWorkspaceAuthError("not_connected", "Google Workspace is not connected. Open Connections in the Web UI.")
             scopes = set(token.get("scopes") or [])
-            if scopes != set(GOOGLE_WORKSPACE_SCOPES):
+            if not scopes or scopes - GOOGLE_WORKSPACE_SCOPE_SET:
                 raise GoogleWorkspaceAuthError(
                     "scope_mismatch",
-                    "Stored Google credentials do not have exactly the required read-only scopes.",
+                    "Stored Google credentials contain an invalid or unsupported scope set.",
+                )
+            missing = required - scopes
+            if missing:
+                raise GoogleWorkspaceAuthError(
+                    "scope_upgrade_required",
+                    "Google Workspace is connected, but this capability needs an additional read-only permission. Reconnect Google from Connections to grant it.",
                 )
             expires_at = int(token.get("expires_at") or 0)
             access_token = str(token.get("access_token") or "")
@@ -356,10 +377,16 @@ class GoogleWorkspaceOAuth:
             )
             returned_scope = str(refreshed.get("scope") or "").split()
             refreshed_scopes = set(returned_scope or scopes)
-            if refreshed_scopes != set(GOOGLE_WORKSPACE_SCOPES):
+            if not refreshed_scopes or refreshed_scopes - GOOGLE_WORKSPACE_SCOPE_SET:
                 raise GoogleWorkspaceAuthError(
                     "scope_mismatch",
-                    "Refreshed Google credentials do not have exactly the required read-only scopes.",
+                    "Refreshed Google credentials contain an invalid or unsupported scope set.",
+                )
+            missing = required - refreshed_scopes
+            if missing:
+                raise GoogleWorkspaceAuthError(
+                    "scope_upgrade_required",
+                    "Google Workspace is connected, but this capability needs an additional read-only permission. Reconnect Google from Connections to grant it.",
                 )
             token.update({
                 "access_token": str(refreshed["access_token"]),
@@ -367,16 +394,22 @@ class GoogleWorkspaceOAuth:
                 "scopes": sorted(refreshed_scopes),
                 "token_type": "Bearer",
             })
-            status = self.status(account=account)
+            # Preserve stable public metadata without calling status(), which can
+            # intentionally report a scope-upgrade state for an older token.
+            previous_record = next((
+                item for item in self.store.list_records(provider=_CLIENT_PROVIDER, kind=_TOKEN_KIND)
+                if item.get("account_id") == account
+            ), None)
+            previous_metadata = (previous_record or {}).get("metadata") or {}
             self.store.put_secret(
                 _CLIENT_PROVIDER,
                 account,
                 _TOKEN_KIND,
                 token,
                 metadata={
-                    "email": str(status.get("email") or ""),
+                    "email": str(previous_metadata.get("email") or ""),
                     "scopes": sorted(refreshed_scopes),
-                    "connected_at": str(status.get("connected_at") or _utc_iso()),
+                    "connected_at": str(previous_metadata.get("connected_at") or _utc_iso()),
                     "expires_at": int(token["expires_at"]),
                 },
             )
@@ -385,6 +418,7 @@ class GoogleWorkspaceOAuth:
     def status(self, *, account: str = _DEFAULT_ACCOUNT) -> dict[str, Any]:
         account = self._account(account)
         redirect_error: dict[str, str] | None = None
+        connection_error: dict[str, str] | None = None
         try:
             redirect_uri = google_oauth_redirect_uri()
         except GoogleWorkspaceAuthError as exc:
@@ -400,22 +434,49 @@ class GoogleWorkspaceOAuth:
         ), None)
         client_metadata = (client_record or {}).get("metadata") or {}
         token_metadata = (token_record or {}).get("metadata") or {}
+        token: dict[str, Any] | None = None
+        if token_record:
+            try:
+                token = self._token(account)
+            except CredentialStoreError:
+                connection_error = {
+                    "code": "credential_unreadable",
+                    "message": "The saved Google credential vault cannot be decrypted with the current key.",
+                }
+        scopes = set((token or {}).get("scopes") or token_metadata.get("scopes") or [])
+        invalid_scopes = sorted(scopes - GOOGLE_WORKSPACE_SCOPE_SET)
+        missing_scopes = sorted(GOOGLE_WORKSPACE_SCOPE_SET - scopes)
+        refresh_token = str((token or {}).get("refresh_token") or "")
+        usable = bool(token and refresh_token and not invalid_scopes and scopes)
+        if token and invalid_scopes and connection_error is None:
+            connection_error = {
+                "code": "scope_mismatch",
+                "message": "The saved Google credential contains scopes outside the harness read-only allowlist.",
+            }
+            usable = False
         return {
             "provider": "google_workspace",
             "account": account,
             "configured": bool(client_record),
-            "connected": bool(token_record),
+            "connected": usable,
+            "token_present": bool(token_record),
+            "refreshable": bool(usable and refresh_token),
             "email": str(token_metadata.get("email") or ""),
-            "scopes": list(token_metadata.get("scopes") or []),
+            "scopes": sorted(scopes),
             "required_scopes": list(GOOGLE_WORKSPACE_SCOPES),
+            "missing_scopes": missing_scopes,
+            "scope_upgrade_required": bool(usable and missing_scopes),
             "client_type": str(client_metadata.get("client_type") or ""),
             "project_id": str(client_metadata.get("project_id") or ""),
             "connected_at": str(token_metadata.get("connected_at") or ""),
+            "expires_at": int((token or {}).get("expires_at") or token_metadata.get("expires_at") or 0),
             "redirect_uri": redirect_uri,
             "configuration_error": redirect_error,
+            "connection_error": connection_error,
             "capabilities": {
-                "gmail": "Search and read messages; cannot send, modify, label, or delete.",
-                "calendar": "Read calendars and events; cannot create, edit, invite, or delete.",
+                "gmail": {"available": GMAIL_READONLY_SCOPE in scopes, "scope": GMAIL_READONLY_SCOPE},
+                "calendar": {"available": CALENDAR_READONLY_SCOPE in scopes, "scope": CALENDAR_READONLY_SCOPE},
+                "drive": {"available": DRIVE_METADATA_READONLY_SCOPE in scopes, "scope": DRIVE_METADATA_READONLY_SCOPE},
             },
         }
 

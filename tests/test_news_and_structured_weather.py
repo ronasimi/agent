@@ -327,3 +327,15 @@ def test_generic_news_empty_renderer_is_not_localized():
     assert "current headlines" in rendered
     assert "local headlines" not in rendered
     assert "London" not in rendered
+
+
+def test_compound_headline_request_does_not_leak_formatting_words_into_news_query():
+    frame = {
+        "source_text": "Retrieve exactly 3 of the latest local London, Ontario news headlines. For each report",
+        "entity": "London, Ontario, Canada",
+        "time_scope": "latest",
+    }
+    query = build_news_query(frame["source_text"], frame, "London, Ontario, Canada")
+    assert query == "London, Ontario, Canada local latest news"
+    for token in ("retrieve", "exactly", "each", "report"):
+        assert token not in query.lower()

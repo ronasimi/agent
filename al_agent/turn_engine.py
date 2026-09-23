@@ -609,9 +609,30 @@ def handle_user_turn(
             )):
                 return "non-retryable URL validation failure"
             if tool_name.startswith("gmail_") or tool_name.startswith("google_calendar_") or tool_name.startswith("google_drive_"):
+                code_match = re.search(r"google workspace ([a-z_]+):", lower)
+                code = code_match.group(1) if code_match else ""
+                google_reasons = {
+                    "not_connected": "Google Workspace is not connected",
+                    "client_not_configured": "Google OAuth client is not configured",
+                    "scope_upgrade_required": "Google Workspace read-only scope upgrade required",
+                    "reauthorization_required": "Google Workspace refresh token is unavailable; reconnect required",
+                    "refresh_failed": "Google Workspace token refresh failed; reconnect may be required",
+                    "scope_mismatch": "Google Workspace stored scope set is invalid",
+                    "credential_unreadable": "Google Workspace credential vault could not be decrypted",
+                    "drive_api_disabled": "Google Drive API is disabled for the OAuth project; enable it in Google Cloud and retry",
+                    "gmail_api_disabled": "Gmail API is disabled for the OAuth project; enable it in Google Cloud and retry",
+                    "calendar_api_disabled": "Google Calendar API is disabled for the OAuth project; enable it in Google Cloud and retry",
+                    "authorization_expired": "Google Workspace authorization expired; reconnect required",
+                    "rate_limited": "Google Workspace provider rate limit or quota prevented verification",
+                    "forbidden": "Google Workspace provider denied this read-only capability",
+                    "network_error": "Google Workspace provider could not be reached",
+                }
+                if code in google_reasons:
+                    return google_reasons[code]
                 if any(token in lower for token in (
-                    "not_connected", "not connected", "client_not_configured", "reauthorization_required",
-                    "authorization expired", "reconnect in the web ui", "oauth", "unauthorized", "forbidden",
+                    "not_connected", "not connected", "client_not_configured", "scope_upgrade_required",
+                    "reauthorization_required", "authorization expired", "reconnect in the web ui",
+                    "oauth", "unauthorized", "forbidden",
                 )):
                     return "Google account capability is unavailable or not authorized"
             return ""
@@ -1935,13 +1956,51 @@ def handle_user_turn(
                 host.append(f"- Host resources — {state('stress:09')} — {reason('stress:09')}")
             cpu = payload("stress:10")
             if state("stress:10") == "PASS":
-                models = cpu.get("models") or []
-                host.append(f"- CPU — PASS — {(models[0] if models else 'model unavailable')}; logical CPUs={cpu.get('logical_cpus', 'unavailable')}")
+                models = [
+                    str(value).strip() for value in (cpu.get("models") or [])
+                    if str(value).strip() and not str(value).strip().isdigit()
+                ]
+                cpu_model = next((value for value in models if re.search(r"[A-Za-z]", value)), "model unavailable")
+                host.append(f"- CPU — PASS — {cpu_model}; logical CPUs={cpu.get('logical_cpus', 'unavailable')}")
             else:
                 host.append(f"- CPU — {state('stress:10')} — {reason('stress:10')}")
             temps = payload("stress:11")
             if state("stress:11") == "PASS":
-                host.append(f"- Temperatures — PASS — {json.dumps(temps, ensure_ascii=False)[:600] if temps else 'temperature sensors unavailable'}")
+                sensor_rows: list[tuple[int, str, float]] = []
+                preferred = {"k10temp": 0, "thinkpad": 1, "acpitz": 2, "nvme": 3}
+                if isinstance(temps, dict):
+                    for group, entries in temps.items():
+                        if not isinstance(entries, list):
+                            continue
+                        for entry in entries:
+                            if not isinstance(entry, dict):
+                                continue
+                            try:
+                                current = float(entry.get("current"))
+                            except (TypeError, ValueError):
+                                continue
+                            # Ignore firmware placeholders and clearly impossible
+                            # values. A zero-degree reading from laptop EC groups is
+                            # normally an unused channel rather than a real sensor.
+                            if current == 0.0 or current < -50.0 or current > 150.0:
+                                continue
+                            label = str(entry.get("label") or "").strip()
+                            display = f"{group}/{label}" if label else str(group)
+                            sensor_rows.append((preferred.get(str(group), 10), display, current))
+                sensor_rows.sort(key=lambda row: (row[0], row[1]))
+                seen_sensor: set[str] = set()
+                rendered_sensors: list[str] = []
+                for _priority, display, current in sensor_rows:
+                    if display in seen_sensor:
+                        continue
+                    seen_sensor.add(display)
+                    rendered_sensors.append(f"{display} {current:g} °C")
+                    if len(rendered_sensors) >= 6:
+                        break
+                host.append(
+                    "- Temperatures — PASS — "
+                    + ("; ".join(rendered_sensors) if rendered_sensors else "temperature sensors unavailable")
+                )
             else:
                 host.append(f"- Temperatures — {state('stress:11')} — {reason('stress:11')}")
             ollama = payload("stress:12")

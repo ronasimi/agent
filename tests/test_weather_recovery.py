@@ -101,7 +101,10 @@ def test_weather_fallback_renderer_surfaces_verified_web_evidence():
 
     rendered = format_weather_recovery(result, "Get the current weather for London, Ontario.")
     assert "Current weather for London, Ontario, Canada" in rendered
-    assert "14 C" in rendered
+    assert "Temperature: 14 °C" in rendered
+    assert "Feels like: 13 °C" in rendered
+    assert "Humidity: 70%" in rendered
+    assert "Wind: W 12 km/h" in rendered
     assert "weather.example/london" in rendered
 
 
@@ -171,3 +174,32 @@ def test_failed_weather_recovery_is_not_rendered_as_weather():
         "grounding_recovery": {"location": "London, Ontario, Canada"},
     }
     assert format_weather_recovery(result, "Get the current weather for London, Ontario.") == ""
+
+
+def test_environment_canada_fallback_is_rendered_as_compact_current_conditions():
+    from tools.weather import format_weather_recovery
+
+    result = {
+        "ok": True,
+        "result": {
+            "location": "London, Ontario",
+            "verification": (
+                "URL: https://weather.gc.ca/en/location/index.html?coords=42.982,-81.249\n"
+                "Content-Type: text/html\n"
+                "Extraction: current temperature and condition\n\n"
+                "London, ON Current Conditions Observed at: London Int'l Airport "
+                "8:00 AM EDT Wednesday 23 September 2026 Past Data Weather Radar "
+                "Satellite Lightning 10° C °C °F 10° C Partly Cloudy 10° C °C °F "
+                "Forecast Forecast issued : 5:00 AM EDT Wednesday 23 September 2026 "
+                "Hourly Forecast Thunderstorm Outlooks Air Quality Alerts"
+            ),
+        },
+        "grounding_recovery": {"fact_type": "weather", "location": "London, Ontario"},
+    }
+
+    rendered = format_weather_recovery(result, "Determine the current weather for London, Ontario.")
+    assert "Temperature: 10 °C" in rendered
+    assert "Conditions: Partly Cloudy" in rendered
+    assert "Observed: 8:00 AM EDT Wednesday 23 September 2026 at London Int'l Airport" in rendered
+    assert "Hourly Forecast" not in rendered
+    assert "browser or operating system" not in rendered

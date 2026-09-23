@@ -196,6 +196,11 @@ _NEWS_GENERIC_TOKENS = {
     "a", "about", "are", "around", "current", "for", "from", "headlines", "headline", "in",
     "latest", "local", "me", "near", "news", "of", "please", "recent", "show", "stories",
     "story", "tell", "give", "get", "check", "find", "the", "today", "todays", "top", "what", "whats",
+    # Request/formatting words are not news topics. Keeping these out of provider
+    # queries is especially important for compound prompts such as
+    # "retrieve exactly 3 ... for each report ...".
+    "retrieve", "exactly", "each", "report", "reports", "return", "publisher",
+    "publication", "date", "url", "urls", "duplicate", "duplicates",
 }
 # High-frequency news subjects that are commonly capitalized at the start of a
 # sentence or written as acronyms.  They must not be mistaken for a city merely

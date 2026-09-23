@@ -20,12 +20,14 @@ services:
       - no-new-privileges:true
     environment:
       - STORAGE_ROOT=/state
+      - CREDENTIAL_ROOT=/state/credentials
       - AGENT_UID=1000
       - AGENT_GID=1000
     entrypoint: ["/bin/sh", "/app/scripts/init_storage.sh"]
     volumes:
       - ./workspace:/state/workspace
       - ./memory:/state/memory
+      - agent-credentials:/state/credentials
 
   worker:
     build: .
@@ -46,6 +48,9 @@ services:
       - DISPLAY=${DISPLAY:-:0}
       - WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-1}
       - TZ=${TZ:-America/Toronto}
+      - AGENT_CREDENTIAL_DIR=/app/credentials
+      - AGENT_CREDENTIAL_KEY=${AGENT_CREDENTIAL_KEY:-}
+      - AGENT_CREDENTIAL_KEY_FILE=${AGENT_CREDENTIAL_KEY_FILE:-}
     command: ["python", "/app/worker.py"]
     depends_on:
       storage-init:
@@ -56,6 +61,7 @@ services:
       - ./config:/app/config:ro
       - ./workspace:/app/workspace
       - ./memory:/app/memory
+      - agent-credentials:/app/credentials
       - ./tools:/app/tools:ro
       - ./worker.py:/app/worker.py:ro
       - ./:/app/source:ro
@@ -120,7 +126,7 @@ services:
       - TZ=${TZ:-America/Toronto}
       - WEBUI_HOST=${WEBUI_HOST:-127.0.0.1}
       - WEBUI_PORT=${WEBUI_PORT:-8080}
-      - AGENT_CREDENTIAL_DIR=/app/memory/credentials
+      - AGENT_CREDENTIAL_DIR=/app/credentials
       - AGENT_CREDENTIAL_KEY=${AGENT_CREDENTIAL_KEY:-}
       - AGENT_CREDENTIAL_KEY_FILE=${AGENT_CREDENTIAL_KEY_FILE:-}
       - GOOGLE_OAUTH_REDIRECT_URI=${GOOGLE_OAUTH_REDIRECT_URI:-}
@@ -132,6 +138,7 @@ services:
       - ./config:/app/config:ro
       - ./workspace:/app/workspace
       - ./memory:/app/memory
+      - agent-credentials:/app/credentials
       - ./tools:/app/tools:ro
       - ./webui:/app/webui:ro
       - ./:/app/source:ro
@@ -141,3 +148,8 @@ services:
       - ${HOME}/.config/systemd/user:/home/agent/.config/systemd/user
       - /etc/machine-id:/etc/machine-id:ro
       - /etc/localtime:/etc/localtime:ro
+
+
+volumes:
+  agent-credentials:
+    name: al-agent-credentials

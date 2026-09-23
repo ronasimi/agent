@@ -637,16 +637,23 @@ function showOnboardingStep(step){
 }
 function setGoogleStatus(status){
   googleConnection=status||null;const box=$('#googleConnectionStatus'),title=box.querySelector('strong'),detail=box.querySelector('small');
-  const connected=Boolean(status?.connected),configured=Boolean(status?.configured);
+  const connected=Boolean(status?.connected),configured=Boolean(status?.configured),upgrade=Boolean(status?.scope_upgrade_required);
   box.classList.toggle('connected',connected);box.classList.toggle('not-connected',!connected);
-  title.textContent=connected?'Google Workspace connected':configured?'OAuth client ready':'Google Workspace is not connected';
-  detail.textContent=connected?(status.email||'Read-only access is active.'):configured?'Select Connect Google to authorize read access.':'Upload the OAuth client JSON from Google Cloud.';
+  title.textContent=connected?(upgrade?'Google Workspace connected · permission update available':'Google Workspace connected'):configured?'OAuth client ready':'Google Workspace is not connected';
+  if(connected&&upgrade){
+    const missing=Array.isArray(status?.missing_scopes)?status.missing_scopes:[];
+    const names=missing.map(scope=>scope.includes('/drive.')?'Drive':scope.includes('/gmail.')?'Gmail':scope.includes('/calendar.')?'Calendar':'Workspace').join(', ');
+    detail.textContent=`${status.email||'Read-only access is active.'} Reconnect once to enable ${names||'new read-only capabilities'}.`;
+  }else{
+    detail.textContent=connected?(status.email||'Read-only access is active.'):configured?'Select Connect Google to authorize read access.':'Upload the OAuth client JSON from Google Cloud.';
+  }
   $('#googleRedirectUri').textContent=status?.redirect_uri||'Unavailable';
-  $('#googleDisconnect').classList.toggle('hidden',!connected);
+  $('#googleDisconnect').classList.toggle('hidden',!status?.token_present);
   $('#googleForget').classList.toggle('hidden',!configured);
-  $('#googleConnect').textContent=connected?'Reconnect Google':'Connect Google';
+  $('#googleConnect').textContent=connected?(upgrade?'Update Google access':'Reconnect Google'):'Connect Google';
   $('#oobeGoogleContinue').textContent=connected?'Continue':'Skip for now';
   if(status?.configuration_error)$('#oobeError').textContent=status.configuration_error.message||'The Google OAuth redirect is not configured correctly.';
+  else if(status?.connection_error)$('#oobeError').textContent=status.connection_error.message||'The saved Google connection could not be loaded.';
 }
 async function loadGoogleConnectionStatus(){
   const box=$('#googleConnectionStatus');box.querySelector('strong').textContent='Checking connection…';box.querySelector('small').textContent='';box.classList.remove('connected','not-connected');

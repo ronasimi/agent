@@ -8,6 +8,7 @@ import pytest
 from tools.credential_store import LocalCredentialStore
 from tools.google_workspace_auth import (
     CALENDAR_READONLY_SCOPE,
+    DRIVE_METADATA_READONLY_SCOPE,
     GMAIL_READONLY_SCOPE,
     GOOGLE_TOKEN_ENDPOINT,
     GOOGLE_WORKSPACE_SCOPES,
@@ -76,7 +77,7 @@ def test_authorization_uses_exact_readonly_scopes_state_and_pkce(tmp_path, monke
     assert parsed.scheme == "https" and parsed.hostname == "accounts.google.com"
     assert set(query["scope"][0].split()) == set(GOOGLE_WORKSPACE_SCOPES)
     assert query["access_type"] == ["offline"]
-    assert "include_granted_scopes" not in query
+    assert query["include_granted_scopes"] == ["true"]
     assert query["code_challenge_method"] == ["S256"]
     assert len(query["state"][0]) >= 20
     assert len(query["code_challenge"][0]) >= 43
@@ -111,6 +112,79 @@ def test_access_token_refresh_preserves_required_scopes(tmp_path, monkeypatch):
     assert refresh["grant_type"] == "refresh_token"
     assert refresh["refresh_token"] == "offline-refresh"
     assert "scope" not in refresh
+
+
+
+def test_google_connection_survives_service_recreation_and_refresh(tmp_path, monkeypatch):
+    monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_URI", "http://127.0.0.1:8080/api/integrations/google/callback")
+    root = tmp_path / "credentials"
+    first_http = FakeOAuthHttp()
+    first = GoogleWorkspaceOAuth(LocalCredentialStore(root), http=first_http)
+    first.store_client_config(CLIENT_CONFIG)
+    state = parse_qs(urlparse(first.authorization_url()).query)["state"][0]
+    first.complete_authorization(state, "authorization-code")
+
+    # Simulate a fresh web/worker process opening the same persisted vault.
+    second_http = FakeOAuthHttp()
+    second = GoogleWorkspaceOAuth(LocalCredentialStore(root), http=second_http)
+    status = second.status()
+    assert status["connected"] is True
+    assert status["refreshable"] is True
+    assert status["scope_upgrade_required"] is False
+    assert second.get_access_token(
+        force_refresh=True,
+        required_scopes={GMAIL_READONLY_SCOPE},
+    ) == "refreshed-access"
+    assert second_http.posts[-1][1]["grant_type"] == "refresh_token"
+
+
+def test_existing_pre_drive_connection_remains_usable_for_granted_scopes(tmp_path, monkeypatch):
+    oauth, _ = _oauth(tmp_path, monkeypatch)
+    state = parse_qs(urlparse(oauth.authorization_url()).query)["state"][0]
+    oauth.complete_authorization(state, "authorization-code")
+
+    token = oauth.store.get_secret("google_workspace", "default", "oauth_token")
+    assert token is not None
+    legacy_scopes = [GMAIL_READONLY_SCOPE, CALENDAR_READONLY_SCOPE]
+    token["scopes"] = legacy_scopes
+    oauth.store.put_secret(
+        "google_workspace",
+        "default",
+        "oauth_token",
+        token,
+        metadata={
+            "email": "person@example.com",
+            "scopes": legacy_scopes,
+            "connected_at": "2026-09-22T00:00:00+00:00",
+            "expires_at": token["expires_at"],
+        },
+    )
+
+    restarted = GoogleWorkspaceOAuth(LocalCredentialStore(tmp_path / "credentials"), http=FakeOAuthHttp())
+    status = restarted.status()
+    assert status["connected"] is True
+    assert status["scope_upgrade_required"] is True
+    assert DRIVE_METADATA_READONLY_SCOPE in status["missing_scopes"]
+    assert status["capabilities"]["gmail"]["available"] is True
+    assert status["capabilities"]["calendar"]["available"] is True
+    assert status["capabilities"]["drive"]["available"] is False
+    assert restarted.get_access_token(required_scopes={GMAIL_READONLY_SCOPE}) == "initial-access"
+    with pytest.raises(GoogleWorkspaceAuthError) as error:
+        restarted.get_access_token(required_scopes={DRIVE_METADATA_READONLY_SCOPE})
+    assert error.value.code == "scope_upgrade_required"
+
+
+def test_compose_uses_persistent_shared_google_credential_volume():
+    import yaml
+
+    compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+    assert compose["volumes"]["agent-credentials"]["name"] == "al-agent-credentials"
+    for service_name, target in (("storage-init", "/state/credentials"), ("worker", "/app/credentials"), ("webui", "/app/credentials")):
+        mounts = compose["services"][service_name].get("volumes", [])
+        assert f"agent-credentials:{target}" in mounts
+    for service_name in ("worker", "webui"):
+        env = "\n".join(compose["services"][service_name].get("environment", []))
+        assert "AGENT_CREDENTIAL_DIR=/app/credentials" in env
 
 
 def test_oauth_rejects_tokens_with_any_scope_beyond_the_allowlist(tmp_path, monkeypatch):
@@ -241,6 +315,56 @@ def test_gmail_and_calendar_tools_are_bounded_readonly_and_mark_untrusted(monkey
     assert drive["metadata_only"] is True
     assert drive["files"][0]["name"] == "Status.docx"
 
+
+
+
+def test_drive_api_disabled_is_reported_with_stable_code(monkeypatch):
+    from tools import google_workspace as workspace
+
+    class OAuth:
+        def get_access_token(self, **kwargs):
+            return "token"
+
+    class Http:
+        def get(self, url, params=None, headers=None, timeout=None):
+            return FakeResponse(403, {
+                "error": {
+                    "code": 403,
+                    "message": "Google Drive API has not been used in project 123 before or it is disabled.",
+                    "status": "PERMISSION_DENIED",
+                    "errors": [{"reason": "accessNotConfigured"}],
+                }
+            })
+
+    client = workspace.GoogleWorkspaceClient(oauth=OAuth(), http=Http())
+    monkeypatch.setattr(workspace, "_CLIENT", client)
+    result = workspace.google_drive_list_files(limit=3)
+    assert result.startswith("Error: Google Workspace drive_api_disabled:")
+    assert "disabled" in result.lower()
+
+
+def test_drive_insufficient_scope_provider_error_requests_upgrade(monkeypatch):
+    from tools import google_workspace as workspace
+
+    class OAuth:
+        def get_access_token(self, **kwargs):
+            return "token"
+
+    class Http:
+        def get(self, url, params=None, headers=None, timeout=None):
+            return FakeResponse(403, {
+                "error": {
+                    "code": 403,
+                    "message": "Request had insufficient authentication scopes.",
+                    "status": "PERMISSION_DENIED",
+                    "errors": [{"reason": "insufficientPermissions"}],
+                }
+            })
+
+    client = workspace.GoogleWorkspaceClient(oauth=OAuth(), http=Http())
+    monkeypatch.setattr(workspace, "_CLIENT", client)
+    result = workspace.google_drive_list_files(limit=3)
+    assert result.startswith("Error: Google Workspace scope_upgrade_required:")
 
 def test_google_tools_are_discoverable_readonly_and_have_bounded_schemas():
     import tools

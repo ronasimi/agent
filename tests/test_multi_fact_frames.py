@@ -609,9 +609,13 @@ Return the requested sectioned report.'''
             return json.dumps({"uptime_seconds": 1234, "load_average": [0.5, 0.4, 0.3],
                 "memory": {"total_mb": 16000, "available_mb": 8000}, "disk": {"used_percent": 25.0}})
         if name == "cpu_info":
-            return json.dumps({"models": ["Test CPU"], "logical_cpus": 12})
+            return json.dumps({"models": ["0", "AMD Ryzen 5 PRO 4650U with Radeon Graphics"], "logical_cpus": 12})
         if name == "temperature_sensors":
-            return json.dumps({"k10temp": [{"current": 52.0}]})
+            return json.dumps({
+                "k10temp": [{"label": "Tctl", "current": 52.0}],
+                "thinkpad": [{"label": "CPU", "current": 52.0}, {"label": "unused", "current": 0.0}],
+                "nvme": [{"label": "Composite", "current": 41.85, "high": 82.85}],
+            })
         if name == "ollama_runtime_snapshot":
             return json.dumps({"models": [{"name": "agent-main:4b"}]})
         if name == "gmail_search_messages":
@@ -674,6 +678,9 @@ Return the requested sectioned report.'''
     assert "Expected DNS failure — PASS" in content
     assert "Time consistency — PASS" in content
     assert "Evidence audit — PASS" in content
+    assert "CPU — PASS — AMD Ryzen 5 PRO 4650U with Radeon Graphics; logical CPUs=12" in content
+    assert "Temperatures — PASS — k10temp/Tctl 52 °C" in content
+    assert '"k10temp"' not in content
     assert "hard turn/model-call budget exhausted" not in content
     assert len([name for name, _ in calls if name == "dns_query"]) == 2
     assert len([name for name, _ in calls if name == "http_probe"]) == 2

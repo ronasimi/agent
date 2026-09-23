@@ -123,7 +123,7 @@ None of these tools can send or modify email, add labels, create or edit events,
 #### Google Cloud setup
 
 1. Create or select a Google Cloud project.
-2. Enable the **Gmail API**, **Google Calendar API**, and **Google Drive API**.
+2. Enable the **Gmail API**, **Google Calendar API**, and **Google Drive API**. The OAuth scope alone does not enable an API; if Drive reports `drive_api_disabled`, enable **Google Drive API** for the same Google Cloud project that owns the OAuth client, then retry.
 3. Configure the OAuth consent screen. For an External app in testing, add the connecting Google account as a test user.
 4. Create an **OAuth client ID** with application type **Web application**.
 5. Add the redirect URI shown in the Connections screen. With the default configuration it is:
@@ -136,7 +136,9 @@ None of these tools can send or modify email, add labels, create or edit events,
 
 Google's setup references are the [Gmail Python quickstart](https://developers.google.com/workspace/gmail/api/quickstart/python), [Calendar Python quickstart](https://developers.google.com/workspace/calendar/api/quickstart/python), [Gmail scope catalog](https://developers.google.com/workspace/gmail/api/auth/scopes), and [Calendar authorization guide](https://developers.google.com/workspace/calendar/api/auth). The Gmail read-only scope is classified by Google as a Restricted scope. A local app used only by its owner/test users can remain in OAuth testing, but publishing the integration broadly can trigger Google's verification and restricted-scope security-assessment requirements.
 
-OAuth uses a one-time, ten-minute state value and PKCE. The uploaded client secret, refresh token, and access token never enter browser status responses or model tool output. They are authenticated-encrypted in `/app/memory/credentials/vault.db`; the default encryption key is created at `/app/memory/credentials/master.key`. The directory is mode `0700` and the key/database are mode `0600`.
+OAuth uses a one-time, ten-minute state value and PKCE. The uploaded client secret, refresh token, and access token never enter browser status responses or model tool output. They are authenticated-encrypted in the shared `/app/credentials/vault.db` credential volume; the default encryption key is created at `/app/credentials/master.key`. The Docker volume has the explicit name `al-agent-credentials`, so it survives container recreation and source-checkout replacement. On the first startup after this migration, `storage-init` copies an existing legacy `memory/credentials` vault into the persistent volume when the new volume is empty. The directory is mode `0700` and the key/database are mode `0600`.
+
+A connection created before a new read-only capability was added remains usable for the scopes it already has. Connections reports the missing permission and offers **Update Google access**; only the capability that needs the new scope is blocked until the user grants it. Access tokens are refreshed from the persisted refresh token after process/container restarts.
 
 For key separation, supply a Fernet key through `AGENT_CREDENTIAL_KEY` or place it in a mode-`0600` file and set `AGENT_CREDENTIAL_KEY_FILE`. Set `GOOGLE_OAUTH_REDIRECT_URI` when using an HTTPS reverse proxy or a non-default loopback port, and register the identical value in Google Cloud. Plain HTTP redirect URIs are accepted only for `localhost`, `127.0.0.1`, or `::1`.
 
@@ -676,7 +678,7 @@ If you previously told the agent that an uploaded image was a photo of you, the 
 - The Web UI has no built-in multi-user authentication and must not be exposed directly to an untrusted network.
 - Host filesystem mounts are read-only where possible.
 - Structured read-only tools are preferred over generic command execution.
-- Google Workspace requests exactly the Gmail and Calendar read-only scopes; OAuth state is one-time, PKCE-protected, and credential payloads are encrypted locally.
+- Google Workspace requests only the Gmail, Calendar, and Drive-metadata read-only scopes; OAuth state is one-time, PKCE-protected, refresh tokens persist in a dedicated encrypted Docker volume, and previously granted read-only scopes remain usable during scope upgrades.
 - Message and event text is explicitly marked as untrusted tool data and remains subject to normal prompt-injection defenses.
 - Custom tools are statically validated before loading.
 - Self-optimization validation runs in a restricted container and cannot self-promote.

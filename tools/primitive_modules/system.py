@@ -142,10 +142,19 @@ def cpu_info() -> str:
         models = []
         for line in source.read_text(errors="replace").splitlines():
             key, sep, value = line.partition(":")
-            if sep and key.strip().lower() in {"model name", "hardware", "processor"}:
-                value = value.strip()
-                if value and value not in models:
-                    models.append(value)
+            if not sep:
+                continue
+            field = key.strip().lower()
+            if field not in {"model name", "hardware", "processor", "cpu model", "machine"}:
+                continue
+            value = value.strip()
+            # On x86 /proc/cpuinfo, `processor` is the logical CPU index (0, 1,
+            # ...), not an identity string. Some ARM platforms use the same field
+            # for a real model description, so retain only non-numeric values.
+            if field == "processor" and re.fullmatch(r"\d+", value):
+                continue
+            if value and value not in models:
+                models.append(value)
         frequency = psutil.cpu_freq()
         return _json({
             "logical_cpus": psutil.cpu_count(logical=True),

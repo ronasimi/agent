@@ -296,6 +296,93 @@ def is_simple_weather_request(user_request: str) -> bool:
     )
 
 
+def _format_verified_weather_excerpt(verification: str, location: str, source_url: str = "") -> str:
+    """Extract a compact current-conditions summary from grounded fallback text.
+
+    The web fallback is untrusted evidence.  Do not reproduce whole page prose or
+    weather-news/navigation chrome; extract only a bounded set of meteorological
+    fields that can be recognized deterministically.
+    """
+    body = re.sub(r"\s+", " ", str(verification or "")).strip()
+    if not body:
+        return ""
+
+    # Prefer only the current-conditions block where the provider exposes one.
+    current = body
+    marker = re.search(r"\bCurrent Conditions\b", body, re.I)
+    if marker:
+        current = body[marker.end():]
+        end = re.search(r"\b(?:Detailed )?Forecast(?: issued)?\b|\bHourly Forecast\b", current, re.I)
+        if end:
+            current = current[:end.start()]
+    current = current[:2400]
+
+    def first(pattern: str, flags: int = re.I) -> str:
+        match = re.search(pattern, current, flags)
+        return str(match.group(1)).strip() if match else ""
+
+    # Environment Canada sometimes repeats the temperature around unit toggles
+    # rather than labeling it explicitly. Restrict the search to the verified
+    # current-conditions block and to a physically plausible Celsius range.
+    temperature = first(r"\bTemperature\s*[:=-]?\s*(-?\d+(?:\.\d+)?)\s*°?\s*C\b")
+    if not temperature:
+        for match in re.finditer(r"(?<!\d)(-?\d+(?:\.\d+)?)\s*°?\s*C\b", current, re.I):
+            try:
+                value = float(match.group(1))
+            except ValueError:
+                continue
+            if -80.0 <= value <= 60.0:
+                temperature = match.group(1)
+                break
+
+    feels = first(r"\b(?:Feels\s+like|Wind\s+Chill|Humidex)\s*[:=-]?\s*(-?\d+(?:\.\d+)?)\s*°?\s*C?\b")
+    humidity = first(r"\bHumidity\s*[:=-]?\s*(\d{1,3})\s*%")
+    wind = first(r"\bWind\s*[:=-]?\s*((?:[NSEW]{1,3}|calm)(?:\s+at)?(?:\s+\d+(?:\.\d+)?\s*(?:km/h|kph|mph))?)\b")
+
+    condition_terms = (
+        "Partly Cloudy|Mainly Sunny|Mainly Cloudy|A mix of sun and cloud|Sunny|Clear|Cloudy|"
+        "Overcast|Light Rain|Rain|Showers|Thunderstorms?|Light Snow|Snow|Flurries|Fog|Mist|Haze"
+    )
+    condition = first(rf"\b({condition_terms})\b")
+
+    observed_at = ""
+    station = ""
+    observed = re.search(
+        r"\bObserved at:\s*(.+?)\s+(\d{1,2}:\d{2}\s*(?:AM|PM)\s+[A-Z]{2,5}\s+"
+        r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s+\d{1,2}\s+"
+        r"[A-Za-z]+\s+\d{4})\b", body, re.I,
+    )
+    if observed:
+        station = re.sub(r"\s+", " ", observed.group(1)).strip(" -")[:120]
+        observed_at = observed.group(2).strip()
+    if not observed_at:
+        observed_at = first(r"\bObservation(?: time)?\s*[:=-]?\s*([^.;]{4,100})")
+
+    # The evidence was already validated before this renderer runs, but if a
+    # provider-specific layout yielded no extractable current values, retain a
+    # short bounded excerpt rather than presenting a page-sized dump.
+    if not any((temperature, condition, feels, humidity, wind, observed_at)):
+        excerpt = current[:500].strip()
+        if not excerpt:
+            return ""
+        lines = [f"**Current weather for {location or 'the requested location'}**", "", excerpt]
+    else:
+        lines = [f"**Current weather for {location or 'the requested location'}**", ""]
+        lines.append(f"- Temperature: {temperature} °C" if temperature else "- Temperature: unavailable")
+        lines.append(f"- Feels like: {feels} °C" if feels else "- Feels like: unavailable")
+        lines.append(f"- Conditions: {condition}" if condition else "- Conditions: unavailable")
+        lines.append(f"- Humidity: {humidity}%" if humidity else "- Humidity: unavailable")
+        lines.append(f"- Wind: {wind}" if wind else "- Wind: unavailable")
+        if observed_at:
+            suffix = f" at {station}" if station else ""
+            lines.append(f"- Observed: {observed_at}{suffix}")
+        else:
+            lines.append("- Observation time: unavailable")
+    if source_url:
+        lines.extend(["", f"Source: {source_url} (verified web fallback)."])
+    return "\n".join(lines)
+
+
 def format_weather_recovery(result: dict[str, Any], user_request: str) -> str:
     """Render provider-backed weather without asking a small model to reshape data.
 
@@ -319,23 +406,15 @@ def format_weather_recovery(result: dict[str, Any], user_request: str) -> str:
         if not verification:
             return ""
         # browse_url emits URL/Content-Type/Extraction headers followed by the
-        # bounded source passages. Keep the useful evidence compact and do not
-        # ask the generation model to paraphrase untrusted page text.
+        # bounded source passages. Extract only the requested meteorological
+        # fields instead of dumping untrusted provider navigation/news prose.
         lines = [line.strip() for line in verification.splitlines() if line.strip()]
         source_url = next((line[4:].strip() for line in lines if line.startswith("URL:")), "")
-        body = [
+        body = " ".join(
             line for line in lines
             if not line.startswith(("URL:", "Content-Type:", "Extraction:"))
-        ]
-        excerpt = " ".join(body)
-        excerpt = re.sub(r"\s+", " ", excerpt).strip()[:1200]
-        if not excerpt:
-            return ""
-        title = f"**Current weather for {location or 'the requested location'}**"
-        rendered = [title, "", excerpt]
-        if source_url:
-            rendered.extend(["", f"Source: {source_url} (verified web fallback)."])
-        return "\n".join(rendered)
+        )
+        return _format_verified_weather_excerpt(body, location, source_url)
     location = _canonical_place(place, location)
     if _is_current_weather_request(user_request):
         current_rendered = _format_current_weather(forecast, location)

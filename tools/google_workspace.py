@@ -15,6 +15,9 @@ import requests
 from bs4 import BeautifulSoup
 
 from .google_workspace_auth import (
+    CALENDAR_READONLY_SCOPE,
+    DRIVE_METADATA_READONLY_SCOPE,
+    GMAIL_READONLY_SCOPE,
     GoogleWorkspaceAuthError,
     GoogleWorkspaceOAuth,
     get_google_workspace_oauth,
@@ -32,7 +35,11 @@ _UNTRUSTED_NOTICE = (
 
 
 class GoogleWorkspaceApiError(RuntimeError):
-    pass
+    """Safe provider/API failure with a stable machine-readable code."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = str(code or "api_error")
 
 
 def _clean_text(value: Any, limit: int) -> str:
@@ -42,23 +49,50 @@ def _clean_text(value: Any, limit: int) -> str:
     return text[: max(0, int(limit))]
 
 
-def _provider_error(response: requests.Response) -> str:
+def _provider_error(response: requests.Response) -> tuple[str, str]:
+    """Return a stable error code plus a bounded provider message."""
+    payload: Any = None
     try:
         payload = response.json()
     except ValueError:
-        return f"HTTP {response.status_code}"
+        pass
     error = payload.get("error") if isinstance(payload, dict) else None
+    reasons: list[str] = []
+    message = ""
+    status_text = ""
     if isinstance(error, dict):
-        message = error.get("message") or error.get("status")
-    else:
-        message = error
-    return " ".join(str(message or f"HTTP {response.status_code}").split())[:240]
+        message = str(error.get("message") or "")
+        status_text = str(error.get("status") or "")
+        for item in error.get("errors") or []:
+            if isinstance(item, dict) and item.get("reason"):
+                reasons.append(str(item.get("reason") or ""))
+    elif error is not None:
+        message = str(error)
+    lower = " ".join([message, status_text, *reasons]).lower()
+    bounded = " ".join(str(message or status_text or f"HTTP {response.status_code}").split())[:240]
+    if response.status_code == 429 or any(token in lower for token in ("ratelimit", "rate limit", "quota")):
+        return "rate_limited", bounded
+    if response.status_code == 403:
+        if any(token in lower for token in (
+            "accessnotconfigured", "service_disabled", "service disabled",
+            "has not been used in project", "api has not been used", "is disabled",
+        )):
+            return "api_disabled", bounded
+        if any(token in lower for token in (
+            "insufficientpermissions", "insufficient permission",
+            "insufficient authentication scopes", "insufficient_scope",
+        )):
+            return "scope_upgrade_required", bounded
+        return "forbidden", bounded
+    if response.status_code == 401:
+        return "authorization_expired", bounded
+    return "api_error", bounded
 
 
 def _resource_id(value: str, label: str) -> str:
     normalized = str(value or "").strip()
     if not _RESOURCE_ID_RE.fullmatch(normalized):
-        raise GoogleWorkspaceApiError(f"Invalid {label}.")
+        raise GoogleWorkspaceApiError("invalid_resource_id", f"Invalid {label}.")
     return normalized
 
 
@@ -67,9 +101,9 @@ def _rfc3339(value: str, label: str) -> str:
     try:
         parsed = datetime.fromisoformat(raw)
     except ValueError as exc:
-        raise GoogleWorkspaceApiError(f"{label} must be an RFC3339 timestamp with a timezone offset.") from exc
+        raise GoogleWorkspaceApiError("invalid_time", f"{label} must be an RFC3339 timestamp with a timezone offset.") from exc
     if parsed.tzinfo is None:
-        raise GoogleWorkspaceApiError(f"{label} must include a timezone offset.")
+        raise GoogleWorkspaceApiError("invalid_time", f"{label} must include a timezone offset.")
     return parsed.isoformat()
 
 
@@ -80,9 +114,24 @@ class GoogleWorkspaceClient:
         self.oauth = oauth or get_google_workspace_oauth()
         self.http = http
 
+    @staticmethod
+    def _required_scopes(url: str) -> set[str]:
+        if str(url).startswith(GMAIL_API_ROOT):
+            return {GMAIL_READONLY_SCOPE}
+        if str(url).startswith(CALENDAR_API_ROOT):
+            return {CALENDAR_READONLY_SCOPE}
+        if str(url).startswith(DRIVE_API_ROOT):
+            return {DRIVE_METADATA_READONLY_SCOPE}
+        raise GoogleWorkspaceApiError("unsupported_endpoint", "Unsupported Google Workspace API endpoint.")
+
     def get(self, url: str, *, params: dict[str, Any] | None = None, account: str = "default") -> dict[str, Any]:
+        required_scopes = self._required_scopes(url)
         for attempt in range(2):
-            token = self.oauth.get_access_token(account=account, force_refresh=attempt == 1)
+            token = self.oauth.get_access_token(
+                account=account,
+                force_refresh=attempt == 1,
+                required_scopes=required_scopes,
+            )
             try:
                 response = self.http.get(
                     url,
@@ -91,19 +140,29 @@ class GoogleWorkspaceClient:
                     timeout=20,
                 )
             except requests.RequestException as exc:
-                raise GoogleWorkspaceApiError("Google Workspace could not be reached.") from exc
+                raise GoogleWorkspaceApiError("network_error", "Google Workspace could not be reached.") from exc
             if response.status_code == 401 and attempt == 0:
                 continue
             if response.status_code != 200:
-                raise GoogleWorkspaceApiError(f"Google Workspace API error: {_provider_error(response)}")
+                code, message = _provider_error(response)
+                if code == "api_disabled" and str(url).startswith(DRIVE_API_ROOT):
+                    code = "drive_api_disabled"
+                    message = "Google Drive API is disabled or has not been enabled for the OAuth project."
+                elif code == "api_disabled" and str(url).startswith(GMAIL_API_ROOT):
+                    code = "gmail_api_disabled"
+                    message = "Gmail API is disabled or has not been enabled for the OAuth project."
+                elif code == "api_disabled" and str(url).startswith(CALENDAR_API_ROOT):
+                    code = "calendar_api_disabled"
+                    message = "Google Calendar API is disabled or has not been enabled for the OAuth project."
+                raise GoogleWorkspaceApiError(code, message)
             try:
                 payload = response.json()
             except ValueError as exc:
-                raise GoogleWorkspaceApiError("Google Workspace returned invalid JSON.") from exc
+                raise GoogleWorkspaceApiError("invalid_response", "Google Workspace returned invalid JSON.") from exc
             if not isinstance(payload, dict):
-                raise GoogleWorkspaceApiError("Google Workspace returned an unexpected response.")
+                raise GoogleWorkspaceApiError("invalid_response", "Google Workspace returned an unexpected response.")
             return payload
-        raise GoogleWorkspaceApiError("Google Workspace authorization expired; reconnect in the Web UI.")
+        raise GoogleWorkspaceApiError("authorization_expired", "Google Workspace authorization expired; reconnect in the Web UI.")
 
 
 _CLIENT: GoogleWorkspaceClient | None = None
@@ -197,7 +256,7 @@ def _message_body(payload: dict[str, Any], max_chars: int) -> tuple[str, str, bo
 
 
 def _tool_error(exc: Exception) -> str:
-    if isinstance(exc, GoogleWorkspaceAuthError):
+    if isinstance(exc, (GoogleWorkspaceAuthError, GoogleWorkspaceApiError)):
         return f"Error: Google Workspace {exc.code}: {exc}"
     return f"Error: {exc}"
 
@@ -411,7 +470,7 @@ def google_calendar_list_events(
             else (lower_datetime + timedelta(days=14)).isoformat()
         )
         if lower_datetime >= datetime.fromisoformat(upper):
-            raise GoogleWorkspaceApiError("time_max must be later than time_min.")
+            raise GoogleWorkspaceApiError("invalid_time_range", "time_max must be later than time_min.")
         limit = max(1, min(int(limit), 50))
         payload = _get_client().get(
             f"{CALENDAR_API_ROOT}/calendars/{quote(calendar_id, safe='')}/events",
