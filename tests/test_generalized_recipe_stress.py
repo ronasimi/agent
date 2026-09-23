@@ -69,6 +69,7 @@ def test_generalized_recipe_stress_finishes_without_model_loop(monkeypatch):
     prompt = _prompt()
     calls = []
     saved = {"value": False, "definition": None}
+    late_truncation = {"cleanup_seen": False, "armed": True, "raw_len": 0}
 
     def definition():
         return saved["definition"] or {}
@@ -146,7 +147,18 @@ def test_generalized_recipe_stress_finishes_without_model_loop(monkeypatch):
                 },
                 "recipe": {"id": 77, "name": "public_endpoint_health_check"},
             })
+        if name == "read_observation":
+            raw_len = int(late_truncation.get("raw_len") or 0)
+            offset = int(args.get("offset") or 0)
+            returned = max(1, raw_len - offset)
+            return json.dumps({
+                "observation_id": str(args.get("observation_id") or ""),
+                "offset": offset, "returned_chars": returned,
+                "total_chars": raw_len, "has_more": False,
+                "content": "x" * min(returned, 32),
+            })
         if name == "remove_path":
+            late_truncation["cleanup_seen"] = True
             return "Successfully removed generalized_recipe_test"
         if name == "path_stat":
             return json.dumps({"path": "generalized_recipe_test", "exists": False})
@@ -164,7 +176,21 @@ def test_generalized_recipe_stress_finishes_without_model_loop(monkeypatch):
     monkeypatch.setattr(te, "build_memory_context", lambda *_: "")
     monkeypatch.setattr(te, "get_relevant_user_prompt_context", lambda *_: "")
     monkeypatch.setattr(te, "get_user_location", lambda: "London, Ontario, Canada")
-    monkeypatch.setattr(te, "_bounded_tool_result_with_ref", lambda _name, text: (text, ""))
+    def bounded_result(name, text):
+        # Reproduce the real failure: a late recipe-retention search after the
+        # initial truncation audit creates a new archived middle.  Final
+        # settlement must recover it before rule 13 / requirement 72.
+        if name == "search_recipes" and late_truncation["cleanup_seen"] and late_truncation["armed"]:
+            late_truncation["armed"] = False
+            late_truncation["raw_len"] = len(text)
+            marker = (
+                "HEAD\n\n[Harness: middle truncated; full "
+                f"{len(text)}-character result stored as observation obs-late. offset=10]\n\nTAIL"
+            )
+            return marker, "obs-late"
+        return text, ""
+
+    monkeypatch.setattr(te, "_bounded_tool_result_with_ref", bounded_result)
     monkeypatch.setattr(te, "evict_report_model_for_interactive", lambda: None)
     monkeypatch.setattr(te, "_prune_compacted_history", lambda _messages: None)
     monkeypatch.setattr(te, "log_perf_stats", lambda *a, **k: None)
@@ -210,8 +236,12 @@ def test_generalized_recipe_stress_finishes_without_model_loop(monkeypatch):
     runs = [args for name, args in calls if name == "run_recipe"]
     assert [row["parameters"]["hostname"] for row in runs] == ["example.com", "www.iana.org"]
     assert sum(1 for name, _ in calls if name == "tool_search") == 3
+    assert any(name == "read_observation" for name, _ in calls)
 
     ledger = captured["ledger"]
+    rule13 = next(item for item in ledger.requirements if item.key == "genrecipe:13")
+    assert rule13.status == "satisfied"
+    assert "recovered" in rule13.last_reason
     assert len(ledger.requirements) == 72
     assert all(row.status in {"satisfied", "partial"} for row in ledger.requirements)
     for key in ("genrecipe:26", "genrecipe:27", "genrecipe:28"):
@@ -234,8 +264,13 @@ def test_generalized_truncation_audit_recovers_before_finalization():
     from pathlib import Path
 
     source = (Path(__file__).resolve().parents[1] / "al_agent" / "turn_engine.py").read_text(encoding="utf-8")
-    anchor = source.index('if pending_truncated_observations:\n                recover_pending_truncated_observations()', source.index('# 51-58:'))
-    audit = source.index('_genrecipe_mark("genrecipe:55"', anchor)
-    assert anchor < audit
+    cleanup = source.index('requirement_key="genrecipe:61"', source.index('# 59-62:'))
+    final_checkpoint = source.index(
+        'if pending_truncated_observations:\n                recover_pending_truncated_observations()',
+        cleanup,
+    )
+    rule13 = source.index('"genrecipe:13", "satisfied"', final_checkpoint)
+    finalization = source.index('_genrecipe_mark("genrecipe:72"', rule13)
+    assert cleanup < final_checkpoint < rule13 < finalization
     assert "unresolved_truncated_observations" in source
     assert "Recovery failures are terminal evidence gaps" in source

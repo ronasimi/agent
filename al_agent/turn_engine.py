@@ -101,6 +101,7 @@ def handle_user_turn(
     model_calls = 0
     validator_calls = 0
     auxiliary_fast_calls = 0
+    model_no_progress_retries = 0
     inference_lock = None
     model_lock_requested_at: float | None = None
     model_lock_acquired_at: float | None = None
@@ -2148,6 +2149,27 @@ def handle_user_turn(
             mutation_ok = mutation_ok and sum(value.startswith("save_recipe:") for value in mutations) <= 1
             _genrecipe_mark("genrecipe:62", "satisfied" if mutation_ok else "failed", "cleanup only touched the authorized disposable workspace path and optional single recipe save" if mutation_ok else "mutation log contains an unauthorized or duplicate mutation")
 
+            # The cleanup/retention steps above can themselves create archived
+            # observations (notably the final search_recipes result).  Settle any
+            # new truncation *after the last deterministic tool call* and then
+            # overwrite the earlier observation audit from this final state.
+            # This is the authoritative truncation checkpoint for rules 13/14
+            # and deterministic finalization.
+            if pending_truncated_observations:
+                recover_pending_truncated_observations()
+            if pending_truncated_observations:
+                _genrecipe_mark("genrecipe:55", "blocked", f"{len(pending_truncated_observations)} actual observation middle(s) remain pending recovery")
+            elif unresolved_truncated_observations:
+                _genrecipe_mark("genrecipe:55", "blocked", f"{len(unresolved_truncated_observations)} actual observation middle(s) could not be recovered deterministically")
+            else:
+                _genrecipe_mark("genrecipe:55", "satisfied", "all actual middle truncations were recovered, or none occurred")
+            recursive = any(
+                str(item.get("tool") or "") == "read_observation"
+                and str(item.get("evidence_ref") or "") in pending_truncated_observations
+                for item in grounding_observations()
+            )
+            _genrecipe_mark("genrecipe:56", "failed" if recursive else "satisfied", "read_observation created a recursive truncation gate" if recursive else "read_observation did not create an artificial recursive truncation requirement")
+
             # 1-15: close first-class policy rules from the deterministic execution audit.
             rule_results = {
                 1: mutation_ok, 2: mutation_ok, 3: mutation_ok,
@@ -2155,13 +2177,34 @@ def handle_user_turn(
                 5: len(genrecipe_context.get("equivalent_recipe_names") or []) == 1,
                 6: not any(str(entry.get("tool") or "") == "execute_shell" for entry in successful_execution_trace),
                 7: not unnecessary, 8: True, 9: first_preserved, 10: not repeated,
-                11: not repeated, 12: True, 13: not pending_truncated_observations and not unresolved_truncated_observations,
-                14: True, 15: True,
+                11: not repeated, 12: True, 14: True, 15: True,
             }
             for number, ok in rule_results.items():
                 _genrecipe_mark(
                     f"genrecipe:{number:02d}", "satisfied" if ok else "failed",
                     f"general rule {number} was preserved by the deterministic execution path" if ok else f"general rule {number} was violated by observed execution",
+                    evidence_tool="policy_audit",
+                )
+            # Rule 13 is recovery-sensitive.  A temporary pending truncation is
+            # not a violation; judge it only after the final deterministic
+            # recovery checkpoint.  An unrecoverable archive gap is UNRESOLVED
+            # (blocked), not FAILED, because affected evidence is not used.
+            if pending_truncated_observations:
+                _genrecipe_mark(
+                    "genrecipe:13", "blocked",
+                    f"{len(pending_truncated_observations)} middle truncation(s) remain pending after bounded recovery",
+                    evidence_tool="policy_audit",
+                )
+            elif unresolved_truncated_observations:
+                _genrecipe_mark(
+                    "genrecipe:13", "blocked",
+                    f"{len(unresolved_truncated_observations)} middle truncation(s) were not recoverable; affected evidence was not used",
+                    evidence_tool="policy_audit",
+                )
+            else:
+                _genrecipe_mark(
+                    "genrecipe:13", "satisfied",
+                    "all actual middle truncations were recovered before affected evidence was used",
                     evidence_tool="policy_audit",
                 )
 
@@ -3766,6 +3809,32 @@ def handle_user_turn(
                 budget_exhausted=True, blocked=bool(unresolved or pending_truncated_observations),
             )
 
+        def emit_no_progress_partial(reason: str) -> None:
+            """Stop a repeated model no-progress path before the global call budget.
+
+            This path deliberately does not ask either model for another rewrite.
+            If deterministic evidence exists it is preserved; otherwise the user
+            gets a bounded diagnostic instead of the misleading hard-budget banner.
+            """
+            nonlocal answer_first_visible_at
+            content, unresolved, rendered_facts = _format_compound_status(stop_reason=reason)
+            has_useful_evidence = bool(rendered_facts or deterministic_tool_results or deterministic_requirement_results)
+            if not content or (not has_useful_evidence and "### Any unresolved items" in content):
+                content = (
+                    "The model did not produce a usable response after "
+                    f"{MODEL_NO_PROGRESS_MAX_RETRIES} bounded no-progress retries. "
+                    "The turn was stopped before the global model-call budget was exhausted."
+                )
+            _append_and_save_fn(messages, {"role": "assistant", "content": content})
+            if WORKING_STATE_ENABLED:
+                WORKING_STATE.complete_turn(blocked=True)
+            answer_first_visible_at = answer_first_visible_at or time.monotonic()
+            print(f"\nAgent: {content}\n")
+            emit_event(
+                "assistant_final", content=content, finalization=True, deterministic=True,
+                no_progress_exhausted=True, budget_exhausted=False, blocked=True, reason=reason,
+            )
+
         # No deterministic fast path applied, so the main model is now needed.
         # Build the prompt once, after pre-grounding/schema pruning, then enter
         # the global model queue. This removes redundant prefix builds and keeps
@@ -4092,6 +4161,10 @@ def handle_user_turn(
                 signal = tracker.consume_signal()
                 if signal:
                     pending_stall_signal = signal
+                model_no_progress_retries += 1
+                if model_no_progress_retries >= MODEL_NO_PROGRESS_MAX_RETRIES:
+                    emit_no_progress_partial(f"repeated main-model inference errors: {exc}")
+                    break
                 if iteration < iteration_limit:
                     time.sleep(0.2)
                     continue
@@ -4336,6 +4409,9 @@ def handle_user_turn(
                     full_content = ""
                     continue
 
+            if tool_calls:
+                model_no_progress_retries = 0
+
             if WORKING_STATE_ENABLED and tool_calls:
                 WORKING_STATE.set_plan([
                     {
@@ -4388,6 +4464,10 @@ def handle_user_turn(
                 if raw_tool_calls or control_notes:
                     tracker.record_model_failure("invalid_tool_call", "; ".join(control_notes)[:240])
                     note = "; ".join(control_notes[:4]) or "the emitted call could not be used"
+                    model_no_progress_retries += 1
+                    if model_no_progress_retries >= MODEL_NO_PROGRESS_MAX_RETRIES:
+                        emit_no_progress_partial(f"repeated invalid/unusable model tool calls: {note}")
+                        break
                     append_control_note(
                         "[Harness tool-call correction] The previous tool call was rejected: "
                         f"{note}. Re-read the supplied native tool schemas. Do not invent tool names or arguments. "
@@ -4400,6 +4480,10 @@ def handle_user_turn(
 
                 if not full_content:
                     tracker.record_model_failure("empty_response", "main model emitted neither content nor a valid tool call")
+                    model_no_progress_retries += 1
+                    if model_no_progress_retries >= MODEL_NO_PROGRESS_MAX_RETRIES:
+                        emit_no_progress_partial("repeated empty main-model responses")
+                        break
                     append_control_note(
                         "[Harness correction] Provide a final answer or issue one explicit valid tool call. "
                         "Do not emit an empty response."
@@ -4409,6 +4493,7 @@ def handle_user_turn(
                         pending_stall_signal = signal
                     continue
 
+                model_no_progress_retries = 0
                 tracker.clear_model_failure("empty_response")
                 if WORKING_STATE_ENABLED:
                     WORKING_STATE.complete_turn(blocked=False)

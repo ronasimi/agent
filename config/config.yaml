@@ -90,6 +90,9 @@ agent:
   turn_soft_timeout_seconds: 120
   turn_hard_timeout_seconds: 180
   max_model_calls_per_turn: 6
+  # Stop repeated empty/invalid/error model responses before they consume the
+  # global model-call safety budget. This is a no-progress guard, not a higher budget.
+  model_no_progress_max_retries: 2
   max_validator_calls_per_turn: 2
   max_recovery_attempts_per_requirement: 2
   tool_turn_num_predict: 384

@@ -240,7 +240,7 @@ When a successful workflow with at least two meaningful stages does not match an
 
 Before proposing a saved recipe, the harness automatically generalizes successful read-only tool traces. Repeated/task-defining constants become shared parameters, and derived strings such as `https://example.com` become templates tied to the same `hostname` parameter instead of separate captured defaults. Operational controls (timeouts, limits, booleans, offsets, and ordinary fixed ports) remain constants unless the request explicitly makes them variable. The resident fast model may suggest semantic parameter names for ambiguous literals, but those hints are advisory: deterministic code requires every value to exist in the successful trace, rejects secret-like values, and verifies the final pipeline before it can be saved.
 
-Large tool results use durable observation handles. Genuine harness `middle truncated` markers are recovered deterministically with `read_observation` before evidence audits. Preview-only `[clipped]` text is never treated as a truncation signal, and a failed archive recovery becomes a terminal unresolved evidence gap rather than reopening the main-model recovery loop.
+Large tool results use durable observation handles. Genuine harness `middle truncated` markers are recovered deterministically with `read_observation`, including an authoritative final settlement after the last deterministic tool call that can create a new archived observation. Preview-only `[clipped]` text is never treated as a truncation signal, and a failed archive recovery becomes a terminal unresolved evidence gap rather than reopening the main-model recovery loop. Repeated empty, invalid-tool, or inference-error model responses are separately capped by `model_no_progress_max_retries` (default 2), so they stop before consuming the global six-call safety budget.
 
 Typical examples:
 
@@ -437,6 +437,7 @@ agent:
   max_iterations: 6
   max_iterations_hard: 10
   max_model_calls_per_turn: 6
+  model_no_progress_max_retries: 2
   max_validator_calls_per_turn: 2
   max_tools_per_turn: 12
   requirement_tool_cap: 24

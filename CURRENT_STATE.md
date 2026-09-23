@@ -56,7 +56,7 @@ Important routing properties:
 - direct primitives are preferred over recipes for simpler one-step requests;
 - shell/Python remain fallbacks rather than the primary interface.
 
-The hard per-turn model-call budget remains a safety bound. Deterministic evidence collection, requirement closure, truncation recovery, and final structured formatting should not consume model calls merely for bookkeeping.
+The hard per-turn model-call budget remains a safety bound. Deterministic evidence collection, requirement closure, truncation recovery, and final structured formatting should not consume model calls merely for bookkeeping. Repeated empty responses, unusable/invented tool calls, and repeated inference exceptions are independently bounded by `model_no_progress_max_retries` (default **2**) so the global six-call budget remains a last-resort circuit breaker rather than the normal loop terminator.
 
 ## Working state and requirement ledger
 
@@ -73,7 +73,7 @@ This allows large deterministic plans to remain inspectable/resumable without in
 
 Large tool results are persisted as durable observations. Prompt/state previews may contain `…[clipped]…`; this is display/storage compaction and **is not an observation-truncation signal**.
 
-Actual middle truncation is tracked by structured harness metadata and a recoverable observation ID. The turn engine runs deterministic `read_observation` recovery before truncation/evidence audits. Recovery is bounded. If recovery fails or stops making contiguous progress, the affected evidence is marked terminally unresolved instead of reopening the main-model recovery loop until the model-call budget is exhausted. `read_observation` results do not recursively generate artificial truncation requirements.
+Actual middle truncation is tracked by structured harness metadata and a recoverable observation ID. The turn engine performs deterministic recovery during execution and then performs an authoritative **final settlement after the last deterministic tool call** (including cleanup/recipe-retention checks that may themselves create archived results). Rule/audit/finalization state is evaluated only from that settled snapshot. Recovery is bounded. If recovery fails or stops making contiguous progress, the affected evidence is marked terminally unresolved instead of reopening the main-model recovery loop until the model-call budget is exhausted. `read_observation` results do not recursively generate artificial truncation requirements.
 
 ## Recipes
 

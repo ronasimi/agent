@@ -57,6 +57,10 @@ MAX_ITERATIONS_HARD = max(MAX_ITERATIONS, int(AGENT_CFG.get("max_iterations_hard
 TURN_SOFT_TIMEOUT_SECONDS = max(1.0, float(AGENT_CFG.get("turn_soft_timeout_seconds", 120)))
 TURN_HARD_TIMEOUT_SECONDS = max(TURN_SOFT_TIMEOUT_SECONDS, float(AGENT_CFG.get("turn_hard_timeout_seconds", 180)))
 MAX_MODEL_CALLS_PER_TURN = max(1, int(AGENT_CFG.get("max_model_calls_per_turn", 6)))
+# Repeated empty/invalid/error responses are a no-progress condition, not a
+# reason to spend the entire global model-call safety budget.  Bound them
+# independently so the hard budget remains a last-resort circuit breaker.
+MODEL_NO_PROGRESS_MAX_RETRIES = max(1, int(AGENT_CFG.get("model_no_progress_max_retries", 2)))
 MAX_VALIDATOR_CALLS_PER_TURN = max(0, int(AGENT_CFG.get("max_validator_calls_per_turn", 2)))
 MAX_RECOVERY_ATTEMPTS_PER_REQUIREMENT = max(1, int(AGENT_CFG.get("max_recovery_attempts_per_requirement", 2)))
 TOOL_TURN_NUM_PREDICT = max(64, int(AGENT_CFG.get("tool_turn_num_predict", 384)))
