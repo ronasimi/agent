@@ -28,10 +28,12 @@ TOOL_SPECS = [
     ('pipeline', 'run_recipe'),
     ('pipeline', 'list_recipes'),
     ('pipeline', 'search_recipes'),
+    ('pipeline', 'load_recipe'),
     ('pipeline', 'save_recipe'),
     ('recipe_compat', 'recipe_coverage'),
     ('workspace', 'read_file'),
     ('workspace', 'write_file'),
+    ('workspace', 'remove_path'),
     ('system', 'execute_shell'),
     ('system', 'execute_python'),
 ]

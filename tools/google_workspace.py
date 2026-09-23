@@ -464,25 +464,27 @@ def google_calendar_list_events(
         now = datetime.now(UTC)
         lower = _rfc3339(time_min, "time_min") if str(time_min or "").strip() else now.isoformat()
         lower_datetime = datetime.fromisoformat(lower)
-        upper = (
-            _rfc3339(time_max, "time_max")
-            if str(time_max or "").strip()
-            else (lower_datetime + timedelta(days=14)).isoformat()
-        )
-        if lower_datetime >= datetime.fromisoformat(upper):
+        upper = _rfc3339(time_max, "time_max") if str(time_max or "").strip() else ""
+        if upper and lower_datetime >= datetime.fromisoformat(upper):
             raise GoogleWorkspaceApiError("invalid_time_range", "time_max must be later than time_min.")
         limit = max(1, min(int(limit), 50))
+        params = {
+            "timeMin": lower,
+            "q": str(query or "").strip()[:500],
+            "maxResults": limit,
+            "singleEvents": True,
+            "orderBy": "startTime",
+            "showDeleted": False,
+        }
+        # When no explicit upper bound is requested, let Calendar return the
+        # next N events after timeMin. maxResults keeps the response bounded and
+        # avoids silently missing the third upcoming event merely because it is
+        # more than an arbitrary two weeks away.
+        if upper:
+            params["timeMax"] = upper
         payload = _get_client().get(
             f"{CALENDAR_API_ROOT}/calendars/{quote(calendar_id, safe='')}/events",
-            params={
-                "timeMin": lower,
-                "timeMax": upper,
-                "q": str(query or "").strip()[:500],
-                "maxResults": limit,
-                "singleEvents": True,
-                "orderBy": "startTime",
-                "showDeleted": False,
-            },
+            params=params,
             account=account,
         )
         return json.dumps({

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import mimetypes
 import os
+import shutil
 import tempfile
 
 WORKSPACE_DIR = os.path.realpath("/app/workspace")
@@ -90,3 +91,29 @@ def write_file(filename: str = "", content: str = "") -> str:
         return f"Successfully wrote {len(payload)} characters to {filename}"
     except Exception as exc:
         return f"Error: writing file '{filename}' failed: {exc}"
+
+
+def remove_path(path: str = "", recursive: bool = False) -> str:
+    """Remove one file or directory strictly inside the agent workspace.
+
+    Directory removal is intentionally explicit: non-empty directories require
+    ``recursive=true``.  The workspace root itself can never be removed.
+    """
+    if not str(path).strip():
+        return "Error: Missing required 'path' parameter."
+    try:
+        safe_path = _get_safe_path(path)
+        if safe_path == WORKSPACE_DIR:
+            return "Error: refusing to remove the workspace root."
+        if not os.path.lexists(safe_path):
+            return f"Error: path '{path}' does not exist."
+        if os.path.isdir(safe_path) and not os.path.islink(safe_path):
+            if recursive:
+                shutil.rmtree(safe_path)
+            else:
+                os.rmdir(safe_path)
+        else:
+            os.unlink(safe_path)
+        return f"Successfully removed {path}"
+    except Exception as exc:
+        return f"Error: removing path '{path}' failed: {exc}"

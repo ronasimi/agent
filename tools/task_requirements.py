@@ -603,6 +603,13 @@ def detect_fact_frame_types(user_text: str) -> set[str]:
     text = " ".join(raw.strip().split())
     if not text:
         return set()
+    tool_recipe_requirements = derive_tool_recipe_stress_requirements(raw)
+    if tool_recipe_requirements:
+        return {
+            str((item.scope or {}).get("fact_type") or "")
+            for item in tool_recipe_requirements
+            if str((item.scope or {}).get("fact_type") or "")
+        }
     stress_requirements = derive_stress_requirements(raw)
     if stress_requirements:
         return {
@@ -924,6 +931,128 @@ _STRESS_SECTION_RE = re.compile(
 )
 _NUMBERED_LINE_RE = re.compile(r"(?m)^\s*(\d{1,3})\.\s+")
 
+_TOOL_RECIPE_STRESS_SECTION_RE = re.compile(
+    r"(?mi)^\s*([A-L])\.\s*(DIRECT TOOL ROUTING|SIMILAR-TOOL DISAMBIGUATION|"
+    r"TOOL DISCOVERY / RECOVERY PATH|WORKSPACE PATH AND FILE-TOOL TEST|"
+    r"RECIPE DISCOVERY AND DUPLICATION CHECK|RECIPE CREATION|RECIPE REPLAY|"
+    r"RECIPE FAILURE / FALLBACK BEHAVIOR|OBSERVATION / TRUNCATION PATH|"
+    r"RECIPE STORAGE INTEGRITY|CLEANUP|REQUIREMENT / EVIDENCE AUDIT)\s*$"
+)
+
+
+def _tool_recipe_numbered_items(user_text: str) -> list[tuple[int, str, str]]:
+    """Parse the numbered requirements from the tool/recipe stress prompt.
+
+    The explicit A-L capability headings form the executable plan boundary, so
+    the numbered GENERAL SAFETY RULES preamble is never misclassified as work.
+    """
+    text = str(user_text or "")
+    if "tool-routing and recipe-system stress test" not in text.lower():
+        return []
+    headings = list(_TOOL_RECIPE_STRESS_SECTION_RE.finditer(text))
+    if not headings:
+        return []
+    items: list[tuple[int, str, str]] = []
+    for idx, heading in enumerate(headings):
+        section = f"{heading.group(1).upper()}. {heading.group(2).strip()}"
+        start = heading.end()
+        end = headings[idx + 1].start() if idx + 1 < len(headings) else len(text)
+        final_output = re.search(r"(?mi)^\s*FINAL OUTPUT\s*$", text[start:end])
+        if final_output:
+            end = start + final_output.start()
+        block = text[start:end]
+        matches = list(_NUMBERED_LINE_RE.finditer(block))
+        for j, match in enumerate(matches):
+            item_start = match.end()
+            item_end = matches[j + 1].start() if j + 1 < len(matches) else len(block)
+            body = block[item_start:item_end].strip()
+            if body:
+                items.append((int(match.group(1)), section, body))
+    seen: set[int] = set()
+    ordered: list[tuple[int, str, str]] = []
+    for row in sorted(items, key=lambda value: value[0]):
+        if row[0] in seen:
+            continue
+        seen.add(row[0])
+        ordered.append(row)
+    return ordered
+
+
+def _tool_recipe_requirement(number: int, section: str, body: str) -> Requirement:
+    """Compile one tool/recipe stress item into a deterministic requirement."""
+    lower = " ".join(body.lower().split())
+    scope: dict[str, Any] = {
+        "item_number": int(number),
+        "section": section,
+        "source_text": body[:2400],
+        "tool_recipe_stress": True,
+    }
+    key = f"tooltest:{number:02d}"
+
+    def req(tool: str, label: str, *, derived: bool = False, **extra: Any) -> Requirement:
+        scope.update({k: v for k, v in extra.items() if v not in (None, "", [])})
+        if derived:
+            scope["derived"] = True
+        return Requirement(key=key, tool=tool, label=label, scope=dict(scope))
+
+    direct: dict[int, tuple[str, str, dict[str, Any]]] = {
+        1: ("current_time", "current local/system time", {"fact_type": "current_time", "time_scope": "current"}),
+        2: ("environment_summary", "basic host/system identity", {}),
+        3: ("cpu_info", "CPU identity and core counts", {}),
+        4: ("host_snapshot", "host resource state", {}),
+        5: ("temperature_sensors", "temperature sensor state", {}),
+        6: ("ollama_runtime_snapshot", "Ollama runtime state", {}),
+        7: ("dns_query", "DNS resolution for example.com", {"target": "example.com", "record_type": "A"}),
+        8: ("tcp_connect", "TCP connectivity to example.com:443", {"target": "example.com", "port": 443}),
+        9: ("http_probe", "HTTPS probe for example.com", {"target": "https://example.com"}),
+        10: ("page_metadata", "example.com page metadata", {"target": "https://example.com"}),
+        15: ("write_file", "create disposable workspace test file", {
+            "target": "harness_tool_recipe_test/input.txt",
+            "content": "TOOL_PATH_TEST_OK\nalpha\nbeta\ngamma\n",
+        }),
+        16: ("read_file", "read disposable workspace test file", {"target": "harness_tool_recipe_test/input.txt"}),
+        18: ("search_recipes", "semantic search for equivalent recipe", {"query": "quick local agent health check current time host resources cpu ollama"}),
+        19: ("load_recipe", "existing recipe inspection/reuse branch", {"conditional": "existing_equivalent"}),
+        20: ("save_recipe", "create one reusable health-check recipe when needed", {"conditional": "no_equivalent"}),
+        21: ("search_recipes", "post-create recipe discovery and duplicate check", {"query": "quick local agent health check current time host resources cpu ollama", "phase": "post_create"}),
+        22: ("run_recipe", "execute selected health-check recipe", {"recipe_name": "quick_local_agent_health_check"}),
+        30: ("load_recipe", "stored recipe procedural-integrity inspection", {"recipe_name": "quick_local_agent_health_check", "phase": "integrity"}),
+        33: ("remove_path", "remove disposable workspace test directory", {"target": "harness_tool_recipe_test", "recursive": True}),
+    }
+    if number in direct:
+        tool, label, extra = direct[number]
+        return req(tool, label, **extra)
+
+    derived_labels = {
+        11: ("__tooltest_layer_consistency__", "network/content layer consistency"),
+        12: ("__tooltest_observation_capability__", "observation retrieval capability discovery"),
+        13: ("__tooltest_skill_capability__", "skill discovery capability discovery"),
+        14: ("__tooltest_recipe_capabilities__", "recipe capability discovery"),
+        17: ("__tooltest_workspace_boundary__", "workspace path-boundary verification"),
+        23: ("__tooltest_recipe_compare__", "compare recipe output with direct evidence"),
+        24: ("__tooltest_recipe_replay_audit__", "recipe replay verification"),
+        25: ("__tooltest_direct_routing_audit__", "direct primitive routing audit"),
+        26: ("__tooltest_tool_search_audit__", "tool_search necessity audit"),
+        27: ("__tooltest_retry_audit__", "retry/fallback audit"),
+        28: ("__tooltest_truncation_audit__", "actual observation truncation audit"),
+        29: ("__tooltest_recursive_truncation_audit__", "recursive read_observation truncation audit"),
+        31: ("__tooltest_recipe_secret_audit__", "stored recipe secret/transient-data audit"),
+        32: ("__tooltest_recipe_duplicate_audit__", "duplicate recipe audit"),
+        34: ("__tooltest_mutation_audit__", "mutation boundary audit"),
+        35: ("__tooltest_evidence_audit__", "successful-requirement evidence audit"),
+        36: ("__tooltest_terminal_state_audit__", "terminal requirement-state audit"),
+        37: ("__tooltest_deterministic_finalization__", "deterministic finalization audit"),
+    }
+    tool, label = derived_labels.get(number, (f"__unmapped_tooltest_item_{number:02d}__", f"tool/recipe test item {number}"))
+    return req(tool, label, derived=True)
+
+
+def derive_tool_recipe_stress_requirements(user_text: str) -> list[Requirement]:
+    items = _tool_recipe_numbered_items(user_text)
+    if not items:
+        return []
+    return [_tool_recipe_requirement(number, section, body) for number, section, body in items]
+
 
 def _stress_numbered_items(user_text: str) -> list[tuple[int, str, str]]:
     """Return numbered requirements only from explicit capability-test sections.
@@ -1170,6 +1299,9 @@ def _scope_matches(
 def derive_requirements(user_text: str) -> list[Requirement]:
     """Return ordered, deduplicated requirements explicitly present in a request."""
     text = str(user_text or "")
+    tool_recipe_stress = derive_tool_recipe_stress_requirements(text)
+    if tool_recipe_stress:
+        return tool_recipe_stress
     stress = derive_stress_requirements(text)
     if stress:
         return stress
@@ -1328,6 +1460,40 @@ class TaskRequirementLedger:
                 item.last_reason = "successful tool result did not match requested target/scope"
             elif direct and item.status not in {"satisfied", "partial"}:
                 item.status = "failed"
+
+    def record_tool_for_key(
+        self, key: str, tool_name: str, *, status: str, reason: str = "", fingerprint: str = "",
+        arguments: Any = None, result_text: str = "", result_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Record a deterministic tool result against exactly one requirement.
+
+        Sectioned stress plans may intentionally call the same primitive more
+        than once with identical arguments at different workflow phases (for
+        example recipe search before and after creation).  Global tool matching
+        would prematurely satisfy the later phase, so harness-owned execution
+        uses this key-scoped form.
+        """
+        for item in self.requirements:
+            if item.key != str(key):
+                continue
+            if item.tool != str(tool_name):
+                item.status = "failed"
+                item.last_reason = "deterministic executor used an unexpected tool"
+                return
+            item.attempts += 1
+            item.last_reason = str(reason or "")[:120]
+            item.fingerprint = str(fingerprint or "")[:32]
+            scoped = _scope_matches(item.scope, arguments, result_text, result_metadata)
+            if status == "ok" and scoped:
+                item.status = "satisfied"
+            elif status == "partial" and scoped:
+                item.status = "partial"
+            elif status in {"ok", "partial"} and not scoped:
+                item.status = "failed"
+                item.last_reason = "successful tool result did not match requested target/scope"
+            else:
+                item.status = "failed"
+            return
 
     def mark_fact_satisfied(self, fact_type: str, reason: str = "grounding_evidence") -> None:
         """Close tool requirements whose requested fact was grounded by any valid path."""

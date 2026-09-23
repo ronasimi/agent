@@ -260,6 +260,24 @@ def search_recipes_tool(query: str, limit: int = 8) -> str:
     ], ensure_ascii=False, indent=2)
 
 
+def load_recipe_tool(name: str) -> str:
+    """Load one saved recipe, including its reusable pipeline definition."""
+    from .recipe_store import get_recipe
+    recipe = get_recipe(name)
+    if not recipe:
+        return "Error: recipe not found."
+    return json.dumps({
+        "id": recipe["id"],
+        "name": recipe["name"],
+        "description": recipe["description"],
+        "pipeline": recipe["pipeline"],
+        "parameters": recipe.get("parameters") or {},
+        "tags": recipe.get("tags") or [],
+        "origin": recipe.get("origin", "user"),
+        "target_tool": recipe.get("target_tool", ""),
+    }, ensure_ascii=False, indent=2)
+
+
 def save_recipe_tool(name: str, description: str, stages: list[dict[str, Any]], parameters: dict[str, Any] | None = None, tags: list[str] | None = None) -> str:
     """Save an explicit reusable read-only recipe in the semantic recipe database."""
     from .recipe_store import save_recipe
@@ -282,6 +300,11 @@ def list_recipes(limit: int = 50) -> str:
 def search_recipes(query: str, limit: int = 8) -> str:
     """Semantically search saved recipes by objective, description, tags, and tool names."""
     return search_recipes_tool(query, limit)
+
+
+def load_recipe(name: str) -> str:
+    """Load one saved recipe, including its reusable pipeline definition."""
+    return load_recipe_tool(name)
 
 
 def save_recipe(name: str, description: str, stages: list[dict[str, Any]], parameters: dict[str, Any] | None = None, tags: list[str] | None = None) -> str:

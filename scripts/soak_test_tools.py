@@ -131,7 +131,7 @@ def _runtime_context_preflight() -> tuple[bool, str]:
 # unless --mutating-mode all is explicitly selected.
 ISOLATABLE_MUTATORS = {
     "remember", "remember_semantic", "set_user_identity", "set_research_preference",
-    "set_profile_image", "write_file", "execute_shell", "execute_python",
+    "set_profile_image", "write_file", "remove_path", "execute_shell", "execute_python",
     "render_document_page", "image_resize", "image_crop", "image_convert",
     "archive_extract", "page_diff", "generate_pdf_report",
     "save_recipe", "enqueue_research", "cancel_background_job",
@@ -314,6 +314,10 @@ def create_fixtures(base: Path, workspace: Path | None = None, pass_no: int = 1)
         conn.commit()
     workspace = (workspace or _workspace_root()).resolve()
     relative_base = str(base.resolve().relative_to(workspace)) if _is_relative_to(base, workspace) else str(base.resolve())
+    remove_dir = base / "remove-me"
+    remove_dir.mkdir(parents=True, exist_ok=True)
+    (remove_dir / "sentinel.txt").write_text("remove-path soak fixture\n", encoding="utf-8")
+    relative_remove_dir = str(remove_dir.resolve().relative_to(workspace)) if _is_relative_to(remove_dir, workspace) else str(remove_dir)
     base64_text = str(profile["base64_text"])
     return {
         "pass_no": int(pass_no), "profile": label,
@@ -326,7 +330,7 @@ def create_fixtures(base: Path, workspace: Path | None = None, pass_no: int = 1)
         "base": str(base), "relative_base": relative_base, "text": str(text_path), "json": str(json_path), "yaml": str(yaml_path),
         "csv": str(csv_path), "jsonl": str(jsonl_path), "html_path": str(html_path),
         "html": html, "feed": feed_path.read_text(encoding="utf-8"), "image": str(image_path),
-        "pdf": str(pdf_path), "zip": str(zip_path), "db": str(db_path),
+        "pdf": str(pdf_path), "zip": str(zip_path), "db": str(db_path), "relative_remove_dir": relative_remove_dir,
         "relative_text": str(text_path.resolve().relative_to(workspace)) if _is_relative_to(text_path, workspace) else str(text_path),
     }
 
@@ -669,6 +673,7 @@ def tool_args(target: Target, fixtures: dict[str, Any], ids: dict[str, Any]) -> 
         "save_recipe": {"name": "Tool soak synthetic", "description": "Synthetic audit recipe", "stages": [{"id": "s1", "tool": "calculate", "args": {"expression": "1+1"}}], "tags": ["audit"]},
         "read_file": {"filename": fixtures["relative_text"]},
         "write_file": {"filename": f"{fixtures['relative_base']}/write_file.txt", "content": "tool soak audit\n"},
+        "remove_path": {"path": fixtures["relative_remove_dir"], "recursive": True},
         "execute_shell": {"command": "printf 'tool-soak-audit\\n'", "timeout": 5},
         "execute_python": {"code": "print('tool-soak-audit')", "timeout": 5},
         "path_stat": {"path": fixtures["text"]},

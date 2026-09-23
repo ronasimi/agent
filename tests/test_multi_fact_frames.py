@@ -678,6 +678,8 @@ Return the requested sectioned report.'''
     assert "Expected DNS failure — PASS" in content
     assert "Time consistency — PASS" in content
     assert "Evidence audit — PASS" in content
+    assert "Calendar — PASS — 1 upcoming event returned" in content
+    assert "Drive — PASS — 1 file returned: doc.txt | Plain text | modified 2026-09-23T10:00:00Z" in content
     assert "CPU — PASS — AMD Ryzen 5 PRO 4650U with Radeon Graphics; logical CPUs=12" in content
     assert "Temperatures — PASS — k10temp/Tctl 52 °C" in content
     assert '"k10temp"' not in content

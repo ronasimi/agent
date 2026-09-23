@@ -310,7 +310,7 @@ def test_gmail_and_calendar_tools_are_bounded_readonly_and_mark_untrusted(monkey
     assert message["message"]["body"] == "Bounded message body"
     assert "Hidden attachment" not in message["message"]["body"]
     assert events["events"][0]["summary"] == "Review"
-    assert future_window["time_max"].startswith("2030-10-15T00:00:00")
+    assert future_window["time_max"] == ""
     assert calendars["calendars"][0]["id"].startswith("en.usa#holiday")
     assert drive["metadata_only"] is True
     assert drive["files"][0]["name"] == "Status.docx"

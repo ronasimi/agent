@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlencode, urlparse
 from xml.etree import ElementTree as ET
 
@@ -665,15 +667,56 @@ def requested_headline_limit(user_request: str, default: int = 6) -> int:
         return max(1, min(count, 10))
     return max(1, min(int(default), 10))
 
+def _news_date_timestamp(value: object) -> float | None:
+    """Parse common provider news timestamps for deterministic recency ordering."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    parsed = None
+    try:
+        parsed = parsedate_to_datetime(raw)
+    except (TypeError, ValueError, OverflowError):
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except (TypeError, ValueError, OverflowError):
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    try:
+        return parsed.timestamp()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 def format_news_results(content: str, *, limit: int = 6, location: str = "") -> str:
-    """Render structured news-search output without relying on model tool-call compliance."""
+    """Render qualifying news rows newest-first without relying on model synthesis."""
     try:
         payload = json.loads(str(content or ""))
     except (TypeError, json.JSONDecodeError):
         return ""
     if not isinstance(payload, list):
         return ""
-    rows = [item for item in payload if isinstance(item, dict) and item.get("title") and item.get("url")][:max(1, min(int(limit), 10))]
+
+    # Providers do not consistently return rows in publication order.  Dedupe
+    # first, then sort known publication timestamps newest-first before applying
+    # the requested cardinality. Unknown dates retain provider order at the end.
+    candidates: list[tuple[int, dict, float | None]] = []
+    seen: set[tuple[str, str]] = set()
+    for index, item in enumerate(payload):
+        if not isinstance(item, dict) or not item.get("title") or not item.get("url"):
+            continue
+        title = str(item.get("title") or "").strip()
+        url = str(item.get("url") or "").strip()
+        key = (title.casefold(), url)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append((index, item, _news_date_timestamp(item.get("date"))))
+    candidates.sort(
+        key=lambda row: (row[2] is not None, row[2] if row[2] is not None else float("-inf"), -row[0]),
+        reverse=True,
+    )
+    rows = [item for _index, item, _stamp in candidates[:max(1, min(int(limit), 10))]]
     if not rows:
         return ""
     heading = f"**Latest local headlines for {canonicalize_location(location)}**" if str(location or "").strip() else "**Latest headlines**"

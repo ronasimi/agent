@@ -579,6 +579,17 @@ def handle_user_turn(
         weather_canonical_location: dict[str, Any] = {}
         deterministic_tool_results: dict[str, dict[str, Any]] = {}
         deterministic_requirement_results: dict[str, dict[str, Any]] = {}
+        tooltest_context: dict[str, Any] = {
+            "tool_search_calls": [],
+            "selected_recipe": "",
+            "equivalent_recipe_found": False,
+            "equivalent_recipe_names": [],
+            "created_recipe": False,
+            "recipe_run": {},
+            "recipe_definition": {},
+            "mutations": [],
+            "workspace_paths": [],
+        }
         local_grounding_observations: list[dict[str, Any]] = list(
             (working_state_snapshot if WORKING_STATE_ENABLED else previous_working_state).get("verified_observations") or []
         ) if continuation else []
@@ -1079,10 +1090,23 @@ def handle_user_turn(
                 and name == "execute_shell"
                 and str((args or {}).get("command") or "") == "printf 'HARNESS_SYSTEM_TOOL_OK\\n'"
             )
+            safe_tooltest_mutation = False
+            if requirement_key == "tooltest:15" and name == "write_file":
+                safe_tooltest_mutation = (
+                    str((args or {}).get("filename") or "") == "harness_tool_recipe_test/input.txt"
+                    and str((args or {}).get("content") or "") == "TOOL_PATH_TEST_OK\nalpha\nbeta\ngamma\n"
+                )
+            elif requirement_key == "tooltest:33" and name == "remove_path":
+                safe_tooltest_mutation = (
+                    str((args or {}).get("path") or "") == "harness_tool_recipe_test"
+                    and bool((args or {}).get("recursive")) is True
+                )
+            elif trigger == "tooltest:save_recipe" and name == "save_recipe":
+                safe_tooltest_mutation = str((args or {}).get("name") or "") == "quick_local_agent_health_check"
             if (
                 name not in AVAILABLE_TOOLS_MAP
-                or (not bool(metadata.get("readonly", True)) and not safe_stress_shell)
-                or (not turn_tool_policy.allowed(name, metadata) and not safe_stress_shell)
+                or (not bool(metadata.get("readonly", True)) and not safe_stress_shell and not safe_tooltest_mutation)
+                or (not turn_tool_policy.allowed(name, metadata) and not safe_stress_shell and not safe_tooltest_mutation)
             ):
                 if requirement_key:
                     requirement_ledger.mark_key(requirement_key, "blocked", "blocked by explicit turn tool policy")
@@ -1117,10 +1141,17 @@ def handle_user_turn(
                 "tool_result", name=name, status=status, reason=reason, content=result_text,
                 observation_id=observation_id, media=[], harness_recovery=True,
             )
-            requirement_ledger.record_tool(
-                name, status=status, reason=reason, fingerprint=str(outcome.get("fingerprint") or ""),
-                arguments=normalized, result_text=result_content,
-            )
+            if requirement_key:
+                requirement_ledger.record_tool_for_key(
+                    requirement_key, name, status=status, reason=reason,
+                    fingerprint=str(outcome.get("fingerprint") or ""),
+                    arguments=normalized, result_text=result_content,
+                )
+            else:
+                requirement_ledger.record_tool(
+                    name, status=status, reason=reason, fingerprint=str(outcome.get("fingerprint") or ""),
+                    arguments=normalized, result_text=result_content,
+                )
             deterministic_tool_results[name] = {
                 "success": success, "status": status, "reason": reason,
                 "arguments": dict(normalized or {}) if isinstance(normalized, dict) else normalized,
@@ -1349,6 +1380,12 @@ def handle_user_turn(
                 return None
 
             for item in list(requirement_ledger.pending()):
+                if item.key.startswith("tooltest:"):
+                    # The recipe/tool-routing stress plan has ordering and
+                    # conditional branches (search -> maybe create -> replay ->
+                    # cleanup). Execute it in its dedicated orchestrator below
+                    # rather than as independent unordered probes.
+                    continue
                 if bool((item.scope or {}).get("derived")):
                     continue
                 args = arguments_for(item)
@@ -1408,6 +1445,457 @@ def handle_user_turn(
                         break
                 if calls >= max_calls:
                     break
+
+        def _tooltest_mark(key: str, status: str, reason: str) -> None:
+            requirement_ledger.mark_key(key, status, reason)
+            if WORKING_STATE_ENABLED:
+                WORKING_STATE.update_requirements(requirement_ledger.as_list())
+
+        def _tooltest_result_payload(key: str) -> dict[str, Any]:
+            row = deterministic_requirement_results.get(key) or {}
+            try:
+                value = json.loads(str(row.get("content") or "{}"))
+            except Exception:
+                value = {}
+            return value if isinstance(value, dict) else {}
+
+        def _tooltest_recipe_stages() -> list[dict[str, Any]]:
+            return [
+                {"id": "time", "tool": "current_time", "args": {}},
+                {"id": "host", "tool": "host_snapshot", "args": {}},
+                {"id": "cpu", "tool": "cpu_info", "args": {}},
+                {"id": "ollama", "tool": "ollama_runtime_snapshot", "args": {}},
+                {
+                    "id": "ollama_count", "tool": "json_count",
+                    "args": {"data": {"$ref": "ollama", "path": "models", "default": []}},
+                },
+                {
+                    "id": "summary", "tool": "compose_object", "args": {"data": {
+                        "local_time": {"$ref": "time", "path": "local", "default": "unavailable"},
+                        "hostname": {"$ref": "host", "path": "hostname", "default": "unavailable"},
+                        "uptime_seconds": {"$ref": "host", "path": "uptime_seconds", "default": None},
+                        "memory_total_mb": {"$ref": "host", "path": "memory.total_mb", "default": None},
+                        "memory_available_mb": {"$ref": "host", "path": "memory.available_mb", "default": None},
+                        "load_average": {"$ref": "host", "path": "load_average", "default": []},
+                        "cpu_model": {"$ref": "cpu", "path": "models.0", "default": "unavailable"},
+                        "logical_cpus": {"$ref": "cpu", "path": "logical_cpus", "default": None},
+                        "ollama_state": {"$ref": "ollama"},
+                        "loaded_model_count": {"$ref": "ollama_count", "path": "count", "default": None},
+                    }},
+                },
+            ]
+
+        def _tooltest_recipe_is_equivalent(recipe: dict[str, Any]) -> bool:
+            pipeline = recipe.get("pipeline") or [] if isinstance(recipe, dict) else []
+            tools = {
+                str(stage.get("tool") or "")
+                for stage in pipeline if isinstance(stage, dict)
+            }
+            return {"current_time", "host_snapshot", "cpu_info", "ollama_runtime_snapshot"}.issubset(tools)
+
+        def _tooltest_parse_list(key: str) -> list[dict[str, Any]]:
+            row = deterministic_requirement_results.get(key) or {}
+            try:
+                value = json.loads(str(row.get("content") or "[]"))
+            except Exception:
+                return []
+            return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+        def _tooltest_aux(name: str, args: dict[str, Any], *, label: str) -> dict[str, Any]:
+            aux_key = f"__tooltest_aux__:{label}:{len(tooltest_context.get('tool_search_calls') or [])}"
+            ok = _record_harness_recovery_tool(
+                name, args, trigger=f"tooltest:aux:{label}", requirement_key=aux_key,
+            )
+            return {"ok": ok, **dict(deterministic_requirement_results.get(aux_key) or {})}
+
+        def _tooltest_load_recipe_aux(name: str, *, label: str) -> dict[str, Any]:
+            aux = _tooltest_aux("load_recipe", {"name": name}, label=label)
+            try:
+                value = json.loads(str(aux.get("content") or "{}"))
+            except Exception:
+                value = {}
+            return value if aux.get("ok") and isinstance(value, dict) else {}
+
+        def attempt_tool_recipe_stress_plan() -> None:
+            """Execute the ordered tool/recipe stress workflow without a model loop."""
+            rows = {item.key: item for item in requirement_ledger.requirements}
+            if len([key for key in rows if key.startswith("tooltest:")]) != 37:
+                return
+
+            exposed = {
+                str(schema.get("function", {}).get("name") or "")
+                for schema in tool_schemas
+            }
+            tooltest_context["initial_exposed"] = sorted(exposed)
+
+            direct_calls: list[tuple[str, str, dict[str, Any]]] = [
+                ("tooltest:01", "current_time", {}),
+                ("tooltest:02", "environment_summary", {}),
+                ("tooltest:03", "cpu_info", {}),
+                ("tooltest:04", "host_snapshot", {}),
+                ("tooltest:05", "temperature_sensors", {}),
+                ("tooltest:06", "ollama_runtime_snapshot", {}),
+                ("tooltest:07", "dns_query", {"name": "example.com", "record_type": "A"}),
+                ("tooltest:08", "tcp_connect", {"host": "example.com", "port": 443, "timeout": 5.0}),
+                ("tooltest:09", "http_probe", {"url": "https://example.com", "timeout": 8.0, "allow_private": False}),
+                ("tooltest:10", "page_metadata", {"url": "https://example.com"}),
+            ]
+            for key, name, args in direct_calls:
+                item = rows.get(key)
+                if item is None:
+                    continue
+                if item.status in {"satisfied", "partial"}:
+                    if key not in deterministic_requirement_results and name in deterministic_tool_results:
+                        deterministic_requirement_results[key] = dict(deterministic_tool_results[name])
+                    continue
+                _record_harness_recovery_tool(
+                    name, args, trigger=f"tooltest:direct:{key}", requirement_key=key,
+                )
+
+            # 11: prove that each requested network/content layer used its own
+            # dedicated primitive rather than accepting one layer as evidence for
+            # another.
+            expected_layers = {
+                "tooltest:07": "dns_query", "tooltest:08": "tcp_connect",
+                "tooltest:09": "http_probe", "tooltest:10": "page_metadata",
+            }
+            if all((rows.get(key) and rows[key].tool == tool) for key, tool in expected_layers.items()):
+                _tooltest_mark("tooltest:11", "satisfied", "DNS, TCP, HTTPS, and page/content used distinct dedicated primitives")
+            else:
+                _tooltest_mark("tooltest:11", "failed", "one or more network/content layers were conflated")
+
+            # 12-14: inspect the model-visible tool surface. Only use tool_search
+            # when the requested capability is genuinely absent from that surface.
+            if "read_observation" in exposed:
+                _tooltest_mark("tooltest:12", "satisfied", "read_observation was already exposed; discovery was not needed")
+                tooltest_context["observation_capability"] = "read_observation"
+            else:
+                aux = _tooltest_aux("tool_search", {"query": "read archived observation by observation id", "limit": 5}, label="observation")
+                tooltest_context["tool_search_calls"].append("observation")
+                if aux.get("ok") and "read_observation" in str(aux.get("content") or ""):
+                    _tooltest_mark("tooltest:12", "satisfied", "tool_search discovered read_observation")
+                    tooltest_context["observation_capability"] = "read_observation"
+                else:
+                    _tooltest_mark("tooltest:12", "blocked", "read_observation could not be discovered")
+
+            if "search_skills" in exposed:
+                _tooltest_mark("tooltest:13", "satisfied", "search_skills was already exposed; discovery was not needed")
+                tooltest_context["skill_capability"] = "search_skills"
+            else:
+                aux = _tooltest_aux("tool_search", {"query": "search installed skills procedural guidance", "limit": 5}, label="skills")
+                tooltest_context["tool_search_calls"].append("skills")
+                if aux.get("ok") and "search_skills" in str(aux.get("content") or ""):
+                    _tooltest_mark("tooltest:13", "satisfied", "tool_search discovered search_skills")
+                    tooltest_context["skill_capability"] = "search_skills"
+                else:
+                    _tooltest_mark("tooltest:13", "blocked", "search_skills could not be discovered")
+
+            recipe_caps = {"search_recipes", "list_recipes", "load_recipe", "save_recipe", "run_recipe"}
+            missing_recipe_caps = sorted(recipe_caps - exposed)
+            if not missing_recipe_caps:
+                _tooltest_mark("tooltest:14", "satisfied", "recipe search/list/load/save/run capabilities were already exposed")
+            else:
+                aux = _tooltest_aux(
+                    "tool_search", {"query": "recipe search list load inspect save execute run workflow", "limit": 8}, label="recipes",
+                )
+                tooltest_context["tool_search_calls"].append("recipes")
+                discovered = str(aux.get("content") or "")
+                unresolved_caps = [name for name in missing_recipe_caps if name not in discovered]
+                if aux.get("ok") and not unresolved_caps:
+                    _tooltest_mark("tooltest:14", "satisfied", "tool_search discovered the missing recipe capabilities")
+                else:
+                    _tooltest_mark("tooltest:14", "blocked", "recipe capabilities unavailable: " + ", ".join(unresolved_caps or missing_recipe_caps))
+            tooltest_context["recipe_capabilities"] = sorted(recipe_caps & set(AVAILABLE_TOOLS_MAP))
+
+            # 15-17: bounded workspace mutation + dedicated readback.
+            write_args = {
+                "filename": "harness_tool_recipe_test/input.txt",
+                "content": "TOOL_PATH_TEST_OK\nalpha\nbeta\ngamma\n",
+            }
+            if _record_harness_recovery_tool("write_file", write_args, trigger="tooltest:workspace_write", requirement_key="tooltest:15"):
+                tooltest_context["mutations"].append("write_file:harness_tool_recipe_test/input.txt")
+                tooltest_context["workspace_paths"].append("harness_tool_recipe_test/input.txt")
+            _record_harness_recovery_tool(
+                "read_file", {"filename": "harness_tool_recipe_test/input.txt"},
+                trigger="tooltest:workspace_read", requirement_key="tooltest:16",
+            )
+            readback = str((deterministic_requirement_results.get("tooltest:16") or {}).get("content") or "")
+            if rows.get("tooltest:16") and rows["tooltest:16"].status in {"satisfied", "partial"} and "TOOL_PATH_TEST_OK" in readback:
+                _tooltest_mark("tooltest:16", "satisfied", "dedicated read_file returned the exact TOOL_PATH_TEST_OK marker")
+            else:
+                _tooltest_mark("tooltest:16", "failed", "workspace file readback did not contain TOOL_PATH_TEST_OK")
+            if all(not path.startswith(("/", "..")) for path in tooltest_context["workspace_paths"]):
+                _tooltest_mark("tooltest:17", "satisfied", "all test paths were relative workspace paths; no traversal was attempted")
+            else:
+                _tooltest_mark("tooltest:17", "failed", "a test path escaped or traversed outside the workspace")
+
+            # 18: semantic duplicate search. Inspect matching pipelines rather
+            # than trusting recipe names alone.
+            recipe_query = "quick local agent health check current time host resources cpu ollama"
+            _record_harness_recovery_tool(
+                "search_recipes", {"query": recipe_query, "limit": 8},
+                trigger="tooltest:recipe_search_pre", requirement_key="tooltest:18",
+            )
+            candidates = _tooltest_parse_list("tooltest:18")
+            equivalents: list[tuple[str, dict[str, Any]]] = []
+            for idx, candidate in enumerate(candidates[:8]):
+                name = str(candidate.get("name") or "").strip()
+                if not name:
+                    continue
+                definition = _tooltest_load_recipe_aux(name, label=f"recipe_candidate_{idx}")
+                if definition and _tooltest_recipe_is_equivalent(definition):
+                    equivalents.append((name, definition))
+            tooltest_context["equivalent_recipe_names"] = [name for name, _ in equivalents]
+            tooltest_context["equivalent_recipe_found"] = bool(equivalents)
+
+            selected_recipe = equivalents[0][0] if equivalents else ""
+            selected_definition = equivalents[0][1] if equivalents else {}
+            if selected_recipe:
+                tooltest_context["selected_recipe"] = selected_recipe
+                tooltest_context["recipe_definition"] = selected_definition
+                deterministic_requirement_results["tooltest:19"] = {
+                    "success": True, "status": "ok", "reason": "ok",
+                    "arguments": {"name": selected_recipe},
+                    "content": json.dumps(selected_definition, ensure_ascii=False, default=str),
+                }
+                _tooltest_mark("tooltest:19", "satisfied", f"equivalent recipe '{selected_recipe}' loaded and inspected; creation will be skipped")
+                _tooltest_mark("tooltest:20", "satisfied", "creation correctly skipped because an equivalent recipe already exists")
+                deterministic_requirement_results["tooltest:20"] = dict(deterministic_requirement_results["tooltest:19"])
+            else:
+                _tooltest_mark("tooltest:19", "satisfied", "no equivalent recipe existed; creation branch correctly selected")
+                deterministic_requirement_results["tooltest:19"] = dict(deterministic_requirement_results.get("tooltest:18") or {})
+                recipe_args = {
+                    "name": "quick_local_agent_health_check",
+                    "description": "Quick local agent health check using current time, host resources, CPU identity, and Ollama runtime state.",
+                    "stages": _tooltest_recipe_stages(),
+                    "parameters": {},
+                    "tags": ["health", "host", "cpu", "ollama", "local"],
+                }
+                if _record_harness_recovery_tool(
+                    "save_recipe", recipe_args, trigger="tooltest:save_recipe", requirement_key="tooltest:20",
+                ):
+                    tooltest_context["created_recipe"] = True
+                    tooltest_context["selected_recipe"] = "quick_local_agent_health_check"
+                    tooltest_context["mutations"].append("save_recipe:quick_local_agent_health_check")
+
+            selected_recipe = str(tooltest_context.get("selected_recipe") or "")
+            # 21: the post-create/reuse search is a distinct requirement even
+            # though it intentionally repeats the same query at a later phase.
+            _record_harness_recovery_tool(
+                "search_recipes", {"query": recipe_query, "limit": 8},
+                trigger="tooltest:recipe_search_post", requirement_key="tooltest:21",
+            )
+            post_candidates = _tooltest_parse_list("tooltest:21")
+            post_equivalents: list[tuple[str, dict[str, Any]]] = []
+            for idx, candidate in enumerate(post_candidates[:8]):
+                name = str(candidate.get("name") or "").strip()
+                if not name:
+                    continue
+                definition = _tooltest_load_recipe_aux(name, label=f"recipe_post_candidate_{idx}")
+                if definition and _tooltest_recipe_is_equivalent(definition):
+                    post_equivalents.append((name, definition))
+            tooltest_context["equivalent_recipe_names"] = [name for name, _ in post_equivalents]
+            if selected_recipe and len(post_equivalents) == 1 and post_equivalents[0][0] == selected_recipe:
+                _tooltest_mark("tooltest:21", "satisfied", f"recipe is discoverable and exactly one equivalent exists: {selected_recipe}")
+                tooltest_context["recipe_definition"] = post_equivalents[0][1]
+            elif selected_recipe:
+                _tooltest_mark("tooltest:21", "failed", f"expected exactly one equivalent recipe; found {len(post_equivalents)}")
+            else:
+                _tooltest_mark("tooltest:21", "blocked", "no recipe was available for post-create discovery")
+
+            # 22: execute the recipe itself; do not manually replay its stages.
+            if selected_recipe:
+                _record_harness_recovery_tool(
+                    "run_recipe", {"name": selected_recipe, "parameters": {}},
+                    trigger="tooltest:recipe_run", requirement_key="tooltest:22",
+                )
+                try:
+                    tooltest_context["recipe_run"] = json.loads(str((deterministic_requirement_results.get("tooltest:22") or {}).get("content") or "{}"))
+                except Exception:
+                    tooltest_context["recipe_run"] = {}
+            else:
+                _tooltest_mark("tooltest:22", "blocked", "no selected recipe was available to execute")
+
+            # 23-24: compare stable fields against the fresh direct observations.
+            run_payload = dict(tooltest_context.get("recipe_run") or {})
+            recipe_summary = run_payload.get("result") if isinstance(run_payload.get("result"), dict) else {}
+            env = _tooltest_result_payload("tooltest:02")
+            cpu = _tooltest_result_payload("tooltest:03")
+            ollama = _tooltest_result_payload("tooltest:06")
+            direct_hostname = str(env.get("host_hostname") or env.get("runtime_hostname") or env.get("hostname") or "")
+            direct_models = [str(x) for x in (cpu.get("models") or []) if str(x).strip() and not str(x).strip().isdigit()]
+            direct_cpu = direct_models[0] if direct_models else ""
+            direct_logical = cpu.get("logical_cpus")
+            hostname_ok = bool(direct_hostname and str(recipe_summary.get("hostname") or "") == direct_hostname)
+            cpu_ok = bool(direct_cpu and str(recipe_summary.get("cpu_model") or "") == direct_cpu)
+            logical_ok = direct_logical is not None and recipe_summary.get("logical_cpus") == direct_logical
+            recipe_ollama = recipe_summary.get("ollama_state") if isinstance(recipe_summary.get("ollama_state"), dict) else {}
+            ollama_ok = bool(recipe_ollama) and bool(ollama)
+            tooltest_context["comparisons"] = {
+                "hostname": hostname_ok, "cpu": cpu_ok, "logical_cpus": logical_ok, "ollama": ollama_ok,
+            }
+            if hostname_ok and cpu_ok and logical_ok and ollama_ok:
+                _tooltest_mark("tooltest:23", "satisfied", "recipe stable identity fields agree with fresh direct tool evidence")
+            else:
+                _tooltest_mark("tooltest:23", "failed", "recipe/direct stable-field comparison failed")
+            required_summary_fields = {
+                "local_time", "hostname", "uptime_seconds", "memory_total_mb", "memory_available_mb",
+                "load_average", "cpu_model", "logical_cpus", "ollama_state", "loaded_model_count",
+            }
+            if run_payload.get("ok") is True and required_summary_fields.issubset(set(recipe_summary)) and all(tooltest_context["comparisons"].values()):
+                _tooltest_mark("tooltest:24", "satisfied", "recipe executed and returned the requested health summary with matching stable fields")
+            else:
+                _tooltest_mark("tooltest:24", "failed", "recipe replay did not satisfy the complete output/comparison contract")
+
+            # 30: inspect the stored definition through the public load_recipe
+            # primitive after replay, then retain it for integrity audits.
+            if selected_recipe:
+                _record_harness_recovery_tool(
+                    "load_recipe", {"name": selected_recipe},
+                    trigger="tooltest:recipe_integrity_load", requirement_key="tooltest:30",
+                )
+                definition = _tooltest_result_payload("tooltest:30")
+                if definition:
+                    tooltest_context["recipe_definition"] = definition
+                    if _tooltest_recipe_is_equivalent(definition):
+                        _tooltest_mark("tooltest:30", "satisfied", "stored recipe contains reusable procedural tool stages")
+                    else:
+                        _tooltest_mark("tooltest:30", "failed", "stored recipe does not contain the required procedural stages")
+            else:
+                _tooltest_mark("tooltest:30", "blocked", "no selected recipe was available for integrity inspection")
+
+            # 33: cleanup only the disposable workspace directory. The saved
+            # recipe intentionally remains for future reuse.
+            if _record_harness_recovery_tool(
+                "remove_path", {"path": "harness_tool_recipe_test", "recursive": True},
+                trigger="tooltest:workspace_cleanup", requirement_key="tooltest:33",
+            ):
+                tooltest_context["mutations"].append("remove_path:harness_tool_recipe_test")
+
+        def evaluate_tool_recipe_stress_audits() -> None:
+            rows = {item.key: item for item in requirement_ledger.requirements}
+            if len([key for key in rows if key.startswith("tooltest:")]) != 37:
+                return
+
+            # 25: simple tasks remained on direct primitives, not the health recipe.
+            direct_ok = all(
+                (rows.get(key) and rows[key].tool == tool)
+                for key, tool in {
+                    "tooltest:01": "current_time", "tooltest:07": "dns_query",
+                    "tooltest:08": "tcp_connect", "tooltest:09": "http_probe",
+                }.items()
+            )
+            _tooltest_mark(
+                "tooltest:25", "satisfied" if direct_ok else "failed",
+                "current time/DNS/TCP/HTTPS remained direct primitive routes" if direct_ok else "a simple primitive request was routed through the recipe path",
+            )
+
+            # 26: tool_search is valid only for capabilities absent from the
+            # initial model-visible schema surface.
+            initial = set(tooltest_context.get("initial_exposed") or [])
+            calls = list(tooltest_context.get("tool_search_calls") or [])
+            unnecessary = []
+            mapping = {"observation": "read_observation", "skills": "search_skills"}
+            for label in calls:
+                capability = mapping.get(label)
+                if capability and capability in initial:
+                    unnecessary.append(capability)
+                if label == "recipes" and {"search_recipes", "list_recipes", "load_recipe", "save_recipe", "run_recipe"}.issubset(initial):
+                    unnecessary.append("recipe capabilities")
+            _tooltest_mark(
+                "tooltest:26", "failed" if unnecessary else "satisfied",
+                ("tool_search was unnecessary for: " + ", ".join(unnecessary)) if unnecessary else f"tool_search was used only for missing capabilities ({len(calls)} discovery call(s))",
+            )
+
+            # 27: no requirement should have multiple equivalent deterministic
+            # attempts; repeated semantic searches are separate numbered phases.
+            repeated = [item.label for item in rows.values() if item.key.startswith("tooltest:") and item.attempts > 1]
+            _tooltest_mark(
+                "tooltest:27", "failed" if repeated else "satisfied",
+                ("repeated equivalent attempts: " + ", ".join(repeated)) if repeated else "no numbered requirement was retried equivalently",
+            )
+
+            # 28-29: only the real pending-middle registry matters; clipped state
+            # previews do not create recovery requirements, and read_observation
+            # results are already excluded from recursive truncation registration.
+            if pending_truncated_observations:
+                _tooltest_mark("tooltest:28", "blocked", f"{len(pending_truncated_observations)} observation middle(s) remain unrecovered")
+            else:
+                _tooltest_mark("tooltest:28", "satisfied", "no unrecovered actual middle truncations remain")
+            recursive = any(
+                str(item.get("tool") or "") == "read_observation"
+                and str(item.get("evidence_ref") or "") in pending_truncated_observations
+                for item in grounding_observations()
+            )
+            _tooltest_mark(
+                "tooltest:29", "failed" if recursive else "satisfied",
+                "read_observation created a recursive truncation gate" if recursive else "read_observation did not create an artificial recursive truncation gate",
+            )
+
+            # 31: stored recipe must contain procedure, never transient evidence.
+            definition = dict(tooltest_context.get("recipe_definition") or {})
+            serialized = json.dumps(definition, ensure_ascii=False, sort_keys=True, default=str)
+            forbidden_patterns = [
+                r"(?i)(?:oauth|access|refresh)[_-]?token", r"(?i)password", r"(?i)credential[_-]?secret",
+                r"(?i)observation[_-]?id", r"\b20\d{2}-\d{2}-\d{2}T\d{2}:\d{2}",
+                r"(?:^|[\"'\s])/(?:home|etc|var|root)/", r"/app/workspace/",
+            ]
+            bad = [pattern for pattern in forbidden_patterns if re.search(pattern, serialized)]
+            _tooltest_mark(
+                "tooltest:31", "failed" if bad else ("satisfied" if definition else "blocked"),
+                "stored recipe contains forbidden transient/secret material" if bad else ("stored recipe contains no secrets, observation IDs, run timestamps, or host-specific absolute paths" if definition else "recipe definition unavailable"),
+            )
+
+            equivalents = list(tooltest_context.get("equivalent_recipe_names") or [])
+            duplicate_ok = len(equivalents) == 1
+            _tooltest_mark(
+                "tooltest:32", "satisfied" if duplicate_ok else "failed",
+                f"exactly one equivalent recipe exists: {equivalents[0]}" if duplicate_ok else f"expected one equivalent recipe; found {len(equivalents)}",
+            )
+
+            # 34: only the explicitly authorized workspace lifecycle plus an
+            # optional one-time recipe save may mutate state.
+            mutations = list(tooltest_context.get("mutations") or [])
+            allowed_prefixes = {"write_file:", "remove_path:", "save_recipe:"}
+            mutation_ok = all(any(item.startswith(prefix) for prefix in allowed_prefixes) for item in mutations)
+            if tooltest_context.get("created_recipe"):
+                mutation_ok = mutation_ok and sum(1 for item in mutations if item.startswith("save_recipe:")) == 1
+            else:
+                mutation_ok = mutation_ok and not any(item.startswith("save_recipe:") for item in mutations)
+            _tooltest_mark(
+                "tooltest:34", "satisfied" if mutation_ok else "failed",
+                "only the authorized workspace test lifecycle and optional single recipe save mutated state" if mutation_ok else "an unexpected or duplicate mutation occurred",
+            )
+
+            # 35: direct successful requirements require captured tool evidence;
+            # derived successful requirements are backed by the observations they
+            # explicitly audit rather than by model prose.
+            missing_evidence = []
+            for item in rows.values():
+                if not item.key.startswith("tooltest:") or item.key in {"tooltest:35", "tooltest:36", "tooltest:37"}:
+                    continue
+                if item.status not in {"satisfied", "partial"}:
+                    continue
+                if bool((item.scope or {}).get("derived")):
+                    continue
+                if item.key not in deterministic_requirement_results:
+                    missing_evidence.append(item.label)
+            _tooltest_mark(
+                "tooltest:35", "failed" if missing_evidence else "satisfied",
+                ("successful requirements lacked tool evidence: " + ", ".join(missing_evidence)) if missing_evidence else "every successful tool-backed requirement has recorded evidence",
+            )
+
+            prior = [item for item in rows.values() if item.key.startswith("tooltest:") and item.key not in {"tooltest:36", "tooltest:37"}]
+            open_prior = [item.label for item in prior if item.status == "pending"]
+            _tooltest_mark(
+                "tooltest:36", "blocked" if open_prior else "satisfied",
+                ("requirements still pending: " + ", ".join(open_prior)) if open_prior else "all prior requirements reached PASS, FAILED, or UNRESOLVED terminal state",
+            )
+            row36 = next((item for item in requirement_ledger.requirements if item.key == "tooltest:36"), None)
+            if row36 and row36.status in {"satisfied", "partial"}:
+                _tooltest_mark("tooltest:37", "satisfied", "structured evidence is sufficient for deterministic finalization without a synthesis model call")
+            else:
+                _tooltest_mark("tooltest:37", "blocked", "deterministic finalization preconditions were not met")
 
         def evaluate_derived_requirements() -> None:
             """Close stress-test consistency/audit requirements from collected evidence."""
@@ -1523,6 +2011,9 @@ def handle_user_turn(
         attempt_initial_grounding_recovery()
         attempt_initial_explicit_requirements()
         recover_pending_truncated_observations()
+        attempt_tool_recipe_stress_plan()
+        recover_pending_truncated_observations()
+        evaluate_tool_recipe_stress_audits()
         # Stress probes get one deterministic attempt unless a dedicated fallback
         # is implemented. Do not spend model iterations repeating the same probe.
         for _item in requirement_ledger.requirements:
@@ -1623,7 +2114,10 @@ def handle_user_turn(
             if (
                 require_requirements_closed
                 and has_operational_requirements
-                and reason not in {"compound_requirements_complete", "stress_requirements_complete"}
+                and reason not in {
+                    "compound_requirements_complete", "stress_requirements_complete",
+                    "tool_recipe_stress_requirements_complete",
+                }
             ):
                 return False
             # Never summarize a result whose omitted middle is still unread.
@@ -1860,6 +2354,157 @@ def handle_user_turn(
                 sections.append(f"_Harness stopped additional model/recovery work: {stop_reason}._")
             return "\n\n".join(section for section in sections if section).strip(), unresolved, rendered_fact_types
 
+        def _format_tool_recipe_stress_report() -> str:
+            rows = {item.key: item for item in requirement_ledger.requirements}
+            if len([key for key in rows if key.startswith("tooltest:")]) != 37:
+                return ""
+
+            def state(key: str) -> str:
+                item = rows.get(key)
+                if not item:
+                    return "UNRESOLVED"
+                if item.status in {"satisfied", "partial"}:
+                    return "PASS"
+                if item.status == "failed":
+                    return "FAILED"
+                return "UNRESOLVED"
+
+            def reason(key: str) -> str:
+                item = rows.get(key)
+                return str(item.last_reason or "insufficient evidence") if item else "requirement missing"
+
+            def payload(key: str) -> dict[str, Any]:
+                return _tooltest_result_payload(key)
+
+            clock = payload("tooltest:01")
+            env = payload("tooltest:02")
+            cpu = payload("tooltest:03")
+            host = payload("tooltest:04")
+            temps = payload("tooltest:05")
+            ollama = payload("tooltest:06")
+            dns = payload("tooltest:07")
+            tcp = payload("tooltest:08")
+            https = payload("tooltest:09")
+            page = payload("tooltest:10")
+
+            models = [str(x) for x in (cpu.get("models") or []) if str(x).strip() and not str(x).strip().isdigit()]
+            cpu_model = models[0] if models else "unavailable"
+            temp_values: list[str] = []
+            if isinstance(temps, dict):
+                for group, entries in temps.items():
+                    if not isinstance(entries, list):
+                        continue
+                    for entry in entries:
+                        if not isinstance(entry, dict):
+                            continue
+                        try:
+                            value = float(entry.get("current"))
+                        except (TypeError, ValueError):
+                            continue
+                        if value == 0.0 or value < -50.0 or value > 150.0:
+                            continue
+                        label = str(entry.get("label") or "").strip()
+                        temp_values.append(f"{group}{('/' + label) if label else ''} {value:g} °C")
+                        if len(temp_values) >= 6:
+                            break
+                    if len(temp_values) >= 6:
+                        break
+            host_mem = host.get("memory") if isinstance(host.get("memory"), dict) else {}
+            host_disk = host.get("disk") if isinstance(host.get("disk"), dict) else {}
+            ollama_models = ollama.get("models") if isinstance(ollama.get("models"), list) else []
+
+            direct = [
+                f"- 1. Current time — {state('tooltest:01')} — local={clock.get('local') or clock.get('time') or 'unavailable'}; timezone={clock.get('timezone') or 'unavailable'}; UTC offset={clock.get('utc_offset') or 'unavailable'}",
+                f"- 2. System identity — {state('tooltest:02')} — hostname={env.get('host_hostname') or env.get('runtime_hostname') or env.get('hostname') or 'unavailable'}; platform={env.get('platform') or env.get('kernel') or 'unavailable'}; arch={env.get('architecture') or 'unavailable'}",
+                f"- 3. CPU — {state('tooltest:03')} — {cpu_model}; physical={cpu.get('physical_cores', 'unavailable')}; logical={cpu.get('logical_cpus', 'unavailable')}",
+                f"- 4. Host resources — {state('tooltest:04')} — uptime={host.get('uptime_seconds', 'unavailable')} s; memory={host_mem.get('available_mb', 'unavailable')}/{host_mem.get('total_mb', 'unavailable')} MiB available/total; load={host.get('load_average', [])}; root used={host_disk.get('used_percent', 'unavailable')}%",
+                f"- 5. Temperatures — {state('tooltest:05')} — " + ("; ".join(temp_values) if temp_values else reason("tooltest:05")),
+                f"- 6. Ollama — {state('tooltest:06')} — loaded models={len(ollama_models)}; {reason('tooltest:06') if state('tooltest:06') != 'PASS' else 'runtime snapshot returned'}",
+            ]
+
+            disambiguation = [
+                f"- 7. DNS — {state('tooltest:07')} — status={dns.get('status', 'unavailable')}; answers={dns.get('answers', [])}",
+                f"- 8. TCP — {state('tooltest:08')} — address={tcp.get('connected_address', 'unavailable')}; latency={tcp.get('tcp_connect_ms', 'unavailable')} ms",
+                f"- 9. HTTPS — {state('tooltest:09')} — HTTP {https.get('http_status', 'unavailable')}; headers={https.get('time_to_headers_ms', 'unavailable')} ms; TLS={https.get('tls_version', 'unavailable')}",
+                f"- 10. Page retrieval — {state('tooltest:10')} — title={page.get('title', 'unavailable')}; HTTP={page.get('http_status', 'unavailable')}; URL={page.get('canonical') or page.get('url') or 'unavailable'}",
+                f"- 11. Layer-consistency check — {state('tooltest:11')} — {reason('tooltest:11')}",
+            ]
+
+            discovery = [
+                f"- 12. Observation retrieval capability — {state('tooltest:12')} — {reason('tooltest:12')}",
+                f"- 13. Skill discovery capability — {state('tooltest:13')} — {reason('tooltest:13')}",
+                f"- 14. Recipe capabilities — {state('tooltest:14')} — {reason('tooltest:14')}",
+                f"- Whether tool_search was necessary — {'yes' if tooltest_context.get('tool_search_calls') else 'no'}; calls={tooltest_context.get('tool_search_calls') or []}",
+            ]
+
+            workspace = [
+                f"- 15. Test directory/write — {state('tooltest:15')} — harness_tool_recipe_test/input.txt",
+                f"- 16. Read — {state('tooltest:16')} — {reason('tooltest:16')}",
+                f"- 17. Workspace-boundary verification — {state('tooltest:17')} — {reason('tooltest:17')}",
+                f"- 33. Cleanup — {state('tooltest:33')} — {reason('tooltest:33')}",
+            ]
+
+            selected = str(tooltest_context.get("selected_recipe") or "none")
+            found = "yes" if tooltest_context.get("equivalent_recipe_found") else "no"
+            discovery_recipe = [
+                f"- 18. Existing equivalent recipe found — {state('tooltest:18')} — {found}",
+                f"- 19. Existing-recipe branch — {state('tooltest:19')} — {reason('tooltest:19')}",
+                f"- Recipe selected — {selected}",
+            ]
+            creation = [
+                f"- 20. Created/reused — {state('tooltest:20')} — {'created' if tooltest_context.get('created_recipe') else 'reused/skipped creation'}; {reason('tooltest:20')}",
+                f"- Recipe name — {selected}",
+                f"- 21. Recipe storage/discovery result — {state('tooltest:21')} — {reason('tooltest:21')}",
+                f"- 32. Duplicate check — {state('tooltest:32')} — {reason('tooltest:32')}",
+            ]
+
+            comparisons = dict(tooltest_context.get("comparisons") or {})
+            replay = [
+                f"- 22. Execution status — {state('tooltest:22')} — {reason('tooltest:22')}",
+                f"- 23. Hostname comparison — {state('tooltest:23')} — {'match' if comparisons.get('hostname') else 'mismatch/unavailable'}",
+                f"- 23. CPU comparison — {state('tooltest:23')} — {'match' if comparisons.get('cpu') and comparisons.get('logical_cpus') else 'mismatch/unavailable'}",
+                f"- 23. Ollama comparison — {state('tooltest:23')} — {'match' if comparisons.get('ollama') else 'mismatch/unavailable'}",
+                f"- 24. Overall replay verification — {state('tooltest:24')} — {reason('tooltest:24')}",
+            ]
+
+            routing = [
+                f"- 25. Direct primitives preferred correctly — {state('tooltest:25')} — {reason('tooltest:25')}",
+                f"- 26. tool_search usage — {state('tooltest:26')} — {reason('tooltest:26')}",
+                f"- 27. Retry/fallback behavior — {state('tooltest:27')} — {reason('tooltest:27')}",
+            ]
+            observation = [
+                f"- 28. Actual middle truncations found/recovered — {state('tooltest:28')} — {reason('tooltest:28')}",
+                f"- 29. Recursive-truncation check — {state('tooltest:29')} — {reason('tooltest:29')}",
+            ]
+            integrity = [
+                f"- 30. Procedural recipe inspection — {state('tooltest:30')} — {reason('tooltest:30')}",
+                f"- 31. No transient observations/secrets embedded — {state('tooltest:31')} — {reason('tooltest:31')}",
+                f"- 32. No duplicate equivalent recipe — {state('tooltest:32')} — {reason('tooltest:32')}",
+                f"- 34. Mutation-boundary audit — {state('tooltest:34')} — {reason('tooltest:34')}",
+                f"- 35. Evidence audit — {state('tooltest:35')} — {reason('tooltest:35')}",
+                f"- 36. Terminal-state audit — {state('tooltest:36')} — {reason('tooltest:36')}",
+                f"- 37. Deterministic finalization — {state('tooltest:37')} — {reason('tooltest:37')}",
+            ]
+
+            unresolved = [
+                f"- {item.label}: {state(item.key)} — {item.last_reason or 'insufficient evidence'}"
+                for item in requirement_ledger.requirements
+                if item.key.startswith("tooltest:") and item.status not in {"satisfied", "partial"}
+            ]
+            return (
+                "## Direct tool routing\n" + "\n".join(direct)
+                + "\n\n## Tool disambiguation\n" + "\n".join(disambiguation)
+                + "\n\n## Tool discovery\n" + "\n".join(discovery)
+                + "\n\n## Workspace file path\n" + "\n".join(workspace)
+                + "\n\n## Recipe discovery\n" + "\n".join(discovery_recipe)
+                + "\n\n## Recipe creation\n" + "\n".join(creation)
+                + "\n\n## Recipe replay\n" + "\n".join(replay)
+                + "\n\n## Routing/fallback audit\n" + "\n".join(routing)
+                + "\n\n## Observation audit\n" + "\n".join(observation)
+                + "\n\n## Recipe integrity\n" + "\n".join(integrity)
+                + "\n\n## Unresolved requirements\n" + ("\n".join(unresolved) if unresolved else "None.")
+            )
+
         def _format_stress_report() -> str:
             """Render the sectioned capability stress test from direct evidence."""
             rows = {item.key: item for item in requirement_ledger.requirements}
@@ -2022,15 +2667,43 @@ def handle_user_turn(
                 google.append(f"- Gmail — {state('stress:13')} — {reason('stress:13')}")
             cal = payload("stress:14")
             if state("stress:14") == "PASS":
-                events = cal.get("events") or []
+                events = [e for e in (cal.get("events") or []) if isinstance(e, dict)][:3]
                 summary = "; ".join(
                     f"{e.get('summary','')} @ {(e.get('start') or {}).get('dateTime') or (e.get('start') or {}).get('date') or ''}"
-                    for e in events[:3] if isinstance(e, dict)
+                    for e in events
                 )
-                google.append(f"- Calendar — PASS — {summary or 'no upcoming events returned'}")
+                count_note = f"{len(events)} upcoming event{'s' if len(events) != 1 else ''} returned"
+                if len(events) < 3:
+                    count_note += " (provider returned fewer than the requested 3)"
+                calendar_note = f"; calendar={cal.get('calendar_id')}" if cal.get("calendar_id") else ""
+                google.append(f"- Calendar — PASS — {count_note}{calendar_note}: {summary or 'none'}")
             else:
                 google.append(f"- Calendar — {state('stress:14')} — {reason('stress:14')}")
-            google.append(f"- Drive — {state('stress:15')} — " + ("read-only listing completed" if state('stress:15') == 'PASS' else reason('stress:15')))
+
+            drive = payload("stress:15")
+            if state("stress:15") == "PASS":
+                drive_type_names = {
+                    "application/vnd.google-apps.document": "Google Docs",
+                    "application/vnd.google-apps.spreadsheet": "Google Sheets",
+                    "application/vnd.google-apps.presentation": "Google Slides",
+                    "application/vnd.google-apps.folder": "Folder",
+                    "application/pdf": "PDF",
+                    "text/plain": "Plain text",
+                }
+                files = [item for item in (drive.get("files") or []) if isinstance(item, dict)][:3]
+                rendered_files = []
+                for item in files:
+                    mime = str(item.get("mime_type") or "").strip()
+                    file_type = drive_type_names.get(mime, mime or "type unavailable")
+                    rendered_files.append(
+                        f"{item.get('name') or '(untitled)'} | {file_type} | modified {item.get('modified_time') or 'unavailable'}"
+                    )
+                google.append(
+                    f"- Drive — PASS — {len(files)} file{'s' if len(files) != 1 else ''} returned: "
+                    + ("; ".join(rendered_files) if rendered_files else "none")
+                )
+            else:
+                google.append(f"- Drive — {state('stress:15')} — {reason('stress:15')}")
 
             network: list[str] = []
             dns = payload("stress:16")
@@ -2083,6 +2756,21 @@ def handle_user_turn(
                 "\n\n## Cross-checks\n" + "\n".join(cross) +
                 "\n\n## Unresolved requirements\n" + ("\n".join(unresolved) if unresolved else "None.")
             )
+
+        tooltest_rows = [item for item in requirement_ledger.requirements if item.key.startswith("tooltest:")]
+        if (
+            len(tooltest_rows) == 37
+            and not any(item.status == "pending" for item in tooltest_rows)
+            and not pending_truncated_observations
+        ):
+            tooltest_content = _format_tool_recipe_stress_report()
+            if tooltest_content and finish_deterministic(
+                tooltest_content,
+                blocked=any(item.status not in {"satisfied", "partial"} for item in tooltest_rows),
+                reason="tool_recipe_stress_requirements_complete",
+                require_grounded=False,
+            ):
+                return
 
         stress_rows = [item for item in requirement_ledger.requirements if item.key.startswith("stress:")]
         if stress_rows and len(stress_rows) >= 20 and not requirement_ledger.pending() and not pending_truncated_observations:

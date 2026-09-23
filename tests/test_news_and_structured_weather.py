@@ -114,6 +114,31 @@ def test_news_renderer_only_uses_returned_rows():
     assert is_simple_headline_request("Fix the latest-headlines formatter") is False
 
 
+
+
+def test_news_renderer_sorts_newest_first_before_applying_limit():
+    content = json.dumps([
+        {"title": "Sep 19", "url": "https://example.com/19", "source": "A", "date": "Sat, 19 Sep 2026 20:32:34 GMT"},
+        {"title": "Sep 16", "url": "https://example.com/16", "source": "B", "date": "Wed, 16 Sep 2026 22:05:12 GMT"},
+        {"title": "Sep 17", "url": "https://example.com/17", "source": "C", "date": "Thu, 17 Sep 2026 23:49:41 GMT"},
+        {"title": "Sep 20", "url": "https://example.com/20", "source": "D", "date": "Sun, 20 Sep 2026 08:00:00 GMT"},
+    ])
+    rendered = format_news_results(content, limit=3, location="London, Ontario, Canada")
+    assert "Sep 20" in rendered and "Sep 19" in rendered and "Sep 17" in rendered
+    assert "Sep 16" not in rendered
+    assert rendered.index("Sep 20") < rendered.index("Sep 19") < rendered.index("Sep 17")
+
+
+def test_news_renderer_deduplicates_before_cardinality_limit():
+    content = json.dumps([
+        {"title": "Same", "url": "https://example.com/a", "source": "A", "date": "2026-09-20T10:00:00Z"},
+        {"title": "Same", "url": "https://example.com/a", "source": "A", "date": "2026-09-20T10:00:00Z"},
+        {"title": "Other", "url": "https://example.com/b", "source": "B", "date": "2026-09-19T10:00:00Z"},
+    ])
+    rendered = format_news_results(content, limit=2)
+    assert rendered.count("https://example.com/a") == 1
+    assert "Other" in rendered
+
 def test_news_grounding_rejects_wrong_location_query():
     req = "what are the latest headlines for London ON"
     frame = derive_task_frame(req)
