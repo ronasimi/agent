@@ -297,15 +297,43 @@ def is_simple_weather_request(user_request: str) -> bool:
 
 
 def format_weather_recovery(result: dict[str, Any], user_request: str) -> str:
-    """Render provider-backed weather without asking a small model to reshape parallel arrays."""
+    """Render provider-backed weather without asking a small model to reshape data.
+
+    Structured Open-Meteo data is preferred. If that path failed but the
+    independent search+browse fallback was positively weather-grounded, render
+    its bounded verified source excerpt instead of silently dropping weather
+    from a compound answer.
+    """
     payload = result.get("result") if isinstance(result, dict) else None
     if not isinstance(payload, dict):
         return ""
     forecast = payload.get("forecast")
     place = payload.get("place") or {}
-    location = str(payload.get("location") or "").strip()
+    recovery = result.get("grounding_recovery") if isinstance(result, dict) else {}
+    recovery = recovery if isinstance(recovery, dict) else {}
+    location = str(payload.get("location") or recovery.get("location") or "").strip()
     if not isinstance(forecast, dict):
-        return ""
+        verification = str(payload.get("verification") or "").strip()
+        if not verification:
+            return ""
+        # browse_url emits URL/Content-Type/Extraction headers followed by the
+        # bounded source passages. Keep the useful evidence compact and do not
+        # ask the generation model to paraphrase untrusted page text.
+        lines = [line.strip() for line in verification.splitlines() if line.strip()]
+        source_url = next((line[4:].strip() for line in lines if line.startswith("URL:")), "")
+        body = [
+            line for line in lines
+            if not line.startswith(("URL:", "Content-Type:", "Extraction:"))
+        ]
+        excerpt = " ".join(body)
+        excerpt = re.sub(r"\s+", " ", excerpt).strip()[:1200]
+        if not excerpt:
+            return ""
+        title = f"**Current weather for {location or 'the requested location'}**"
+        rendered = [title, "", excerpt]
+        if source_url:
+            rendered.extend(["", f"Source: {source_url} (verified web fallback)."])
+        return "\n".join(rendered)
     location = _canonical_place(place, location)
     if _is_current_weather_request(user_request):
         current_rendered = _format_current_weather(forecast, location)

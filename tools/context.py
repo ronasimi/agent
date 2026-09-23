@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 _MESSAGE_FIELDS = {"role", "content", "name", "tool_name", "tool_calls", "tool_call_id", "images"}
 IMAGE_TOKEN_ESTIMATE = 1200
@@ -373,29 +373,42 @@ def compact_working_tool_tail(
     tail: list[dict[str, Any]],
     *,
     keep_tool_results: int = 2,
+    archive_tool_result: Callable[[str, str, str], str] | None = None,
+    max_archived_results: int = 4,
+    preview_chars: int = 180,
 ) -> list[dict[str, Any]]:
-    """Keep only the most recent complete tool transactions plus control notes.
+    """Tier compact a live tool tail without breaking tool transactions.
 
-    Older successful observations belong in the persisted evidence digest.  This
-    prevents every raw tool result from being re-ingested on every model step.
-    Assistant tool-call messages are retained when one of their tool_call_ids is
-    needed by a kept tool result.
+    Tier 0 keeps the newest ``keep_tool_results`` verbatim. Tier 1 can replace
+    the next ``max_archived_results`` older results with tiny durable observation
+    handles when ``archive_tool_result`` is supplied. Anything older is dropped
+    because canonical working state/evidence already supersedes it. This retains
+    recoverability while avoiding repeated ingestion of bulky observations.
+
+    When no archive callback is supplied the function preserves the historical
+    behavior: only the newest raw tool transactions are kept.
     """
     if not tail:
         return []
     keep_tool_results = max(1, int(keep_tool_results))
+    max_archived_results = max(0, int(max_archived_results))
+    preview_chars = max(40, min(int(preview_chars), 600))
     tool_indexes = [i for i, msg in enumerate(tail) if msg.get("role") == "tool"]
     if len(tool_indexes) <= keep_tool_results:
         return [model_message(msg) for msg in tail]
 
-    selected_tool_indexes = set(tool_indexes[-keep_tool_results:])
+    raw_indexes = set(tool_indexes[-keep_tool_results:])
+    archive_indexes: set[int] = set()
+    if archive_tool_result is not None and max_archived_results:
+        archive_indexes = set(tool_indexes[max(0, len(tool_indexes) - keep_tool_results - max_archived_results):-keep_tool_results])
+    retained_indexes = raw_indexes | archive_indexes
     latest_media_index = next((i for i in range(len(tail) - 1, -1, -1) if tail[i].get("images")), None)
     needed_ids = {
         str(tail[i].get("tool_call_id") or "")
-        for i in selected_tool_indexes
+        for i in retained_indexes
         if tail[i].get("tool_call_id")
     }
-    earliest_tool = min(selected_tool_indexes)
+    earliest_tool = min(retained_indexes or raw_indexes)
     kept: list[dict[str, Any]] = []
     for i, raw in enumerate(tail):
         msg = model_message(raw)
@@ -404,8 +417,25 @@ def compact_working_tool_tail(
             kept.append(msg)
             continue
         if role == "tool":
-            if i in selected_tool_indexes:
+            if i in raw_indexes:
                 kept.append(msg)
+            elif i in archive_indexes and archive_tool_result is not None:
+                content = str(msg.get("content") or "")
+                tool_name = str(msg.get("tool_name") or raw.get("name") or "tool")
+                call_id = str(msg.get("tool_call_id") or "")
+                observation_id = str(raw.get("_observation_id") or "").strip()
+                if not observation_id:
+                    observation_id = archive_tool_result(tool_name, content, call_id)
+                if observation_id:
+                    preview = " ".join(content.split())[:preview_chars]
+                    compact = dict(msg)
+                    compact["content"] = (
+                        f"[Harness microcompacted tool result: tool={tool_name}; chars={len(content)}; "
+                        f"observation_id={observation_id}. Retrieve exact content with "
+                        f"read_observation(observation_id='{observation_id}'). "
+                        f"Preview: {preview}]"
+                    )
+                    kept.append(compact)
             continue
         if role == "assistant" and msg.get("tool_calls"):
             calls = []
@@ -418,10 +448,57 @@ def compact_working_tool_tail(
                 clone["tool_calls"] = calls
                 kept.append(clone)
             continue
-        # Keep only recent harness-control/media messages.  Old assistant prose
+        # Keep only recent harness-control/media messages. Old assistant prose
         # and corrections are superseded by canonical state + evidence digest.
         if i >= earliest_tool and role == "user":
             kept.append(msg)
         elif i >= earliest_tool and role == "assistant" and msg.get("content"):
             kept.append(msg)
     return kept
+
+
+
+def microcompact_history_for_summary(
+    messages: list[dict[str, Any]],
+    *,
+    keep_tool_results: int = 2,
+    preview_chars: int = 240,
+) -> list[dict[str, Any]]:
+    """Shrink old tool bodies before background rolling-summary inference.
+
+    The original rows remain durable in chat history. This only reduces the
+    transient compaction prompt, preserving the newest tool results verbatim and
+    replacing older ones with a status/size/preview marker. If a normal bounded
+    result already references a durable observation, that handle is retained.
+    """
+    if not messages:
+        return []
+    keep_tool_results = max(0, int(keep_tool_results))
+    preview_chars = max(80, min(int(preview_chars), 800))
+    tool_indexes = [i for i, msg in enumerate(messages) if msg.get("role") == "tool"]
+    raw_indexes = set(tool_indexes[-keep_tool_results:]) if keep_tool_results else set()
+    result: list[dict[str, Any]] = []
+    observation_re = re.compile(r"(?:observation_id=|observation\s+)([0-9a-f]{16,64})", flags=re.I)
+    for i, raw in enumerate(messages):
+        msg = dict(raw)
+        if msg.get("role") != "tool" or i in raw_indexes:
+            result.append(msg)
+            continue
+        content = str(msg.get("content") or "")
+        if estimate_tokens(content) <= 160:
+            result.append(msg)
+            continue
+        tool_name = str(msg.get("tool_name") or msg.get("name") or "tool")
+        status_line = content.splitlines()[0][:160] if content else ""
+        obs = observation_re.search(content)
+        observation = f"; observation_id={obs.group(1)}" if obs else ""
+        flat = " ".join(content.split())
+        head = flat[: preview_chars // 2]
+        tail = flat[-(preview_chars - len(head)):] if len(flat) > len(head) else ""
+        preview = head + (" … " + tail if tail else "")
+        msg["content"] = (
+            f"[Harness summary microcompaction: tool={tool_name}; chars={len(content)}{observation}; "
+            f"status={status_line!r}; preview={preview!r}]"
+        )
+        result.append(msg)
+    return result

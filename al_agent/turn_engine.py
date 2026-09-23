@@ -15,7 +15,7 @@ from typing import Any
 
 from tools import (
     AVAILABLE_TOOLS_MAP, TOOL_METADATA, adapt_tool_schemas_for_qwen, get_conversation_summary, get_tool_schema,
-    normalize_arguments, select_tool_schemas, _load_chat_history_from_db,
+    normalize_arguments, select_tool_schemas, store_tool_observation, _load_chat_history_from_db,
 )
 from tools.context import build_active_messages, compact_working_tool_tail, estimate_tokens, fit_tool_loop_messages, model_message
 from tools.loop_validator import (
@@ -35,6 +35,7 @@ from tools.recipe_learning import handle_recipe_confirmation, maybe_create_recip
 from tools.pipeline import execute_pipeline
 from tools.recipe_store import check_recipes_for_task, render_recipe_preflight
 from tools.reflection import render_relevant_reflections
+from tools.skills import render_relevant_skill_index
 from tools.security import arguments_reference_sensitive_path, redact_secrets, user_explicitly_requested_sensitive_access
 from tools.runtime import create_singleton_job, record_monitor_state, utc_now
 from tools.conversation_context import get_active_conversation_id
@@ -47,7 +48,7 @@ from tools.user_profile import get_relevant_user_prompt_context, get_user_locati
 from tools.weather import format_weather_recovery, is_simple_weather_request
 from tools.web import (
     format_encyclopedia_result, format_news_no_results, format_news_provider_error, format_news_results,
-    is_simple_encyclopedic_request, is_simple_headline_request, news_search_is_empty,
+    is_simple_encyclopedic_request, is_simple_headline_request, news_search_is_empty, requested_headline_limit,
 )
 
 from .runtime_output import OperationStatus, log_perf_stats
@@ -325,6 +326,18 @@ def handle_user_turn(
                 else []
             )
 
+        # Progressive textual skills contribute only metadata to the prompt. Full
+        # instructions are lazy-loaded through load_skill when the model decides
+        # they are relevant. Compound requirement-led turns stay schema-minimal.
+        skill_index = render_relevant_skill_index(user_input, limit=3)
+        if skill_index and not (REQUIREMENT_LED_SCHEMA_ONLY and len(required_tools) >= 2):
+            if "load_skill" not in {str(x.get("function", {}).get("name") or "") for x in tool_schemas}:
+                schema = get_tool_schema("load_skill")
+                if schema and turn_tool_policy.allowed("load_skill", TOOL_METADATA.get("load_skill", {})) and len(tool_schemas) < REQUIREMENT_TOOL_CAP:
+                    tool_schemas.append(schema)
+        else:
+            skill_index = ""
+
         # Put deterministic completion requirements first on iteration one too,
         # not only after a tool result, improving 2B/4B tool-choice reliability.
         _refresh_requirement_tool_schemas(tool_schemas, requirement_ledger, turn_tool_policy)
@@ -364,6 +377,8 @@ def handle_user_turn(
         reflection_context = render_relevant_reflections(get_active_conversation_id(), user_input, limit=2)
         if reflection_context:
             request_context.append(reflection_context)
+        if skill_index:
+            request_context.append(skill_index)
         if detected_images:
             request_context.append(
                 f"[Harness: {len(detected_images)} user-provided image(s) are already attached to this message. "
@@ -473,6 +488,18 @@ def handle_user_turn(
         turn_prefix: list[dict[str, Any]] = []
         tool_prompt_tokens = 0
         turn_tail: list[dict[str, Any]] = []
+        microcompact_observation_cache: dict[str, str] = {}
+
+        def archive_microcompact_tool_result(tool_name: str, content: str, call_id: str) -> str:
+            # Reuse a durable observation already created by the normal bounded
+            # result path; otherwise archive once per live transaction.
+            existing = re.search(r"(?:observation_id=|observation\s+)([0-9a-f]{16,64})", str(content or ""), flags=re.I)
+            if existing:
+                return existing.group(1)
+            key = str(call_id or "") or f"{tool_name}:{len(content)}:{content[:96]}"
+            if key not in microcompact_observation_cache:
+                microcompact_observation_cache[key] = store_tool_observation(tool_name, content)
+            return microcompact_observation_cache[key]
 
         def append_control_note(content: str) -> bool:
             """Append harness guidance unless the identical note is already present.
@@ -1319,11 +1346,27 @@ def handle_user_turn(
         # from provider payloads. Analytical requests still use the model.
         def finish_deterministic(
             content: str, *, blocked: bool = False, reason: str = "", require_grounded: bool = True,
+            require_requirements_closed: bool = True,
         ) -> bool:
             nonlocal answer_first_visible_at
             if not content:
                 return False
             if require_grounded and not grounding_report().get("grounded", False):
+                return False
+            # Fact grounding alone is not completion for compound requests. HTTP,
+            # filesystem, and other explicit checks remain first-class requirements.
+            if require_requirements_closed and requirement_ledger.pending():
+                return False
+            # Fact-only renderers must not silently omit independent operational
+            # requirements (HTTP probes, file reads, etc.) from a compound task.
+            has_operational_requirements = any(
+                not str((item.scope or {}).get("fact_type") or "")
+                for item in requirement_ledger.requirements
+            )
+            if require_requirements_closed and has_operational_requirements and reason != "compound_requirements_complete":
+                return False
+            # Never summarize a result whose omitted middle is still unread.
+            if require_requirements_closed and pending_truncated_observations:
                 return False
             _append_and_save_fn(messages, {"role": "assistant", "content": content})
             if WORKING_STATE_ENABLED:
@@ -1363,7 +1406,7 @@ def handle_user_turn(
 
         if required_fact_types == {"news"} and last_news_search_content and is_simple_headline_request(user_input):
             if finish_deterministic(format_news_results(
-                last_news_search_content, limit=6,
+                last_news_search_content, limit=requested_headline_limit(user_input, 6),
                 location=str((fact_frames.get("news") or {}).get("entity") or ""),
             )):
                 return
@@ -1413,7 +1456,7 @@ def handle_user_turn(
                     return ""
                 renderers["news"] = format_news_results(
                     last_news_search_content,
-                    limit=6,
+                    limit=requested_headline_limit(request, 6),
                     location=str(news_frame.get("entity") or ""),
                 )
 
@@ -1436,28 +1479,63 @@ def handle_user_turn(
         if composite and finish_deterministic(composite):
             return
 
-        def emit_budget_partial(reason: str) -> None:
-            """Finalize from accumulated evidence without spending another model call."""
-            nonlocal answer_first_visible_at
+        def _extractive_file_summary(text: str, limit: int = 700) -> str:
+            clean = " ".join(str(text or "").split())
+            if not clean:
+                return "The file was empty."
+            sentences = re.split(r"(?<=[.!?])\s+", clean)
+            selected: list[str] = []
+            size = 0
+            for sentence in sentences:
+                sentence = sentence.strip()
+                if not sentence:
+                    continue
+                if selected and size + len(sentence) + 1 > limit:
+                    break
+                selected.append(sentence)
+                size += len(sentence) + 1
+                if len(selected) >= 3:
+                    break
+            return " ".join(selected)[:limit] or clean[:limit]
+
+        def _format_compound_status(*, stop_reason: str = "") -> tuple[str, list[Any], set[str]]:
+            """Render already-grounded independent requirements without another model call."""
             sections: list[str] = []
+            rendered_fact_types: set[str] = set()
             weather_frame = dict(fact_frames.get("weather") or {})
             news_frame = dict(fact_frames.get("news") or {})
-            if last_weather_recovery_result:
-                rendered = format_weather_recovery(
-                    last_weather_recovery_result, str(weather_frame.get("source_text") or user_input)
-                )
+
+            if "current_time" in required_fact_types and last_current_time_content:
+                rendered = _format_current_time_result(last_current_time_content)
                 if rendered:
-                    sections.append(rendered)
-            if last_news_search_content:
+                    sections.append("### Current time\n" + rendered)
+                    rendered_fact_types.add("current_time")
+
+            if "weather" in required_fact_types and last_weather_recovery_result:
+                request = str(weather_frame.get("source_text") or user_input)
+                rendered = format_weather_recovery(last_weather_recovery_result, request)
+                if rendered:
+                    sections.append("### Weather\n" + rendered)
+                    rendered_fact_types.add("weather")
+
+            if "news" in required_fact_types and last_news_search_content:
+                request = str(news_frame.get("source_text") or user_input)
                 rendered = format_news_results(
-                    last_news_search_content, limit=6, location=str(news_frame.get("entity") or "")
+                    last_news_search_content,
+                    limit=requested_headline_limit(request, 6),
+                    location=str(news_frame.get("entity") or ""),
                 )
                 if rendered:
-                    sections.append(rendered)
-            if last_market_quote_content:
+                    sections.append("### Local headlines\n" + rendered)
+                    rendered_fact_types.add("news")
+
+            if "market_price" in required_fact_types and last_market_quote_content:
                 rendered = format_market_quotes(last_market_quote_content)
                 if rendered:
-                    sections.append(rendered)
+                    instruments = set(str(x).lower() for x in ((fact_frames.get("market_price") or {}).get("instruments") or []))
+                    heading = "Brent crude" if instruments == {"brent"} else "Market quotes"
+                    sections.append(f"### {heading}\n" + rendered)
+                    rendered_fact_types.add("market_price")
 
             http_result = deterministic_tool_results.get("http_probe") or {}
             if http_result:
@@ -1476,41 +1554,72 @@ def handle_user_turn(
                     if latency is not None:
                         details.append(f"{latency} ms to headers")
                     state = "reachable" if reachable is not False else "not reachable"
-                    sections.append(f"**Network check:** {target} — {state}" + (f" ({', '.join(details)})" if details else ""))
+                    value = f"{target} — {state}" + (f" ({', '.join(details)})" if details else "")
                 else:
-                    sections.append(f"**Network check:** {target} — unresolved ({http_result.get('reason') or 'tool failure'}).")
+                    value = f"{target} — unresolved ({http_result.get('reason') or 'tool failure'})"
+                sections.append("### Network check\n" + value)
 
             file_result = deterministic_tool_results.get("read_file") or {}
             if file_result:
                 target = str((file_result.get("arguments") or {}).get("filename") or "the requested file")
                 if file_result.get("success"):
-                    preview = " ".join(str(file_result.get("content") or "").split())[:600]
-                    sections.append(f"**File:** {target} was read successfully." + (f" Preview: {preview}" if preview else ""))
+                    if pending_truncated_observations:
+                        value = f"{target} — unresolved until the omitted middle is retrieved with read_observation."
+                    else:
+                        value = f"{target}: {_extractive_file_summary(str(file_result.get('content') or ''))}"
                 else:
-                    sections.append(f"**File:** {target} — unresolved ({file_result.get('reason') or 'tool failure'}).")
+                    value = f"{target} — unresolved ({file_result.get('reason') or 'tool failure'})"
+                sections.append("### File summary\n" + value)
 
             unresolved = [
                 item for item in requirement_ledger.requirements
                 if item.status not in {"satisfied", "partial"}
             ]
-            if unresolved:
-                rows = [
-                    f"- {item.label}: {item.status}" + (f" — {item.last_reason}" if item.last_reason else "")
-                    for item in unresolved
-                ]
-                sections.append("**Unresolved items**\n" + "\n".join(rows))
-            sections.append(f"_Harness stopped additional model/recovery work: {reason}._")
-            content = "\n\n".join(section for section in sections if section).strip()
+            unresolved_rows = [
+                f"- {item.label}: {item.status}" + (f" — {item.last_reason}" if item.last_reason else "")
+                for item in unresolved
+            ]
+            if pending_truncated_observations:
+                unresolved_rows.append("- truncated tool output: omitted middle has not yet been retrieved with read_observation")
+            sections.append("### Any unresolved items\n" + ("\n".join(unresolved_rows) if unresolved_rows else "None."))
+            if stop_reason:
+                sections.append(f"_Harness stopped additional model/recovery work: {stop_reason}._")
+            return "\n\n".join(section for section in sections if section).strip(), unresolved, rendered_fact_types
+
+        # A requirement-led compound status request whose deterministic checks are
+        # all closed does not need a synthesis-model turn. This both preserves
+        # successes when one independent item is blocked and prevents the model
+        # budget from being spent redoing already-grounded work.
+        supported_compound_tools = {
+            "weather_forecast", "news_search", "market_quote", "http_probe", "read_file", "current_time"
+        }
+        compound_tools = set(requirement_ledger.required_tools())
+        if (
+            len(requirement_ledger.requirements) >= 2
+            and compound_tools.issubset(supported_compound_tools)
+            and not requirement_ledger.pending()
+            and not pending_truncated_observations
+        ):
+            compound_content, compound_unresolved, rendered_facts = _format_compound_status()
+            if required_fact_types.issubset(rendered_facts) and compound_content and finish_deterministic(
+                compound_content, blocked=bool(compound_unresolved), reason="compound_requirements_complete"
+            ):
+                return
+
+        def emit_budget_partial(reason: str) -> None:
+            """Finalize from accumulated evidence without spending another model call."""
+            nonlocal answer_first_visible_at
+            content, unresolved, _rendered_facts = _format_compound_status(stop_reason=reason)
             if not content:
                 content = f"The turn stopped before completion: {reason}."
             _append_and_save_fn(messages, {"role": "assistant", "content": content})
             if WORKING_STATE_ENABLED:
-                WORKING_STATE.complete_turn(blocked=bool(unresolved))
+                WORKING_STATE.complete_turn(blocked=bool(unresolved or pending_truncated_observations))
             answer_first_visible_at = answer_first_visible_at or time.monotonic()
             print(f"\nAgent: {content}\n")
             emit_event(
                 "assistant_final", content=content, finalization=True, deterministic=True,
-                budget_exhausted=True, blocked=bool(unresolved),
+                budget_exhausted=True, blocked=bool(unresolved or pending_truncated_observations),
             )
 
         # No deterministic fast path applied, so the main model is now needed.
@@ -1656,7 +1765,13 @@ def handle_user_turn(
                 emit_event("validator", validator="final", decision=recovery_validation.get("decision"), diagnosis=recovery_validation.get("diagnosis", ""), suggested_tool=recovery_validation.get("suggested_tool", ""))
 
             prompt_tail = (
-                compact_working_tool_tail(turn_tail, keep_tool_results=WORKING_STATE_RAW_TOOL_RESULTS)
+                compact_working_tool_tail(
+                    turn_tail,
+                    keep_tool_results=WORKING_STATE_RAW_TOOL_RESULTS,
+                    archive_tool_result=archive_microcompact_tool_result,
+                    max_archived_results=WORKING_STATE_ARCHIVED_TOOL_RESULTS,
+                    preview_chars=WORKING_STATE_ARCHIVED_PREVIEW_CHARS,
+                )
                 if WORKING_STATE_ENABLED else list(turn_tail)
             )
             pending_hint = requirement_ledger.pending_hint()
@@ -2329,7 +2444,10 @@ def handle_user_turn(
                 if media_refs:
                     tool_message["media"] = media_refs
                 _append_and_save_fn(messages, tool_message)
-                turn_tail.append(model_message(tool_message))
+                tail_tool_message = model_message(tool_message)
+                if observation_id:
+                    tail_tool_message["_observation_id"] = observation_id
+                turn_tail.append(tail_tool_message)
 
                 tracker.record_tool(
                     name,

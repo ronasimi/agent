@@ -129,40 +129,24 @@ function addMessage(role,content,{forceScroll=false,media=[]}={}){
   el.querySelector('.message-actions button').onclick=event=>copyMessage(event.currentTarget,bubble);
   messagesEl.appendChild(el);renderMessageMedia(bubble,[...parsed.attachments,...(media||[])]);promptEl.placeholder='Follow up';scrollBottom(forceScroll);return bubble;
 }
-function paintAssistantStream(){
-  assistantRenderFrame=0;if(!assistantNode)return;
-  assistantNode.dataset.raw=assistantStreamBuffer;
-  assistantNode.classList.remove('attachment-only');
-  // Keep streaming paints intentionally cheap. Re-rendering the full Markdown
-  // document for every token is O(n^2)-ish work and can starve Chromium's
-  // paint loop when WebSocket deltas arrive in a burst. The canonical Markdown
-  // render happens once in finalizeAssistantStream().
-  assistantNode.textContent=assistantStreamBuffer;
-  assistantNode.classList.add('streaming');
-  scrollBottom();
-}
-function scheduleAssistantPaint(){
-  if(assistantRenderFrame)return;
-  assistantRenderFrame=requestAnimationFrame(paintAssistantStream);
-}
 function ensureAssistantComposite(){
   if(!assistantNode){assistantNode=addMessage('assistant','');assistantStreamBuffer='';}
   assistantNode.classList.remove('attachment-only');
   assistantNode.classList.add('assistant-composite');
-  let thinking=assistantNode.querySelector('.assistant-thinking');
   let answer=assistantNode.querySelector('.assistant-answer');
-  if(!thinking||!answer){
-    assistantNode.innerHTML='';
-    thinking=document.createElement('details');
-    thinking.className='assistant-thinking';
-    thinking.open=true;
-    thinking.innerHTML=`<summary><span class="thinking-chevron">${mdiIcon('chevron-right','›')}</span><span>Thinking</span><span class="thinking-live">live</span></summary><pre></pre>`;
+  if(!answer){
+    // Do not synthesize a reasoning container for ordinary non-thinking turns.
+    // The inline Thinking block is created lazily only after an actual
+    // thinking_delta arrives for a turn that explicitly enabled thinking.
+    const existingThinking=assistantNode.querySelector('.assistant-thinking');
+    const existingText=existingThinking?'':assistantNode.textContent;
+    if(!existingThinking)assistantNode.innerHTML='';
     answer=document.createElement('div');
     answer.className='assistant-answer';
-    assistantNode.appendChild(thinking);
+    if(existingText)answer.textContent=existingText;
     assistantNode.appendChild(answer);
   }
-  return {thinking,answer};
+  return {thinking:assistantNode.querySelector('.assistant-thinking'),answer};
 }
 function paintAssistantStream(){
   assistantRenderFrame=0;if(!assistantNode)return;
@@ -182,9 +166,18 @@ function scheduleAssistantPaint(){
   assistantRenderFrame=requestAnimationFrame(paintAssistantStream);
 }
 function ensureThinkingStream(){
+  if(!activeThinkingEnabled)return null;
   const shell=ensureAssistantComposite();
-  thinkingNode=shell.thinking;
-  if(!thinkingStreamBuffer){thinkingNode.open=true;}
+  let thinking=shell.thinking;
+  if(!thinking){
+    thinking=document.createElement('details');
+    thinking.className='assistant-thinking';
+    thinking.open=true;
+    thinking.innerHTML=`<summary><span class="thinking-chevron">${mdiIcon('chevron-right','›')}</span><span>Thinking</span><span class="thinking-live">live</span></summary><pre></pre>`;
+    assistantNode.insertBefore(thinking,shell.answer);
+  }
+  thinkingNode=thinking;
+  if(!thinkingStreamBuffer)thinkingNode.open=true;
   scrollBottom();
   return thinkingNode;
 }
@@ -194,7 +187,9 @@ function paintThinkingStream(){
   scrollBottom();
 }
 function appendThinking(content){
-  ensureThinkingStream();thinkingStreamBuffer+=String(content||'');
+  if(!activeThinkingEnabled)return;
+  if(!ensureThinkingStream())return;
+  thinkingStreamBuffer+=String(content||'');
   if(!thinkingRenderFrame)thinkingRenderFrame=requestAnimationFrame(paintThinkingStream);
 }
 function finalizeThinkingStream({collapse=false}={}){
@@ -207,10 +202,8 @@ function finalizeThinkingStream({collapse=false}={}){
 }
 function resetThinkingStream(){
   if(thinkingRenderFrame){cancelAnimationFrame(thinkingRenderFrame);thinkingRenderFrame=0;}
-  if(thinkingNode){
-    const wrap=thinkingNode.closest('.assistant-thinking');
-    if(wrap)wrap.remove();
-  }
+  const node=thinkingNode || assistantNode?.querySelector('.assistant-thinking');
+  if(node)node.remove();
   thinkingNode=null;thinkingStreamBuffer='';
   if(assistantNode&&!assistantStreamBuffer){assistantNode.closest('.message')?.remove();assistantNode=null;}
 }
@@ -230,7 +223,7 @@ function finalizeAssistantStream(content=''){
   }
   if(assistantRenderFrame){cancelAnimationFrame(assistantRenderFrame);assistantRenderFrame=0;}
   if(canonical)assistantStreamBuffer=canonical;
-  // If this assistant bubble only contains inline reasoning for a tool turn,
+  // If this assistant bubble contains only inline reasoning for a tool turn,
   // leave it intact rather than replacing it with an empty answer shell.
   if(!assistantStreamBuffer){
     assistantNode.classList.remove('streaming');

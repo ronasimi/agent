@@ -24,6 +24,8 @@ _REQUIRED_OVERRIDES = {
     "cancel_reminder": {"reminder_id"},
     "web_search": {"query"},
     "tool_search": {"query"},
+    "search_skills": {"query"},
+    "load_skill": {"name"},
     "news_search": {"query"},
     "wiki_search": {"query"},
     "market_quote": {"instruments"},
@@ -68,6 +70,8 @@ _SCHEMA_OVERRIDES: dict[tuple[str, str], dict[str, Any]] = {
     ("google_calendar_get_event", "account"): {"maxLength": 160},
     ("google_calendar_list_calendars", "limit"): {"maximum": 50},
     ("google_calendar_list_calendars", "account"): {"maxLength": 160},
+    ("load_skill", "name"): {"description": "Installed skill id/name to load."},
+    ("load_skill", "length"): {"minimum": 500, "maximum": 5000},
 }
 
 _SCHEMA_LIMITS_BY_NAME: dict[str, dict[str, Any]] = {

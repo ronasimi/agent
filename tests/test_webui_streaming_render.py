@@ -37,3 +37,21 @@ def test_thinking_stream_is_separate_frame_batched_and_flushed() -> None:
     think_flush = APP_JS.index("finalizeThinkingStream();", finish)
     answer_flush = APP_JS.index("finalizeAssistantStream();", finish)
     assert think_flush < answer_flush
+
+
+def test_thinking_container_is_lazy_and_disabled_turns_ignore_reasoning_deltas() -> None:
+    start = APP_JS.index("function ensureAssistantComposite(){")
+    end = APP_JS.index("function paintAssistantStream(){", start)
+    composite = APP_JS[start:end]
+    assert "createElement('details')" not in composite
+
+    thinking_start = APP_JS.index("function ensureThinkingStream(){")
+    thinking_end = APP_JS.index("function paintThinkingStream(){", thinking_start)
+    thinking = APP_JS[thinking_start:thinking_end]
+    assert "if(!activeThinkingEnabled)return null;" in thinking
+    assert "createElement('details')" in thinking
+
+    append_start = APP_JS.index("function appendThinking(content){")
+    append_end = APP_JS.index("function finalizeThinkingStream", append_start)
+    append = APP_JS[append_start:append_end]
+    assert "if(!activeThinkingEnabled)return;" in append

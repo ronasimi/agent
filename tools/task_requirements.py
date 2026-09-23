@@ -889,6 +889,9 @@ def _extract_target(tool: str, text: str) -> str:
 
 def _scope_for_requirement(key: str, tool: str, text: str, frame: dict[str, Any]) -> dict[str, Any]:
     scope: dict[str, Any] = {}
+    fact_intent = _FACT_RULE_INTENTS.get(key) or _TOOL_FACT_INTENTS.get(tool)
+    if fact_intent:
+        scope["fact_type"] = fact_intent
     target = _extract_target(tool, text)
     if target:
         scope["target"] = target
@@ -1081,7 +1084,15 @@ def is_followup_request(user_text: str) -> bool:
         "what remains", "what did you find", "those results", "these results", "that result",
         "the above", "follow up", "follow-up",
     )
-    if any(phrase in lower for phrase in continuity):
+    # Referential words inside a long, self-contained specification are not a
+    # continuation signal. For example, a safety rule saying "before summarizing
+    # that result" used to collapse the requirement ledger to the previous/primary
+    # fact frame. Long follow-ups still work when the continuity cue is actually
+    # leading the request ("Based on that result, ...").
+    leading = lower[:240].lstrip()
+    if any(phrase in leading for phrase in continuity):
+        return True
+    if len(text) <= 240 and any(phrase in lower for phrase in continuity):
         return True
     if is_evidence_reuse_request(text):
         return True

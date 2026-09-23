@@ -1344,7 +1344,11 @@ def weather_fallback_stages() -> list[dict[str, Any]]:
     """Independent web-search fallback used only when structured weather fails."""
     return [
         {"id": "search", "tool": "web_search", "args": {"query": {"$param": "query", "default": "current weather forecast"}}},
-        {"id": "verify", "tool": "browse_url", "args": {"url": {"$ref": "search", "path": "0.url"}}},
+        {"id": "verify", "tool": "browse_url", "args": {
+            "url": {"$ref": "search", "path": "0.url"},
+            "extract": "current temperature conditions feels like humidity wind precipitation and observation time for the requested location",
+            "max_chars": 5000,
+        }},
         {"id": "result", "tool": "compose_object", "args": {"data": {
             "query": {"$param": "query", "default": "current weather forecast"},
             "discovery": {"$ref": "search"},

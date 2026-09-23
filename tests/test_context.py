@@ -137,3 +137,69 @@ def test_working_tool_tail_pins_latest_media_across_later_tools():
     media = [item for item in compact if item.get("images")]
     assert len(media) == 1
     assert media[0]["images"] == ["base64-image"]
+
+
+def test_working_tool_tail_microcompacts_older_results_to_observation_handles():
+    from tools.context import compact_working_tool_tail
+
+    archived = {}
+    def archive(name, content, call_id):
+        archived[call_id] = (name, content)
+        return f"obs{call_id}"
+
+    tail = []
+    for i in range(5):
+        cid = f"c{i}"
+        tail.append({"role": "assistant", "content": "", "tool_calls": [{"id": cid, "function": {"name": "demo", "arguments": {"i": i}}}]})
+        tail.append({"role": "tool", "tool_name": "demo", "content": f"result-{i}-" + ("x" * 300), "tool_call_id": cid})
+
+    compact = compact_working_tool_tail(
+        tail,
+        keep_tool_results=2,
+        archive_tool_result=archive,
+        max_archived_results=2,
+        preview_chars=60,
+    )
+    tools = [item for item in compact if item.get("role") == "tool"]
+    assert [item.get("tool_call_id") for item in tools] == ["c1", "c2", "c3", "c4"]
+    assert "observation_id=obsc1" in tools[0]["content"]
+    assert "observation_id=obsc2" in tools[1]["content"]
+    assert "result-3" in tools[2]["content"] and "result-4" in tools[3]["content"]
+    assert set(archived) == {"c1", "c2"}
+
+
+def test_working_tool_tail_reuses_existing_observation_without_rearchiving():
+    from tools.context import compact_working_tool_tail
+
+    calls = []
+    tail = [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "old", "function": {"name": "demo", "arguments": {}}}]},
+        {"role": "tool", "tool_name": "demo", "content": "older result", "tool_call_id": "old", "_observation_id": "already"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "new", "function": {"name": "demo", "arguments": {}}}]},
+        {"role": "tool", "tool_name": "demo", "content": "new result", "tool_call_id": "new"},
+    ]
+    compact = compact_working_tool_tail(
+        tail,
+        keep_tool_results=1,
+        archive_tool_result=lambda *args: calls.append(args) or "unexpected",
+        max_archived_results=1,
+    )
+    archived = next(item for item in compact if item.get("tool_call_id") == "old")
+    assert "observation_id=already" in archived["content"]
+    assert calls == []
+
+
+def test_background_summary_microcompaction_keeps_recent_tool_bodies_and_shrinks_old_ones():
+    from tools.context import microcompact_history_for_summary
+
+    messages = []
+    for i in range(4):
+        messages.append({"role": "assistant", "content": "", "tool_calls": [{"id": f"c{i}", "function": {"name": "demo", "arguments": {}}}]})
+        messages.append({"role": "tool", "tool_name": "demo", "content": f"result-{i}-" + ("x" * 1200), "tool_call_id": f"c{i}"})
+    compact = microcompact_history_for_summary(messages, keep_tool_results=2, preview_chars=120)
+    tool_rows = [row for row in compact if row.get("role") == "tool"]
+    assert "summary microcompaction" in tool_rows[0]["content"]
+    assert "summary microcompaction" in tool_rows[1]["content"]
+    assert tool_rows[2]["content"].startswith("result-2-")
+    assert tool_rows[3]["content"].startswith("result-3-")
+    assert len(tool_rows[0]["content"]) < 500

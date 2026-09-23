@@ -53,10 +53,11 @@ def _validate_tool_code(code_text: str) -> tuple[bool, str]:
     allowed_third_party = {"requests", "bs4", "ollama"}
     stdlib = set(getattr(sys, "stdlib_module_names", ()))
     has_tool = False
+    has_hook = False
 
     def _allowed_import(module: str) -> bool:
         root = str(module or "").split(".", 1)[0]
-        return module == "tools.tool_registry" or root in stdlib or root in allowed_third_party
+        return module in {"tools.tool_registry", "tools.lifecycle_hooks"} or root in stdlib or root in allowed_third_party
 
     for node in tree.body:
         if isinstance(node, ast.Import):
@@ -72,6 +73,8 @@ def _validate_tool_code(code_text: str) -> tuple[bool, str]:
                 return False, f"Validation Error: import from '{module}' is not allowed in custom tools."
             if module == "tools.tool_registry" and any(alias.name != "agent_tool" for alias in node.names):
                 return False, "Validation Error: custom tools may import only agent_tool from tools.tool_registry."
+            if module == "tools.lifecycle_hooks" and any(alias.name != "agent_hook" for alias in node.names):
+                return False, "Validation Error: custom extensions may import only agent_hook from tools.lifecycle_hooks."
             continue
         if isinstance(node, ast.AsyncFunctionDef):
             return False, "Validation Error: async custom tool functions are not supported by the synchronous agent harness."
@@ -81,6 +84,8 @@ def _validate_tool_code(code_text: str) -> tuple[bool, str]:
                     has_tool = True
                 elif isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Name) and decorator.func.id == "agent_tool":
                     has_tool = True
+                elif isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Name) and decorator.func.id == "agent_hook":
+                    has_hook = True
             continue
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
             value = node.value
@@ -97,8 +102,8 @@ def _validate_tool_code(code_text: str) -> tuple[bool, str]:
             "Custom modules may contain imports, literal constants, and function definitions only."
         )
 
-    if not has_tool:
-        return False, "Validation Error: No function decorated with @agent_tool found in the code."
+    if not (has_tool or has_hook):
+        return False, "Validation Error: No function decorated with @agent_tool or @agent_hook found in the code."
 
     return True, "Valid"
 

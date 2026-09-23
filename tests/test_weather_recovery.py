@@ -75,3 +75,31 @@ def test_weather_recovery_uses_declared_location_and_structured_provider(monkeyp
     )
     report = validate_fact_grounding("weather for the next week", [observation], current_turn_id=1)
     assert report["grounded"] is True
+
+
+def test_weather_fallback_renderer_surfaces_verified_web_evidence():
+    from tools.weather import format_weather_recovery
+
+    result = {
+        "ok": True,
+        "result": {
+            "query": "London Ontario weather current",
+            "verification": (
+                "URL: https://weather.example/london\n"
+                "Content-Type: text/html\n"
+                "Extraction: current temperature conditions feels like humidity wind precipitation\n\n"
+                "London, Ontario: 14 C, partly cloudy. Feels like 13 C. "
+                "Humidity 70%. Wind W 12 km/h."
+            ),
+        },
+        "grounding_recovery": {
+            "fact_type": "weather",
+            "location": "London, Ontario, Canada",
+            "source": "web_verification_fallback",
+        },
+    }
+
+    rendered = format_weather_recovery(result, "Get the current weather for London, Ontario.")
+    assert "Current weather for London, Ontario, Canada" in rendered
+    assert "14 C" in rendered
+    assert "weather.example/london" in rendered

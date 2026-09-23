@@ -30,6 +30,7 @@ def test_storage_initializer_creates_tree_and_is_idempotent(tmp_path: Path):
     expected = (
         state / "memory",
         state / "workspace" / "custom_tools",
+        state / "workspace" / "skills",
         state / "workspace" / "research",
         state / "workspace" / "self_optimization" / "candidates",
         state / "workspace" / "self_optimization" / "approved",

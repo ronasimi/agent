@@ -135,7 +135,7 @@ ISOLATABLE_MUTATORS = {
     "render_document_page", "image_resize", "image_crop", "image_convert",
     "archive_extract", "page_diff", "generate_pdf_report",
     "save_recipe", "enqueue_research", "cancel_background_job",
-    "reload_tools",
+    "set_goal", "clear_goal", "reload_tools",
 }
 
 # Deliberately never invoked in the default isolated mode.  Some affect absolute

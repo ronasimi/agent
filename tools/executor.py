@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .subprocess_utils import run_argv
+from .lifecycle_hooks import before_tool_decision, after_tool_notify
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -62,12 +63,24 @@ def _execute_isolated_tool(name: str, args: dict[str, Any], seconds: int) -> Any
 
 
 def execute_registered_tool(name: str, args: dict[str, Any]) -> Any:
+    """Execute one registered tool through the canonical lifecycle-hook path."""
     # Import lazily to avoid a catalog -> executor -> catalog cycle at startup.
     from .catalog import AVAILABLE_TOOLS_MAP, TOOL_METADATA
 
+    denial = before_tool_decision(name, args)
+    if denial:
+        return f"Error: blocked by lifecycle hook: {denial}"
+
     func = AVAILABLE_TOOLS_MAP[name]
     timeout = TOOL_METADATA.get(name, {}).get("timeout")
-    if not timeout:
-        return func(**args)
-    seconds = max(1, min(int(timeout), 300))
-    return _execute_isolated_tool(name, args, seconds)
+    try:
+        if not timeout:
+            result = func(**args)
+        else:
+            seconds = max(1, min(int(timeout), 300))
+            result = _execute_isolated_tool(name, args, seconds)
+    except BaseException as exc:
+        after_tool_notify(name, args, f"{type(exc).__name__}: {exc}", error=True)
+        raise
+    after_tool_notify(name, args, result, error=False)
+    return result

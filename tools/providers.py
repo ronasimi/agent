@@ -70,6 +70,8 @@ TOOL_BUNDLES = (
      ('network_reachability', 'dns_diagnose', 'http_probe')),
     ({'tools', 'tooling', 'capabilities', 'capability', 'find'},
      ('tool_search', 'tool_health')),
+    ({'skill', 'skills', 'guidance', 'instructions', 'playbook'},
+     ('search_skills', 'load_skill')),
     ({'recipes', 'reuse', 'pipeline', 'workflow', 'recipe', 'reusable'},
      ('search_recipes', 'list_recipes', 'run_recipe', 'run_pipeline', 'save_recipe', 'recipe_coverage')),
     ({'path', 'hash', 'mime', 'folder', 'directory', 'find', 'json', 'tail', 'diff', 'regex', 'grep'},

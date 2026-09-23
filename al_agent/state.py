@@ -108,6 +108,8 @@ WORKING_STATE_CFG = AGENT_CFG.get("working_state", {})
 WORKING_STATE_ENABLED = bool(WORKING_STATE_CFG.get("enabled", True))
 WORKING_STATE_HISTORY_TURNS = max(1, int(WORKING_STATE_CFG.get("main_history_turns", 1)))
 WORKING_STATE_RAW_TOOL_RESULTS = max(1, int(WORKING_STATE_CFG.get("raw_tool_results", 2)))
+WORKING_STATE_ARCHIVED_TOOL_RESULTS = max(0, int(WORKING_STATE_CFG.get("archived_tool_results", 4)))
+WORKING_STATE_ARCHIVED_PREVIEW_CHARS = max(40, min(int(WORKING_STATE_CFG.get("archived_tool_preview_chars", 180)), 600))
 WORKING_STATE_EVIDENCE_CHARS = max(600, int(WORKING_STATE_CFG.get("evidence_render_chars", 3600)))
 PRUNE_SATISFIED_REQUIREMENT_TOOLS = bool(WORKING_STATE_CFG.get("prune_satisfied_tool_schemas", True))
 # Tool schemas are rendered at the top of the prompt by chat templates, so any

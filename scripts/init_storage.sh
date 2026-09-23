@@ -30,6 +30,7 @@ install -d -m 0750 -o "$runtime_uid" -g "$runtime_gid" \
   "$memory_dir/huggingface" \
   "$workspace_dir" \
   "$workspace_dir/custom_tools" \
+  "$workspace_dir/skills" \
   "$workspace_dir/research" \
   "$workspace_dir/self_optimization/candidates" \
   "$workspace_dir/self_optimization/approved" \

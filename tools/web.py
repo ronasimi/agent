@@ -635,6 +635,36 @@ def format_news_provider_error(content: str, *, location: str = "") -> str:
     return f"I couldn't retrieve current headlines because the news provider failed{suffix}."
 
 
+
+def requested_headline_limit(user_request: str, default: int = 6) -> int:
+    """Return an explicitly requested headline count, otherwise ``default``.
+
+    Keep this deterministic so list cardinality is honored even when final
+    rendering bypasses the model. Examples: ``latest 3 headlines`` and
+    ``give me five local news headlines``.
+    """
+    text = " ".join(str(user_request or "").lower().split())
+    word_counts = {
+        "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+        "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    }
+    patterns = (
+        r"\b(?:latest|top|recent|current)?\s*(\d{1,2})\s+(?:local\s+)?(?:[^.?]{0,80}\s+)?(?:news|headlines?|stories?)\b",
+        r"\b(\d{1,2})\s+(?:local\s+)?(?:news|headlines?|stories?)\b",
+        r"\b(?:latest|top|recent|current)?\s*(one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:local\s+)?(?:[^.?]{0,80}\s+)?(?:news|headlines?|stories?)\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, re.I)
+        if not match:
+            continue
+        raw = match.group(1).lower()
+        try:
+            count = int(raw)
+        except ValueError:
+            count = word_counts.get(raw, int(default))
+        return max(1, min(count, 10))
+    return max(1, min(int(default), 10))
+
 def format_news_results(content: str, *, limit: int = 6, location: str = "") -> str:
     """Render structured news-search output without relying on model tool-call compliance."""
     try:

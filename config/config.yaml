@@ -138,6 +138,10 @@ agent:
     # Keep only the latest raw tool transactions; older evidence is persisted in
     # the bounded untrusted evidence digest to reduce repeated prompt ingestion.
     raw_tool_results: 2
+    # Tier-1 microcompaction: keep a few older tool transactions as tiny
+    # retrievable observation handles before dropping them entirely.
+    archived_tool_results: 4
+    archived_tool_preview_chars: 180
     evidence_render_chars: 3600
     # Drop native schemas for explicit checks once their evidence is satisfied
     # or deterministically blocked; this reduces later-turn prefill and discourages

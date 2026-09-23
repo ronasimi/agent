@@ -22,6 +22,7 @@ from .providers import (
     TOOL_SELECTION_STOPWORDS,
 )
 from .tool_registry import agent_tool, function_schema, normalize_arguments
+from .lifecycle_hooks import clear_hooks, register_module_hooks
 try:
     from .builtin_manifest import BUILTIN_MANIFEST
 except ImportError:  # bootstrap path used by scripts/generate_builtin_manifest.py
@@ -78,6 +79,7 @@ def _register(func, *, builtin_name: str | None = None) -> None:
 def load_tools() -> tuple[int, dict[str, str]]:
     """Load builtin providers plus statically validated workspace extensions."""
     ALL_TOOLS.clear(); AVAILABLE_TOOLS_MAP.clear(); TOOL_SCHEMAS.clear(); TOOL_METADATA.clear()
+    clear_hooks(source_prefix="custom:")
     errors: dict[str, str] = {}
 
     manifest = {(str(item.get("module")), str(item.get("function"))): item for item in BUILTIN_MANIFEST}
@@ -116,6 +118,7 @@ def load_tools() -> tuple[int, dict[str, str]]:
             for _, func in inspect.getmembers(module, inspect.isfunction):
                 if getattr(func, "_agent_tool", False):
                     _register(func)
+            register_module_hooks(module, source=f"custom:{path.name}")
         except Exception as exc:
             errors[f"custom:{path.name}"] = str(exc)
     return len(AVAILABLE_TOOLS_MAP), errors

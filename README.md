@@ -212,6 +212,7 @@ Examples of available tool families include:
 - **Media/profile:** `image_info`, `attach_media`, `set_profile_image`, `profile_image_info`
 - **Google Workspace:** `gmail_search_messages`, `gmail_read_message`, `google_calendar_list_events`, `google_calendar_get_event`, `google_calendar_list_calendars`
 - **Recipes:** `search_recipes`, `run_recipe`, `save_recipe`, `run_pipeline`
+- **Skills:** `search_skills`, `load_skill` (metadata-first, full instructions loaded lazily)
 
 Generic shell and Python execution exist as fallback capabilities, but structured tools are preferred and are only exposed when relevant or explicitly requested.
 
@@ -229,6 +230,12 @@ host health check    host_snapshot -> pressure_snapshot -> filesystem_snapshot
 LAN discovery        local_subnets -> scan_subnet
 repository review    get_repo_map -> repo_status -> repo_checks
 ```
+
+## Progressive skills and lifecycle hooks
+
+Skills are Markdown guidance stored in `workspace/skills/`. The harness scans only a small cached metadata prefix (name, description, tags) for relevance. When a skill matches the current request, the model receives only that compact index plus the `load_skill` schema; instructions are read in bounded chunks only if the model explicitly loads the skill. Recipes remain executable workflows, while skills are advisory procedure/domain guidance.
+
+Custom extension modules in `workspace/custom_tools/` may also register `@agent_hook("before_tool")` and `@agent_hook("after_tool")` callbacks. Hooks run through the same canonical executor used by chat, recipes, and pipelines. Hook failures are isolated; a hook that exceeds the small foreground time budget is disabled so it cannot repeatedly stall the agent. A `before_tool` hook may return `{"deny": "reason"}` to block a call.
 
 ## Research jobs
 
@@ -317,8 +324,9 @@ Al Agent separates several kinds of state:
 - rolling conversation summary — older conversation context after compaction
 - working state — current objective, requirements, evidence, failures, and validator decisions
 - `workspace/` — files, uploads, generated artifacts, reports, recipes/custom tools where applicable
+- `workspace/skills/` — optional Markdown skills; metadata is matched cheaply and full instructions are loaded only on demand
 
-Large tool outputs are stored as durable observations. The model receives a bounded preview plus an observation ID and can retrieve another slice with `read_observation` instead of carrying a huge result through every inference.
+Large tool outputs are stored as durable observations. During a long tool loop the newest results remain raw, the next few older transactions are microcompacted into retrievable observation handles, and still older transactions are dropped from the live prompt before normal context fitting. Background rolling-summary jobs also microcompact old tool bodies before inference. The model can retrieve exact archived content with `read_observation` instead of carrying every raw result through every inference.
 
 ### Why old chats do not continuously grow the prompt
 
