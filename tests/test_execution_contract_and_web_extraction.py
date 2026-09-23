@@ -72,7 +72,6 @@ def test_middle_truncation_marker_requires_read_observation_with_missing_offset(
 
 def test_truncated_tool_result_forces_read_observation_before_summary(monkeypatch):
     import json
-    import re
     from al_agent import turn_engine as te
 
     calls = []
@@ -82,12 +81,14 @@ def test_truncated_tool_result_forces_read_observation_before_summary(monkeypatc
         if name == "browse_url":
             return "ARTICLE " + ("middle-data " * 3000)
         if name == "read_observation":
+            offset = int(args.get("offset", 0))
+            returned = min(int(args.get("length", 10000)), max(0, 36000 - offset))
             return json.dumps({
                 "observation_id": args["observation_id"],
-                "offset": args.get("offset", 0),
-                "returned_chars": 5000,
+                "offset": offset,
+                "returned_chars": returned,
                 "total_chars": 36000,
-                "has_more": True,
+                "has_more": offset + returned < 36000,
                 "content": "missing middle article data",
             })
         raise AssertionError((name, args))
@@ -116,18 +117,12 @@ def test_truncated_tool_result_forces_read_observation_before_summary(monkeypatc
                 return iter([{"done": True, "message": {"content": "", "tool_calls": [
                     {"id": "c1", "function": {"name": "browse_url", "arguments": {"url": "https://example.test/story"}}}
                 ]}}])
-            if self.calls == 2:
-                # This candidate must be discarded by the truncation gate.
-                return iter([{"done": True, "message": {"content": "Task is complete. Here is the summary.", "tool_calls": []}}])
-            if self.calls == 3:
-                assert "read_observation" in tools
-                prompt = "\n".join(str(m.get("content") or "") for m in kwargs.get("messages", []))
-                match = re.search(r"obs123@(\d+)", prompt)
-                assert match and int(match.group(1)) == 6000
-                return iter([{"done": True, "message": {"content": "", "tool_calls": [
-                    {"id": "c2", "function": {"name": "read_observation", "arguments": {"observation_id": "obs123", "offset": 6000, "length": 5000}}}
-                ]}}])
-            return iter([{"done": True, "message": {"content": "The article summary uses the recovered middle data.", "tool_calls": []}}])
+            # The harness must recover every omitted middle chunk itself before
+            # asking the model to summarize. No extra model round-trip is needed
+            # just to emit read_observation calls.
+            return iter([{"done": True, "message": {
+                "content": "The article summary uses the recovered middle data.", "tool_calls": []
+            }}])
 
     model = Model()
     monkeypatch.setattr(te, "_execute_registered_tool", fake_execute)
@@ -159,6 +154,7 @@ def test_truncated_tool_result_forces_read_observation_before_summary(monkeypatc
         },
     )
 
-    assert any(item[1] == "read_observation" for item in calls if item[0] == "tool")
-    assert model.calls >= 4
+    reads = [item for item in calls if item[0] == "tool" and item[1] == "read_observation"]
+    assert [row[2]["offset"] for row in reads] == [6000, 16000, 26000]
+    assert model.calls == 2
     assert messages[-1]["content"] == "The article summary uses the recovered middle data."

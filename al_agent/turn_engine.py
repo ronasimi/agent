@@ -531,9 +531,11 @@ def handle_user_turn(
         validator_interventions = 0
         tracker = StepFailureTracker(STALL_VALIDATOR_AFTER)
         successful_execution_trace: list[dict[str, Any]] = []
-        # observation_id -> first omitted character offset. A truncated tool result
-        # creates a hard read_observation requirement before summarization.
-        pending_truncated_observations: dict[str, int] = {}
+        # observation_id -> recovery cursor/size. A truncated tool result creates
+        # a hard read_observation requirement before that result is summarized.
+        # The cursor advances only across contiguous recovered chunks so a single
+        # partial read cannot incorrectly clear a large omitted middle.
+        pending_truncated_observations: dict[str, dict[str, int]] = {}
         iteration_limit = _adaptive_iteration_limit(len(requirement_ledger.requirements))
         recipe_fallback_attempted = False
         fallback_recipe_candidate: dict[str, Any] | None = None
@@ -605,38 +607,70 @@ def handle_user_turn(
             return args
 
         def register_truncated_observation(raw_text: str, bounded_text: str, observation_id: str) -> None:
-            """Track omitted middle data and expose its reader immediately."""
-            if not observation_id or "[Harness: middle truncated;" not in str(bounded_text or ""):
+            """Track only the actually omitted middle and expose its reader immediately."""
+            bounded = str(bounded_text or "")
+            raw = str(raw_text or "")
+            if not observation_id or "[Harness: middle truncated;" not in bounded:
                 return
-            match = re.search(r"offset=(\d+)", str(bounded_text or ""))
-            first_missing = int(match.group(1)) if match else max(1, len(str(raw_text or "")) // 2)
-            pending_truncated_observations[str(observation_id)] = first_missing
+            match = re.search(
+                r"\[Harness: middle truncated;.*?offset=(\d+).*?\]\n\n",
+                bounded,
+                flags=re.S,
+            )
+            first_missing = int(match.group(1)) if match else max(1, len(raw) // 2)
+            # The preview already contains the tail. The truncation contract only
+            # requires retrieval of the omitted middle, not a second read of the
+            # visible tail. Derive the first visible-tail offset from the bounded
+            # preview itself so the gate closes as soon as the gap is contiguous.
+            visible_tail_chars = max(0, len(bounded) - match.end()) if match else 0
+            omitted_end = max(first_missing, len(raw) - visible_tail_chars)
+            pending_truncated_observations[str(observation_id)] = {
+                "next_offset": first_missing,
+                "end_offset": omitted_end,
+                "total_chars": len(raw),
+            }
             _ensure_tool_schemas(tool_schemas, ["read_observation"], turn_tool_policy)
             if WORKING_STATE_ENABLED:
                 WORKING_STATE.update_tools(tool_schemas)
 
         def satisfy_truncated_observation_read(arguments: Any, result_text: str, success: bool) -> None:
-            """Clear a truncation gate only after reading inside the omitted region."""
+            """Advance/clear a truncation gate only after contiguous omitted data is read."""
             if not success or not isinstance(arguments, dict):
                 return
             observation_id = str(arguments.get("observation_id") or "").strip()
-            if observation_id not in pending_truncated_observations:
+            state = pending_truncated_observations.get(observation_id)
+            if not isinstance(state, dict):
                 return
             try:
                 offset = int(arguments.get("offset") or 0)
             except (TypeError, ValueError):
                 offset = 0
-            if offset < pending_truncated_observations[observation_id]:
+            next_offset = max(0, int(state.get("next_offset") or 0))
+            # Do not allow a later chunk to skip an unread gap. Rereading some
+            # already-covered bytes is harmless and may still extend coverage.
+            if offset > next_offset:
                 return
             try:
                 payload = json.loads(str(result_text or ""))
             except (TypeError, json.JSONDecodeError):
                 payload = {}
-            if (
+            if not (
                 isinstance(payload, dict)
                 and str(payload.get("observation_id") or "") == observation_id
-                and int(payload.get("returned_chars") or 0) > 0
             ):
+                return
+            returned = max(0, int(payload.get("returned_chars") or 0))
+            if returned <= 0:
+                return
+            covered_end = offset + returned
+            if covered_end <= next_offset:
+                return
+            state["next_offset"] = covered_end
+            total = max(int(state.get("total_chars") or 0), int(payload.get("total_chars") or 0))
+            state["total_chars"] = total
+            omitted_end = max(0, int(state.get("end_offset") or total))
+            has_more = bool(payload.get("has_more"))
+            if (omitted_end and covered_end >= omitted_end) or not has_more:
                 pending_truncated_observations.pop(observation_id, None)
 
         def completion_claim_is_unsupported(text: str) -> bool:
@@ -764,8 +798,11 @@ def handle_user_turn(
             except Exception as exc:
                 result = {"ok": False, "error": str(exc), "grounding_recovery": {"fact_type": "weather"}}
             success = bool(result.get("ok"))
-            if success:
-                last_weather_recovery_result = result
+            # Preserve the bounded recovery record even on failure so compound
+            # deterministic finalization can report the weather requirement as
+            # unresolved without asking the main model to rediscover the same
+            # failed provider path.
+            last_weather_recovery_result = result
             status = "ok" if success else "error"
             reason = "grounding_weather_recovery" if success else "grounding_weather_recovery_failed"
             raw = json.dumps(result, ensure_ascii=False, indent=2, default=str)
@@ -1074,72 +1111,19 @@ def handle_user_turn(
                 attempt_grounding_recovery(report, "pre_generation")
                 report = grounding_report()
                 missing = set(report.get("missing_fact_types") or [])
-                # If the recipe path failed, resolve the requested place once and
-                # execute the structured weather primitive with harness-owned
-                # coordinates. Never let a small model guess latitude/longitude.
+                # The purpose-built recovery already performs one structured
+                # provider attempt followed by bounded distinct-host web
+                # verification. Do not immediately repeat an equivalent
+                # geocode/forecast sequence after that composite recovery fails.
+                # Close the requirement as unresolved so a compound request can
+                # preserve its other grounded results without burning model calls.
                 if "weather" in missing:
-                    weather_frame = dict(fact_frames.get("weather") or task_frame)
-                    weather_entity = str(weather_frame.get("entity") or "").strip()
-                    if weather_entity and _record_harness_recovery_tool(
-                        "geocode_location", {"query": weather_entity, "count": 1},
-                        trigger="pre_generation:weather_geocode",
-                    ):
-                        try:
-                            rows = json.loads(last_geocode_content)
-                            candidate = rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else {}
-                        except Exception:
-                            candidate = {}
-                        if isinstance(candidate.get("latitude"), (int, float)) and isinstance(candidate.get("longitude"), (int, float)):
-                            weather_canonical_location.update(candidate)
-                            scoped_request = str(weather_frame.get("source_text") or user_input).lower()
-                            current_only = bool(
-                                str(weather_frame.get("time_scope") or "") in {"current", "now", "today"}
-                                or re.search(r"\b(?:current|now|today|tonight|right now)\b", scoped_request)
-                            )
-                            direct_weather_ok = _record_harness_recovery_tool(
-                                "weather_forecast",
-                                {
-                                    "latitude": candidate["latitude"],
-                                    "longitude": candidate["longitude"],
-                                    "forecast_days": 1 if current_only else 8,
-                                    "timezone_name": "auto",
-                                },
-                                trigger="pre_generation:weather_structured_fallback",
-                            )
-                            if direct_weather_ok:
-                                try:
-                                    direct_forecast = json.loads(
-                                        str((deterministic_tool_results.get("weather_forecast") or {}).get("content") or "")
-                                    )
-                                except Exception:
-                                    direct_forecast = {}
-                                if isinstance(direct_forecast, dict):
-                                    last_weather_recovery_result = {
-                                        "ok": True,
-                                        "result": {
-                                            "location": weather_entity,
-                                            "place": dict(candidate),
-                                            "forecast": direct_forecast,
-                                        },
-                                        "grounding_recovery": {
-                                            "fact_type": "weather",
-                                            "location": weather_entity,
-                                            "source": "direct_structured_fallback",
-                                        },
-                                    }
-                    report = grounding_report()
-                    missing = set(report.get("missing_fact_types") or [])
-                    if "weather" in missing and not weather_canonical_location:
-                        # The structured location could not be verified. Remove the
-                        # coordinate-taking primitive so the model cannot invent a
-                        # different place; web retrieval remains available.
-                        tool_schemas[:] = [
-                            schema for schema in tool_schemas
-                            if str(schema.get("function", {}).get("name") or "") != "weather_forecast"
-                        ]
-                        requirement_ledger.mark_blocked(
-                            "weather_forecast", "could not verify requested location coordinates"
-                        )
+                    requirement_ledger.mark_blocked(
+                        "weather_forecast",
+                        "structured weather and bounded web fallbacks returned no current weather values",
+                    )
+                    if WORKING_STATE_ENABLED:
+                        WORKING_STATE.update_requirements(requirement_ledger.as_list())
 
             direct = {
                 "host_state": ("host_snapshot", {}),
@@ -1271,8 +1255,40 @@ def handle_user_turn(
                     )
             block_exhausted_requirements()
 
+        def recover_pending_truncated_observations(*, max_calls: int = 12) -> None:
+            """Deterministically retrieve omitted middle chunks before synthesis.
+
+            Pre-grounding tools can legitimately exceed the normal prompt-output
+            budget. If that happens, honor the harness's own middle-truncation
+            contract without spending a model iteration merely to call
+            read_observation. Recovery is contiguous, bounded, and stops on any
+            non-progress/failure.
+            """
+            calls = 0
+            for observation_id in list(pending_truncated_observations):
+                while observation_id in pending_truncated_observations and calls < max_calls:
+                    state = pending_truncated_observations.get(observation_id) or {}
+                    offset = max(0, int(state.get("next_offset") or 0))
+                    before = offset
+                    calls += 1
+                    ok = _record_harness_recovery_tool(
+                        "read_observation",
+                        {"observation_id": observation_id, "offset": offset, "length": 10000},
+                        trigger="pre_generation:middle_truncation_recovery",
+                    )
+                    if not ok:
+                        break
+                    state = pending_truncated_observations.get(observation_id)
+                    if state is None:
+                        break
+                    if int(state.get("next_offset") or 0) <= before:
+                        break
+                if calls >= max_calls:
+                    break
+
         attempt_initial_grounding_recovery()
         attempt_initial_explicit_requirements()
+        recover_pending_truncated_observations()
 
         # Harness-owned pre-grounding runs before the first model request, so
         # pruning requirements it already satisfied has no KV-cache penalty. It
@@ -1511,12 +1527,25 @@ def handle_user_turn(
                     sections.append("### Current time\n" + rendered)
                     rendered_fact_types.add("current_time")
 
-            if "weather" in required_fact_types and last_weather_recovery_result:
-                request = str(weather_frame.get("source_text") or user_input)
-                rendered = format_weather_recovery(last_weather_recovery_result, request)
+            if "weather" in required_fact_types:
+                rendered = ""
+                if last_weather_recovery_result:
+                    request = str(weather_frame.get("source_text") or user_input)
+                    rendered = format_weather_recovery(last_weather_recovery_result, request)
                 if rendered:
                     sections.append("### Weather\n" + rendered)
                     rendered_fact_types.add("weather")
+                else:
+                    weather_req = next((
+                        item for item in requirement_ledger.requirements
+                        if str((item.scope or {}).get("fact_type") or "") == "weather"
+                    ), None)
+                    if weather_req is not None and weather_req.status == "blocked":
+                        reason = weather_req.last_reason or "qualifying current-weather evidence was unavailable"
+                        sections.append(f"### Weather\nUnresolved — {reason}.")
+                        # The fact is not grounded, but it has been explicitly
+                        # represented as unresolved rather than silently omitted.
+                        rendered_fact_types.add("weather")
 
             if "news" in required_fact_types and last_news_search_content:
                 request = str(news_frame.get("source_text") or user_input)
@@ -1602,7 +1631,10 @@ def handle_user_turn(
         ):
             compound_content, compound_unresolved, rendered_facts = _format_compound_status()
             if required_fact_types.issubset(rendered_facts) and compound_content and finish_deterministic(
-                compound_content, blocked=bool(compound_unresolved), reason="compound_requirements_complete"
+                compound_content,
+                blocked=bool(compound_unresolved),
+                reason="compound_requirements_complete",
+                require_grounded=False,
             ):
                 return
 
@@ -2056,8 +2088,8 @@ def handle_user_turn(
                 if WORKING_STATE_ENABLED:
                     WORKING_STATE.update_tools(tool_schemas)
                 details = ", ".join(
-                    f"{obs_id}@{offset}"
-                    for obs_id, offset in list(pending_truncated_observations.items())[:4]
+                    f"{obs_id}@{int(state.get('next_offset') or 0)}"
+                    for obs_id, state in list(pending_truncated_observations.items())[:4]
                 )
                 if iteration < iteration_limit:
                     turn_prefix, tool_prompt_tokens = rebuild_prefix()
@@ -2562,6 +2594,13 @@ def handle_user_turn(
                         successful_readonly_signatures.add(signature)
                     else:
                         successful_mutating_signatures.add(signature)
+
+            # Tool results produced inside the model loop can also exceed the
+            # prompt preview budget. Recover their omitted middle deterministically
+            # before another synthesis call instead of spending model iterations
+            # asking the model to issue read_observation repeatedly.
+            if pending_truncated_observations:
+                recover_pending_truncated_observations()
 
             if control_notes:
                 append_control_note(

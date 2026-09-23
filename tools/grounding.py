@@ -66,6 +66,22 @@ _WEATHER_DETAIL_RE = re.compile(
     r"\bchance of\b|\bvisibility\b|\bpressure\b|°\s*[CF]\b)",
     re.I,
 )
+_WEATHER_NO_DATA_RE = re.compile(
+    r"\b(?:no data available|data unavailable|weather data unavailable|currently unavailable|unable to load)\b",
+    re.I,
+)
+_WEATHER_NUMERIC_FIELD_RE = re.compile(
+    r"(?:temperature(?:\s+2m)?|apparent temperature|feels like|humidity|wind(?: speed)?(?:\s+10m)?|"
+    r"wind gusts?(?:\s+10m)?|precipitation(?: probability)?|rain(?:fall)?|snow(?:fall)?|"
+    r"pressure|visibility|dew point|cloud cover|highs?|lows?)"
+    r"[^0-9+\-]{0,40}[+\-]?\d+(?:\.\d+)?",
+    re.I,
+)
+_WEATHER_CONDITION_RE = re.compile(
+    r"\b(?:clear|sunny|mostly sunny|partly cloudy|cloudy|overcast|rain|showers?|drizzle|snow|"
+    r"flurries|fog|mist|thunderstorms?|freezing rain|ice pellets)\b",
+    re.I,
+)
 
 
 @dataclass
@@ -338,7 +354,12 @@ def _coordinates_close(left: dict[str, Any], right: dict[str, Any], *, tolerance
 
 
 def is_weather_bearing(content: str) -> bool:
-    """Conservatively detect whether an observation actually carries weather data."""
+    """Conservatively detect whether an observation is weather-related.
+
+    This intentionally remains permissive enough for *discovery* results.
+    Final current-weather verification uses :func:`is_weather_data_evidence`,
+    which additionally requires actual meteorological values.
+    """
     text = str(content or "")
     if not text.strip():
         return False
@@ -353,6 +374,45 @@ def is_weather_bearing(content: str) -> bool:
     # A forecast/weather-labelled result is enough for search discovery. For
     # unlabeled API/text payloads require multiple meteorological fields.
     return primary or len(details) >= 2
+
+
+def is_weather_data_evidence(content: str) -> bool:
+    """Require actual conditions/forecast values, not a weather-themed page.
+
+    JS shells and provider outage pages often contain labels such as
+    ``Temperature``/``Humidity`` followed only by ``No Data Available``.  Those
+    pages are useful discovery candidates but must never satisfy the hard
+    weather grounding gate.
+    """
+    text = str(content or "")
+    if not is_weather_bearing(text):
+        return False
+    probe = re.sub(r"https?://[^\s\"']+", " ", text, flags=re.I)
+    probe = probe.replace("_", " ").replace("-", " ")
+    # Ignore numeric-looking matches whose path from the weather label to the
+    # number crosses an explicit provider placeholder. This prevents shell pages
+    # such as ``Pressure -- No Data Available ... 7 Days`` from treating the
+    # navigation number ``7`` as a pressure reading.
+    numeric_fields = [
+        match for match in _WEATHER_NUMERIC_FIELD_RE.finditer(probe)
+        if not _WEATHER_NO_DATA_RE.search(match.group(0))
+    ]
+    if numeric_fields:
+        return True
+    # Terse provider/forecast text can omit a field label, for example
+    # ``London tomorrow forecast 18 C with rain`` or ``Cloudy, 14°``. Accept a
+    # numeric temperature with an explicit C/F unit anywhere in weather-bearing
+    # text, or a degree value when a recognized condition is also present.
+    if re.search(r"(?<!\w)[+\-]?\d+(?:\.\d+)?\s*(?:°\s*)?[CF]\b", probe, re.I):
+        return True
+    if _WEATHER_CONDITION_RE.search(probe) and re.search(r"[+\-]?\d+(?:\.\d+)?\s*°", probe):
+        return True
+    # Repeated provider placeholders are a strong negative signal. Keep this
+    # explicit for diagnostics even though the positive-value checks above are
+    # already sufficient to reject the common shell page.
+    if len(_WEATHER_NO_DATA_RE.findall(probe)) >= 1:
+        return False
+    return False
 
 
 def _recipe_stages(content: str) -> set[str]:
@@ -507,7 +567,7 @@ def _weather_recipe_observation(item: dict[str, Any]) -> bool:
     verified = _recipe_verified_payload(content)
     return bool(
         recipe_like
-        and is_weather_bearing(verified)
+        and is_weather_data_evidence(verified)
         and ("weather_forecast" in stages or {"web_search", "browse_url"}.issubset(stages))
     )
 
@@ -593,7 +653,7 @@ def _recipe_weather_verified(content: str) -> bool:
     verification = result.get("verification")
     discovery_text = json.dumps(discovery, ensure_ascii=False, default=str)
     verification_text = verification if isinstance(verification, str) else json.dumps(verification, ensure_ascii=False, default=str)
-    if not is_weather_bearing(verification_text):
+    if not is_weather_data_evidence(verification_text):
         return False
     discovered = set(_urls_from_payload(discovery_text))
     verified_url = _browse_source_url(verification_text, {})
@@ -721,7 +781,7 @@ def grounding_metadata(
     weather_verified = bool(
         recipe_like
         and (
-            ("weather_forecast" in stage_set and is_weather_bearing(verified_payload))
+            ("weather_forecast" in stage_set and is_weather_data_evidence(verified_payload))
             or ({"web_search", "browse_url"}.issubset(stage_set) and _recipe_weather_verified(text))
         )
     )
@@ -1180,7 +1240,12 @@ def validate_fact_grounding(
                 source = _canonical_url(str(browse.get("source_url") or ""))
                 if not source:
                     source = _browse_source_url(str(browse.get("evidence_preview") or browse.get("content") or ""), dict(browse.get("arguments") or {}))
-                if source and source in discovered and _observation_matches_frame(browse, frame_for("weather"), linked_search=True):
+                browse_content = str(browse.get("evidence_preview") or browse.get("content") or "")
+                if (
+                    source and source in discovered
+                    and is_weather_data_evidence(browse_content)
+                    and _observation_matches_frame(browse, frame_for("weather"), linked_search=True)
+                ):
                     linked_pairs.append((search, browse))
 
         stored_weather = [
@@ -1190,7 +1255,14 @@ def validate_fact_grounding(
             and str(item.get("tool") or "").lower() != "web_search"
             and _fresh(item, now=now_utc, max_age_seconds=weather_max_age_seconds)
             and _observation_matches_frame(item, frame_for("weather"))
-            and (_weather_recipe_observation(item) or _weather_api_observation(item) or str(item.get("tool") or "").lower() == "browse_url")
+            and (
+                _weather_recipe_observation(item)
+                or _weather_api_observation(item)
+                or (
+                    str(item.get("tool") or "").lower() == "browse_url"
+                    and is_weather_data_evidence(str(item.get("evidence_preview") or item.get("content") or ""))
+                )
+            )
         ]
 
         if current_api:
@@ -1401,14 +1473,114 @@ def execute_weather_grounding_recovery(
     else:
         structured_error = "no explicit or stored location is available"
 
-    fallback = execute_pipeline(weather_fallback_stages(), {"query": query})
-    fallback["grounding_recovery"] = {
-        "fact_type": "weather",
-        "query": query,
-        "location": location,
-        "forecast_days": forecast_days,
-        "source": "web_verification_fallback",
-        "recipe": WEATHER_RECIPE_NAME,
-        "structured_error": structured_error,
+    # Bounded independent web fallback. Search once, then verify at most three
+    # distinct hosts. A provider page that contains weather labels but only
+    # placeholders such as "No Data Available" is not accepted as evidence.
+    # Trying distinct hosts here keeps recovery deterministic and prevents a
+    # small model from spending iterations on equivalent retries.
+    from urllib.parse import urlsplit
+    from .web import browse_url, web_search
+
+    search_raw = web_search(query)
+    stages: list[dict[str, Any]] = []
+    try:
+        discovery = json.loads(search_raw)
+    except (TypeError, json.JSONDecodeError):
+        discovery = None
+    search_ok = isinstance(discovery, list)
+    stages.append({
+        "id": "search",
+        "tool": "web_search",
+        "ok": search_ok,
+        "status": "ok" if search_ok else "error",
+        "calls": 1,
+        "size": len(str(search_raw or "")),
+        "args": {"query": query},
+        "grounding": {"fact_types": ["weather"] if search_ok else [], "target": query},
+    })
+    if not search_ok:
+        return {
+            "ok": False,
+            "stages": stages,
+            "error": str(search_raw or "weather web search failed")[:1000],
+            "result": {"query": query, "discovery": []},
+            "grounding_recovery": {
+                "fact_type": "weather", "query": query, "location": location,
+                "forecast_days": forecast_days, "source": "web_verification_fallback",
+                "recipe": WEATHER_RECIPE_NAME, "structured_error": structured_error,
+            },
+        }
+
+    candidates: list[str] = []
+    seen_hosts: set[str] = set()
+    for row in discovery:
+        if not isinstance(row, dict):
+            continue
+        url = str(row.get("url") or "").strip()
+        if not url:
+            continue
+        try:
+            host = str(urlsplit(url).hostname or "").lower()
+        except ValueError:
+            host = ""
+        if host and host in seen_hosts:
+            continue
+        if host:
+            seen_hosts.add(host)
+        candidates.append(url)
+        if len(candidates) >= 3:
+            break
+
+    extract = (
+        "current temperature and condition for the requested location, including feels like, "
+        "humidity, wind, precipitation, pressure, visibility, and observation time; exclude weather news"
+    )
+    last_verification = ""
+    for index, url in enumerate(candidates, start=1):
+        verification = browse_url(url, extract=extract, max_chars=5000)
+        last_verification = verification
+        transport_ok = not str(verification or "").lstrip().lower().startswith("error:")
+        weather_ok = transport_ok and is_weather_data_evidence(verification)
+        stages.append({
+            "id": f"verify_{index}",
+            "tool": "browse_url",
+            "ok": weather_ok,
+            "status": "ok" if weather_ok else ("partial" if transport_ok else "error"),
+            "calls": 1,
+            "size": len(str(verification or "")),
+            "args": {"url": url, "extract": extract, "max_chars": 5000},
+            "grounding": {
+                "fact_types": ["weather"] if weather_ok else [],
+                "target": query,
+                "source_url": url,
+            },
+        })
+        if not weather_ok:
+            continue
+        stages.append({
+            "id": "result", "tool": "compose_object", "ok": True, "status": "ok",
+            "calls": 1, "size": len(str(verification or "")), "args": {},
+            "grounding": {"fact_types": ["weather"], "target": query, "source_url": url},
+        })
+        return {
+            "ok": True,
+            "stages": stages,
+            "result": {"query": query, "discovery": discovery, "verification": verification},
+            "grounding_recovery": {
+                "fact_type": "weather", "query": query, "location": location,
+                "forecast_days": forecast_days, "source": "web_verification_fallback",
+                "recipe": WEATHER_RECIPE_NAME, "structured_error": structured_error,
+            },
+        }
+
+    return {
+        "ok": False,
+        "stages": stages,
+        "error": "bounded web fallback returned no current weather values",
+        "result": {"query": query, "discovery": discovery, "verification": last_verification},
+        "grounding_recovery": {
+            "fact_type": "weather", "query": query, "location": location,
+            "forecast_days": forecast_days, "source": "web_verification_fallback",
+            "recipe": WEATHER_RECIPE_NAME, "structured_error": structured_error,
+        },
     }
-    return fallback

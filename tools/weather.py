@@ -304,7 +304,9 @@ def format_weather_recovery(result: dict[str, Any], user_request: str) -> str:
     its bounded verified source excerpt instead of silently dropping weather
     from a compound answer.
     """
-    payload = result.get("result") if isinstance(result, dict) else None
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        return ""
+    payload = result.get("result")
     if not isinstance(payload, dict):
         return ""
     forecast = payload.get("forecast")

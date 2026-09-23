@@ -103,3 +103,71 @@ def test_weather_fallback_renderer_surfaces_verified_web_evidence():
     assert "Current weather for London, Ontario, Canada" in rendered
     assert "14 C" in rendered
     assert "weather.example/london" in rendered
+
+
+def test_weather_web_fallback_rejects_no_data_shell_then_uses_distinct_provider(monkeypatch):
+    import tools.grounding as grounding
+    import tools.recipe_store as recipe_store
+    import tools.pipeline as pipeline
+    import tools.web as web
+
+    monkeypatch.setattr(recipe_store, "get_recipe", lambda _name: None)
+    monkeypatch.setattr(pipeline, "execute_pipeline", lambda *_a, **_k: {
+        "ok": False, "error": "structured provider unavailable", "stages": []
+    })
+    monkeypatch.setattr(web, "web_search", lambda _query: json.dumps([
+        {"url": "https://weather-one.example/london", "title": "London weather"},
+        {"url": "https://weather-one.example/hourly", "title": "London hourly"},
+        {"url": "https://weather-two.example/london", "title": "London conditions"},
+        {"url": "https://weather-three.example/london", "title": "London weather"},
+    ]))
+
+    browsed = []
+    def fake_browse(url, *, extract="", max_chars=0, **_kwargs):
+        browsed.append(url)
+        if "weather-one" in url:
+            return (
+                "Current Conditions -- Temperature -- No Data Available Wind -- No Data Available "
+                "Pressure -- No Data Available Humidity -- No Data Available 7 Days 14 Days"
+            )
+        if "weather-two" in url:
+            return (
+                "London, Ontario current conditions. Temperature 14 C. Feels like 13 C. "
+                "Humidity 70%. Wind W 12 km/h. Observation time 00:40 EDT."
+            )
+        return "Error: provider unavailable"
+    monkeypatch.setattr(web, "browse_url", fake_browse)
+
+    result = grounding.execute_weather_grounding_recovery(
+        "Get the current weather for London, Ontario.",
+        "",
+        frame={
+            "source_text": "Get the current weather for London, Ontario.",
+            "entity": "London, Ontario, Canada",
+            "time_scope": "current",
+        },
+    )
+
+    assert result["ok"] is True
+    assert browsed == [
+        "https://weather-one.example/london",
+        "https://weather-two.example/london",
+    ]
+    assert "14 C" in result["result"]["verification"]
+    verify = [stage for stage in result["stages"] if str(stage.get("id", "")).startswith("verify_")]
+    assert verify[0]["ok"] is False
+    assert verify[1]["ok"] is True
+
+
+def test_failed_weather_recovery_is_not_rendered_as_weather():
+    from tools.weather import format_weather_recovery
+
+    result = {
+        "ok": False,
+        "error": "bounded web fallback returned no current weather values",
+        "result": {
+            "verification": "Temperature -- No Data Available Humidity -- No Data Available 7 Days 14 Days"
+        },
+        "grounding_recovery": {"location": "London, Ontario, Canada"},
+    }
+    assert format_weather_recovery(result, "Get the current weather for London, Ontario.") == ""

@@ -317,3 +317,26 @@ def test_structured_fact_tools_do_not_ground_arbitrary_nonempty_text():
     assert "host_state" in classify_fact_types("host_snapshot", '{"cpu_count":8}')
     assert "network_state" in classify_fact_types("neighbor_snapshot", "[]")
     assert "repository_state" in classify_fact_types("repo_status", '{"git_repo":false}')
+
+
+def test_weather_shell_with_no_data_and_navigation_numbers_is_not_current_weather_evidence():
+    from tools.grounding import is_weather_data_evidence
+
+    shell = (
+        "Hourly Today's Conditions -- Sunrise -- Sunset -- No Data Available "
+        "Wind -- Gust: -- No Data Available Pressure -- No Data Available "
+        "Humidity -- No Data Available Visibility -- No Data Available Ceiling -- "
+        "No Data Available Yesterday -- No Data Available 7 Days 14 Days Radar Map "
+        "News Welcome to fall, Canada! 2:00"
+    )
+    assert is_weather_data_evidence(shell) is False
+
+
+def test_weather_numeric_values_still_qualify_when_an_unrelated_field_is_unavailable():
+    from tools.grounding import is_weather_data_evidence
+
+    text = (
+        "Current Conditions. Temperature 14 C. Feels like 13 C. Humidity 70%. "
+        "Wind W 12 km/h. Visibility No Data Available."
+    )
+    assert is_weather_data_evidence(text) is True
