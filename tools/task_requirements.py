@@ -24,6 +24,7 @@ class Requirement:
     last_reason: str = ""
     fingerprint: str = ""
     scope: dict[str, Any] = field(default_factory=dict)
+    evidence: list[dict[str, Any]] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -35,6 +36,7 @@ class Requirement:
             "last_reason": self.last_reason,
             "fingerprint": self.fingerprint,
             "scope": dict(self.scope),
+            "evidence": [dict(row) for row in self.evidence if isinstance(row, dict)],
         }
 
 
@@ -1493,6 +1495,38 @@ class TaskRequirementLedger:
                 item.last_reason = "successful tool result did not match requested target/scope"
             else:
                 item.status = "failed"
+            return
+
+    def record_evidence_for_key(
+        self, key: str, *, source: str, tool_name: str = "", status: str = "",
+        reason: str = "", fingerprint: str = "", arguments_digest: str = "",
+        evidence_ref: str = "", count_attempt: bool = False,
+    ) -> None:
+        """Attach explicit provenance to one requirement without changing its outcome.
+
+        Derived requirements can be satisfied by harness-owned inspections rather
+        than by their pseudo-tool name.  Recording that provenance separately keeps
+        the requirement auditable without pretending the discovery tool itself was
+        the requirement's execution primitive.
+        """
+        for item in self.requirements:
+            if item.key != str(key):
+                continue
+            if count_attempt:
+                item.attempts += 1
+            row = {
+                "source": str(source or "")[:32],
+                "tool": str(tool_name or "")[:80],
+                "status": str(status or "")[:24],
+                "reason": str(reason or "")[:120],
+                "fingerprint": str(fingerprint or "")[:32],
+                "arguments_digest": str(arguments_digest or "")[:24],
+                "evidence_ref": str(evidence_ref or "")[:80],
+            }
+            row = {k: v for k, v in row.items() if v not in (None, "")}
+            if row and row not in item.evidence:
+                item.evidence.append(row)
+                item.evidence[:] = item.evidence[-4:]
             return
 
     def mark_fact_satisfied(self, fact_type: str, reason: str = "grounding_evidence") -> None:

@@ -198,10 +198,22 @@ def test_tool_recipe_stress_finishes_without_model_loop(monkeypatch):
     monkeypatch.setattr(te, "_prune_compacted_history", lambda _messages: None)
     monkeypatch.setattr(te, "log_perf_stats", lambda *a, **k: None)
 
+    from tools.task_requirements import TaskRequirementLedger
+    captured = {}
+
+    class CapturingLedger(TaskRequirementLedger):
+        @classmethod
+        def from_request(cls, user_text):
+            from tools.task_requirements import derive_requirements
+            ledger = cls(derive_requirements(user_text))
+            captured["ledger"] = ledger
+            return ledger
+
     messages = [{"role": "system", "content": "system"}]
     te.handle_user_turn(
         messages, prompt, False,
         runtime_overrides={
+            "TaskRequirementLedger": CapturingLedger,
             "OLLAMA": NoModel(), "record_monitor_state": lambda *a, **k: None,
             "append_and_save": lambda rows, item: rows.append(item),
             "acquire_turn_lock": lambda: object(), "release_turn_lock": lambda _lock: None,
@@ -226,3 +238,36 @@ def test_tool_recipe_stress_finishes_without_model_loop(monkeypatch):
     assert sum(1 for name, _ in calls if name == "run_recipe") == 1
     assert sum(1 for name, _ in calls if name == "tool_search") == 3
     assert calls[-1][0] == "remove_path"
+
+    ledger = captured["ledger"]
+    assert len(ledger.requirements) == 37
+    for key in ("tooltest:12", "tooltest:13", "tooltest:14"):
+        row = next(item for item in ledger.requirements if item.key == key)
+        assert row.attempts == 1
+        assert row.evidence
+        assert row.evidence[-1]["source"] == "tool_call"
+        assert row.evidence[-1]["tool"] == "tool_search"
+
+
+def test_requirement_ledger_records_derived_discovery_provenance():
+    from tools.task_requirements import Requirement, TaskRequirementLedger
+
+    ledger = TaskRequirementLedger([
+        Requirement(
+            "tooltest:12", "__tooltest_observation_capability__",
+            "observation retrieval capability discovery", scope={"derived": True},
+        )
+    ])
+    ledger.record_evidence_for_key(
+        "tooltest:12", source="tool_call", tool_name="tool_search", status="ok",
+        reason="ok", fingerprint="fp", arguments_digest="digest",
+        evidence_ref="obs-12", count_attempt=True,
+    )
+    row = ledger.requirements[0]
+    assert row.attempts == 1
+    assert row.evidence == [{
+        "source": "tool_call", "tool": "tool_search", "status": "ok",
+        "reason": "ok", "fingerprint": "fp", "arguments_digest": "digest",
+        "evidence_ref": "obs-12",
+    }]
+    assert ledger.as_list()[0]["evidence"][0]["tool"] == "tool_search"

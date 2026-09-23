@@ -29,6 +29,11 @@ _DEFAULT_LIMITS = {
     "failure_items": 8,
     "validator_items": 6,
     "plan_items": 6,
+    # Persist the complete operational ledger separately from the smaller
+    # prompt-facing requirement window. Large deterministic plans (for example
+    # 37-item tool/recipe audits) must remain fully inspectable/resumable without
+    # paying their full token cost on every model call.
+    "requirement_store_items": 96,
     "requirement_items": 24,
     "max_render_chars": 7000,
 }
@@ -243,6 +248,18 @@ def _clean_requirements(items: list[dict[str, Any]], limit: int) -> list[dict[st
             "last_reason": _clip(item.get("last_reason"), 100),
             "fingerprint": _clip(item.get("fingerprint"), 32),
             "scope": item.get("scope") if isinstance(item.get("scope"), dict) else {},
+            "evidence": [
+                {
+                    "source": _clip(row.get("source"), 32),
+                    "tool": _clip(row.get("tool"), 80),
+                    "status": _clip(row.get("status"), 24),
+                    "reason": _clip(row.get("reason"), 100),
+                    "fingerprint": _clip(row.get("fingerprint"), 32),
+                    "arguments_digest": _clip(row.get("arguments_digest"), 24),
+                    "evidence_ref": _clip(row.get("evidence_ref"), 80),
+                }
+                for row in list(item.get("evidence") or [])[-4:] if isinstance(row, dict)
+            ],
         })
     return clean
 
@@ -356,9 +373,9 @@ class WorkingStateStore:
             if item and item not in constraints:
                 constraints.append(item)
 
-        current_requirements = _clean_requirements(requirements or [], self.limits["requirement_items"])
+        current_requirements = _clean_requirements(requirements or [], self.limits["requirement_store_items"])
         if continuation:
-            previous_requirements = _clean_requirements(list(previous.get("requirements") or []), self.limits["requirement_items"])
+            previous_requirements = _clean_requirements(list(previous.get("requirements") or []), self.limits["requirement_store_items"])
             merged_requirements: list[dict[str, Any]] = []
             seen_keys: set[tuple[str, str]] = set()
             for item in [*previous_requirements, *current_requirements]:
@@ -373,7 +390,7 @@ class WorkingStateStore:
                 else:
                     merged_requirements.append(item)
                     seen_keys.add(marker)
-            state_requirements = merged_requirements[-self.limits["requirement_items"]:]
+            state_requirements = merged_requirements[-self.limits["requirement_store_items"]:]
         else:
             state_requirements = current_requirements
 
@@ -416,7 +433,7 @@ class WorkingStateStore:
 
     def update_requirements(self, requirements: list[dict[str, Any]]) -> None:
         state = _load(self._cid())
-        state["requirements"] = _clean_requirements(requirements, self.limits["requirement_items"])
+        state["requirements"] = _clean_requirements(requirements, self.limits["requirement_store_items"])
         _save(state, self._cid())
 
     def update_fact_requirements(self, requirements: list[dict[str, Any]]) -> None:

@@ -1156,6 +1156,8 @@ def handle_user_turn(
                 "success": success, "status": status, "reason": reason,
                 "arguments": dict(normalized or {}) if isinstance(normalized, dict) else normalized,
                 "content": result_content,
+                "fingerprint": str(outcome.get("fingerprint") or ""),
+                "evidence_ref": str(observation_id or ""),
             }
             if requirement_key:
                 deterministic_requirement_results[str(requirement_key)] = dict(deterministic_tool_results[name])
@@ -1501,12 +1503,39 @@ def handle_user_turn(
                 return []
             return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
-        def _tooltest_aux(name: str, args: dict[str, Any], *, label: str) -> dict[str, Any]:
+        def _tooltest_attach_provenance(
+            key: str, *, source: str, tool_name: str, status: str, reason: str,
+            fingerprint: str = "", arguments: dict[str, Any] | None = None,
+            evidence_ref: str = "", count_attempt: bool = False,
+        ) -> None:
+            signature = tool_call_signature({
+                "function": {"name": tool_name, "arguments": dict(arguments or {})}
+            }) if tool_name else ""
+            requirement_ledger.record_evidence_for_key(
+                key, source=source, tool_name=tool_name, status=status, reason=reason,
+                fingerprint=fingerprint, arguments_digest=signature[-16:] if signature else "",
+                evidence_ref=evidence_ref, count_attempt=count_attempt,
+            )
+            if WORKING_STATE_ENABLED:
+                WORKING_STATE.update_requirements(requirement_ledger.as_list())
+
+        def _tooltest_aux(
+            name: str, args: dict[str, Any], *, label: str, provenance_key: str = ""
+        ) -> dict[str, Any]:
             aux_key = f"__tooltest_aux__:{label}:{len(tooltest_context.get('tool_search_calls') or [])}"
             ok = _record_harness_recovery_tool(
                 name, args, trigger=f"tooltest:aux:{label}", requirement_key=aux_key,
             )
-            return {"ok": ok, **dict(deterministic_requirement_results.get(aux_key) or {})}
+            row = {"ok": ok, **dict(deterministic_requirement_results.get(aux_key) or {})}
+            if provenance_key:
+                _tooltest_attach_provenance(
+                    provenance_key, source="tool_call", tool_name=name,
+                    status=str(row.get("status") or ("ok" if ok else "error")),
+                    reason=str(row.get("reason") or ("ok" if ok else "tool_error")),
+                    fingerprint=str(row.get("fingerprint") or ""), arguments=args,
+                    evidence_ref=str(row.get("evidence_ref") or ""), count_attempt=True,
+                )
+            return row
 
         def _tooltest_load_recipe_aux(name: str, *, label: str) -> dict[str, Any]:
             aux = _tooltest_aux("load_recipe", {"name": name}, label=label)
@@ -1567,10 +1596,17 @@ def handle_user_turn(
             # 12-14: inspect the model-visible tool surface. Only use tool_search
             # when the requested capability is genuinely absent from that surface.
             if "read_observation" in exposed:
+                _tooltest_attach_provenance(
+                    "tooltest:12", source="tool_surface", tool_name="read_observation",
+                    status="exposed", reason="capability was present in the initial model-visible tool surface",
+                )
                 _tooltest_mark("tooltest:12", "satisfied", "read_observation was already exposed; discovery was not needed")
                 tooltest_context["observation_capability"] = "read_observation"
             else:
-                aux = _tooltest_aux("tool_search", {"query": "read archived observation by observation id", "limit": 5}, label="observation")
+                aux = _tooltest_aux(
+                    "tool_search", {"query": "read archived observation by observation id", "limit": 5},
+                    label="observation", provenance_key="tooltest:12",
+                )
                 tooltest_context["tool_search_calls"].append("observation")
                 if aux.get("ok") and "read_observation" in str(aux.get("content") or ""):
                     _tooltest_mark("tooltest:12", "satisfied", "tool_search discovered read_observation")
@@ -1579,10 +1615,17 @@ def handle_user_turn(
                     _tooltest_mark("tooltest:12", "blocked", "read_observation could not be discovered")
 
             if "search_skills" in exposed:
+                _tooltest_attach_provenance(
+                    "tooltest:13", source="tool_surface", tool_name="search_skills",
+                    status="exposed", reason="capability was present in the initial model-visible tool surface",
+                )
                 _tooltest_mark("tooltest:13", "satisfied", "search_skills was already exposed; discovery was not needed")
                 tooltest_context["skill_capability"] = "search_skills"
             else:
-                aux = _tooltest_aux("tool_search", {"query": "search installed skills procedural guidance", "limit": 5}, label="skills")
+                aux = _tooltest_aux(
+                    "tool_search", {"query": "search installed skills procedural guidance", "limit": 5},
+                    label="skills", provenance_key="tooltest:13",
+                )
                 tooltest_context["tool_search_calls"].append("skills")
                 if aux.get("ok") and "search_skills" in str(aux.get("content") or ""):
                     _tooltest_mark("tooltest:13", "satisfied", "tool_search discovered search_skills")
@@ -1593,10 +1636,15 @@ def handle_user_turn(
             recipe_caps = {"search_recipes", "list_recipes", "load_recipe", "save_recipe", "run_recipe"}
             missing_recipe_caps = sorted(recipe_caps - exposed)
             if not missing_recipe_caps:
+                _tooltest_attach_provenance(
+                    "tooltest:14", source="tool_surface", tool_name="recipe_capabilities",
+                    status="exposed", reason="recipe search/list/load/save/run capabilities were present in the initial tool surface",
+                )
                 _tooltest_mark("tooltest:14", "satisfied", "recipe search/list/load/save/run capabilities were already exposed")
             else:
                 aux = _tooltest_aux(
-                    "tool_search", {"query": "recipe search list load inspect save execute run workflow", "limit": 8}, label="recipes",
+                    "tool_search", {"query": "recipe search list load inspect save execute run workflow", "limit": 8},
+                    label="recipes", provenance_key="tooltest:14",
                 )
                 tooltest_context["tool_search_calls"].append("recipes")
                 discovered = str(aux.get("content") or "")
@@ -1871,10 +1919,15 @@ def handle_user_turn(
             # derived successful requirements are backed by the observations they
             # explicitly audit rather than by model prose.
             missing_evidence = []
+            discovery_keys = {"tooltest:12", "tooltest:13", "tooltest:14"}
             for item in rows.values():
                 if not item.key.startswith("tooltest:") or item.key in {"tooltest:35", "tooltest:36", "tooltest:37"}:
                     continue
                 if item.status not in {"satisfied", "partial"}:
+                    continue
+                if item.key in discovery_keys:
+                    if not item.evidence:
+                        missing_evidence.append(item.label)
                     continue
                 if bool((item.scope or {}).get("derived")):
                     continue

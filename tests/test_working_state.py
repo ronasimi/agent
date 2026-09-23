@@ -245,3 +245,77 @@ def test_followup_preserves_prior_requirement_status_for_state_visibility(monkey
         state = store.load()
         assert state["requirements"][0]["tool"] == "dns_diagnose"
         assert state["requirements"][0]["status"] == "satisfied"
+
+
+def test_requirement_persistence_limit_is_separate_from_prompt_render_limit(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        store = _store(monkeypatch, td, max_render_chars=50000)
+        requirements = [
+            {
+                "key": f"tooltest:{i:02d}",
+                "tool": f"tool_{i}",
+                "label": f"requirement {i}",
+                "status": "satisfied",
+                "attempts": 1,
+                "last_reason": "ok",
+                "fingerprint": f"fp{i}",
+                "scope": {"item_number": i},
+            }
+            for i in range(1, 38)
+        ]
+        store.begin_turn(
+            turn_id=37,
+            objective="37-item deterministic plan",
+            rolling_summary="",
+            recalled_context="",
+            recent_messages=[],
+            policy_note="",
+            tool_schemas=[_schema()],
+            requirements=requirements,
+        )
+        persisted = store.load()
+        assert len(persisted["requirements"]) == 37
+        assert persisted["requirements"][0]["key"] == "tooltest:01"
+        assert persisted["requirements"][-1]["key"] == "tooltest:37"
+
+        # Prompt rendering remains separately bounded, so preserving the complete
+        # audit ledger on disk does not automatically inflate model context.
+        rendered = json.loads(store.render())
+        assert len(rendered["requirements"]) <= store.limits["requirement_items"]
+
+
+def test_requirement_evidence_provenance_persists(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        store = _store(monkeypatch, td, max_render_chars=50000)
+        requirements = [{
+            "key": "tooltest:12",
+            "tool": "__tooltest_observation_capability__",
+            "label": "observation retrieval capability discovery",
+            "status": "satisfied",
+            "attempts": 1,
+            "last_reason": "tool_search discovered read_observation",
+            "fingerprint": "",
+            "scope": {"derived": True},
+            "evidence": [{
+                "source": "tool_call",
+                "tool": "tool_search",
+                "status": "ok",
+                "reason": "ok",
+                "arguments_digest": "abc123",
+                "evidence_ref": "obs-1",
+            }],
+        }]
+        store.begin_turn(
+            turn_id=12,
+            objective="provenance",
+            rolling_summary="",
+            recalled_context="",
+            recent_messages=[],
+            policy_note="",
+            tool_schemas=[_schema()],
+            requirements=requirements,
+        )
+        row = store.load()["requirements"][0]
+        assert row["attempts"] == 1
+        assert row["evidence"][0]["tool"] == "tool_search"
+        assert row["evidence"][0]["evidence_ref"] == "obs-1"
