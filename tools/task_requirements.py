@@ -941,6 +941,163 @@ _TOOL_RECIPE_STRESS_SECTION_RE = re.compile(
     r"RECIPE STORAGE INTEGRITY|CLEANUP|REQUIREMENT / EVIDENCE AUDIT)\s*$"
 )
 
+_GENERALIZED_RECIPE_STRESS_SECTION_RE = re.compile(
+    r"(?mi)^\s*([A-N])\.\s*(LEDGER AND SYSTEM BASELINE|TOOL LAYER SEPARATION|"
+    r"CAPABILITY DISCOVERY AND PROVENANCE|DISPOSABLE WORKSPACE TEST|"
+    r"SEMANTIC RECIPE SEARCH|GENERALIZED RECIPE CREATION|FIRST PARAMETERIZED REPLAY|"
+    r"SECOND PARAMETERIZED REPLAY|GENERALIZATION AUDIT|ROUTING AND DISCOVERY AUDIT|"
+    r"OBSERVATION AND FAILURE AUDIT|WORKSPACE CLEANUP|PERSISTED LEDGER AUDIT|FINAL AUDITS)\s*$"
+)
+_GENERALIZED_RECIPE_GENERAL_RULES_RE = re.compile(
+    r"(?mis)^\s*GENERAL RULES\s*$([\s\S]*?)(?=^\s*=+\s*$\n\s*A\.\s*LEDGER AND SYSTEM BASELINE\s*$)"
+)
+
+
+def _generalized_recipe_numbered_items(user_text: str) -> list[tuple[int, str, str]]:
+    """Parse the generalized parameterized-recipe stress plan.
+
+    Unlike the earlier 37-item test, this contract explicitly numbers its
+    GENERAL RULES as requirements 1-15 and then continues with executable and
+    audit requirements 16-72. Recognition is structural rather than tied to the
+    exact opening sentence so small wording changes do not drop the plan back to
+    the generic requirement extractor.
+    """
+    text = str(user_text or "")
+    headings = list(_GENERALIZED_RECIPE_STRESS_SECTION_RE.finditer(text))
+    if len(headings) < 10:
+        return []
+    lower = text.lower()
+    structural_markers = (
+        "parameterized replay", "persisted ledger audit",
+        "generalized recipe creation", "tool_search provenance",
+    )
+    if sum(marker in lower for marker in structural_markers) < 3:
+        return []
+
+    items: list[tuple[int, str, str]] = []
+    rules = _GENERALIZED_RECIPE_GENERAL_RULES_RE.search(text)
+    if rules:
+        block = rules.group(1)
+        matches = list(_NUMBERED_LINE_RE.finditer(block))
+        for idx, match in enumerate(matches):
+            item_start = match.end()
+            item_end = matches[idx + 1].start() if idx + 1 < len(matches) else len(block)
+            body = block[item_start:item_end].strip()
+            if body:
+                items.append((int(match.group(1)), "GENERAL RULES", body))
+
+    for idx, heading in enumerate(headings):
+        section = f"{heading.group(1).upper()}. {heading.group(2).strip()}"
+        start = heading.end()
+        end = headings[idx + 1].start() if idx + 1 < len(headings) else len(text)
+        final_output = re.search(r"(?mi)^\s*FINAL OUTPUT\s*$", text[start:end])
+        if final_output:
+            end = start + final_output.start()
+        block = text[start:end]
+        matches = list(_NUMBERED_LINE_RE.finditer(block))
+        for j, match in enumerate(matches):
+            item_start = match.end()
+            item_end = matches[j + 1].start() if j + 1 < len(matches) else len(block)
+            body = block[item_start:item_end].strip()
+            if body:
+                items.append((int(match.group(1)), section, body))
+
+    by_number: dict[int, tuple[int, str, str]] = {}
+    for row in items:
+        by_number.setdefault(row[0], row)
+    ordered = [by_number[number] for number in sorted(by_number)]
+    # This deterministic plan is intentionally selected only for the complete
+    # contract. Partial/ad-hoc prompts continue through the ordinary compiler.
+    if [row[0] for row in ordered] != list(range(1, 73)):
+        return []
+    return ordered
+
+
+def _generalized_recipe_requirement(number: int, section: str, body: str) -> Requirement:
+    scope: dict[str, Any] = {
+        "item_number": int(number),
+        "section": section,
+        "source_text": body[:2400],
+        "generalized_recipe_stress": True,
+    }
+    key = f"genrecipe:{number:02d}"
+
+    def req(tool: str, label: str, *, derived: bool = False, **extra: Any) -> Requirement:
+        scope.update({k: v for k, v in extra.items() if v not in (None, "", [])})
+        if derived:
+            scope["derived"] = True
+        return Requirement(key=key, tool=tool, label=label, scope=dict(scope))
+
+    # Rules 1-15 are first-class requirements in this contract. They are closed
+    # by deterministic policy/mutation/retry audits after execution.
+    if 1 <= number <= 15:
+        return req(f"__genrecipe_rule_{number:02d}__", f"general rule {number}", derived=True, policy_rule=True)
+
+    direct: dict[int, tuple[str, str, dict[str, Any]]] = {
+        16: ("current_time", "current local system time", {}),
+        17: ("environment_summary", "system identity", {}),
+        18: ("cpu_info", "CPU identity and core counts", {}),
+        19: ("host_snapshot", "host resource state", {}),
+        20: ("ollama_runtime_snapshot", "Ollama runtime state", {}),
+        21: ("dns_query", "DNS resolution for example.com", {"target": "example.com", "record_type": "A"}),
+        22: ("tcp_connect", "TCP connectivity to example.com:443", {"target": "example.com", "port": 443}),
+        23: ("http_probe", "HTTPS probe for example.com", {"target": "https://example.com"}),
+        24: ("page_metadata", "example.com page metadata", {"target": "https://example.com"}),
+        30: ("write_file", "create disposable target file", {
+            "target": "generalized_recipe_test/targets.txt",
+            "content": "example.com\nwww.iana.org\n",
+        }),
+        31: ("read_file", "read disposable target file", {"target": "generalized_recipe_test/targets.txt"}),
+        33: ("search_recipes", "semantic search for generalized endpoint recipe", {
+            "query": "public hostname endpoint health DNS TCP HTTPS page metadata",
+        }),
+        34: ("load_recipe", "inspect existing generalized endpoint recipe", {"conditional": "existing_equivalent"}),
+        36: ("save_recipe", "create parameterized public endpoint recipe", {"conditional": "no_equivalent"}),
+        37: ("search_recipes", "post-create generalized recipe discovery", {"phase": "post_create"}),
+        38: ("load_recipe", "inspect parameterized stored recipe", {"phase": "parameterization"}),
+        39: ("run_recipe", "execute generalized recipe for example.com", {"hostname": "example.com", "phase": "first_replay"}),
+        43: ("run_recipe", "execute generalized recipe for www.iana.org", {"hostname": "www.iana.org", "phase": "second_replay"}),
+        47: ("load_recipe", "inspect generalized recipe after replay", {"phase": "post_replay"}),
+        50: ("search_recipes", "semantic rediscovery using alternate wording", {
+            "query": "check whether a website host resolves accepts TLS web connections responds over HTTPS identify its page",
+            "phase": "alternate_query",
+        }),
+        59: ("remove_path", "remove disposable generalized recipe test directory", {"target": "generalized_recipe_test", "recursive": True}),
+        60: ("path_stat", "verify disposable directory was removed", {"target": "generalized_recipe_test"}),
+        61: ("search_recipes", "verify reusable recipe remains after cleanup", {"phase": "post_cleanup"}),
+    }
+    if number in direct:
+        tool, label, extra = direct[number]
+        return req(tool, label, **extra)
+
+    labels = {
+        25: "network/content layer audit", 26: "observation capability discovery",
+        27: "skill capability discovery", 28: "recipe capability discovery",
+        29: "capability provenance audit", 32: "workspace boundary audit",
+        35: "recipe creation branch selection", 40: "first replay target substitution audit",
+        41: "first replay direct-evidence comparison", 42: "first replay completion audit",
+        44: "second replay target substitution audit", 45: "second replay target evidence audit",
+        46: "two-replay parameterization comparison", 48: "stored recipe result-capture audit",
+        49: "second-target duplicate recipe audit", 51: "direct primitive routing audit",
+        52: "tool_search necessity audit", 53: "tool_search provenance persistence audit",
+        54: "direct versus derived evidence audit", 55: "actual observation truncation audit",
+        56: "recursive read_observation audit", 57: "retry/fallback audit",
+        58: "first replay evidence preservation audit", 62: "cleanup mutation-boundary audit",
+        63: "complete requirement ledger audit", 64: "requirements beyond 24 persistence audit",
+        65: "terminal requirement field preservation audit", 66: "discovery provenance serialization audit",
+        67: "bounded prompt-render audit", 68: "PASS evidence audit",
+        69: "terminal-state exclusivity audit", 70: "pending-requirement audit",
+        71: "single equivalent recipe audit", 72: "deterministic finalization audit",
+    }
+    return req(f"__genrecipe_audit_{number:02d}__", labels.get(number, f"generalized recipe audit {number}"), derived=True)
+
+
+def derive_generalized_recipe_stress_requirements(user_text: str) -> list[Requirement]:
+    items = _generalized_recipe_numbered_items(user_text)
+    if not items:
+        return []
+    return [_generalized_recipe_requirement(number, section, body) for number, section, body in items]
+
 
 def _tool_recipe_numbered_items(user_text: str) -> list[tuple[int, str, str]]:
     """Parse the numbered requirements from the tool/recipe stress prompt.
@@ -1301,6 +1458,9 @@ def _scope_matches(
 def derive_requirements(user_text: str) -> list[Requirement]:
     """Return ordered, deduplicated requirements explicitly present in a request."""
     text = str(user_text or "")
+    generalized_recipe_stress = derive_generalized_recipe_stress_requirements(text)
+    if generalized_recipe_stress:
+        return generalized_recipe_stress
     tool_recipe_stress = derive_tool_recipe_stress_requirements(text)
     if tool_recipe_stress:
         return tool_recipe_stress

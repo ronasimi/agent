@@ -42,6 +42,24 @@ def _extract(value: Any, path: str) -> Any:
 
 def _resolve(value: Any, outputs: dict[str, Any], parameters: dict[str, Any], item: Any = None) -> Any:
     if isinstance(value, dict):
+        if "$template" in value:
+            template = str(value.get("$template") or "")
+            if len(template) > 4096:
+                raise ValueError("recipe template exceeds 4096 characters")
+            raw_vars = value.get("vars") or {}
+            if not isinstance(raw_vars, dict):
+                raise ValueError("$template vars must be an object")
+            resolved_vars = {
+                str(key): _resolve(raw, outputs, parameters, item)
+                for key, raw in raw_vars.items()
+            }
+            try:
+                rendered = template.format_map(resolved_vars)
+            except (KeyError, ValueError) as exc:
+                raise ValueError(f"recipe template resolution failed: {exc}") from exc
+            if len(rendered) > 8192:
+                raise ValueError("resolved recipe template exceeds 8192 characters")
+            return rendered
         if "$ref" in value:
             key = str(value["$ref"])
             if key not in outputs:

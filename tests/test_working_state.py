@@ -319,3 +319,38 @@ def test_requirement_evidence_provenance_persists(monkeypatch):
         assert row["attempts"] == 1
         assert row["evidence"][0]["tool"] == "tool_search"
         assert row["evidence"][0]["evidence_ref"] == "obs-1"
+
+
+def test_requirement_persistence_keeps_72_item_generalized_recipe_plan(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        store = _store(monkeypatch, td, max_render_chars=50000)
+        requirements = [
+            {
+                "key": f"genrecipe:{i:02d}",
+                "tool": f"tool_{i}",
+                "label": f"requirement {i}",
+                "status": "satisfied",
+                "attempts": 1,
+                "last_reason": "ok",
+                "fingerprint": f"fp{i}",
+                "scope": {"item_number": i},
+                "evidence": [{"source": "test", "status": "ok"}],
+            }
+            for i in range(1, 73)
+        ]
+        store.begin_turn(
+            turn_id=72,
+            objective="72-item generalized recipe plan",
+            rolling_summary="",
+            recalled_context="",
+            recent_messages=[],
+            policy_note="",
+            tool_schemas=[_schema()],
+            requirements=requirements,
+        )
+        persisted = store.load()
+        assert len(persisted["requirements"]) == 72
+        assert persisted["requirements"][24]["key"] == "genrecipe:25"
+        assert persisted["requirements"][-1]["key"] == "genrecipe:72"
+        rendered = json.loads(store.render())
+        assert len(rendered["requirements"]) <= 24
