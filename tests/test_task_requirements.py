@@ -219,6 +219,14 @@ def test_news_current_scope_accepts_latest_query_and_empty_completed_retrieval()
     assert ledger.pending() == []
 
 
+
+
+def test_weather_entity_stops_at_following_report_sentence():
+    from tools.task_requirements import derive_task_frame
+
+    frame = derive_task_frame("Determine the current weather for London, Ontario.\n Report:")
+    assert frame["entity"] == "London Ontario"
+
 def test_effective_request_uses_fact_specific_source_for_compound_prompt():
     from tools.task_requirements import derive_fact_frames, effective_request_for_frame
 
@@ -228,3 +236,85 @@ def test_effective_request_uses_fact_specific_source_for_compound_prompt():
     assert "Get the current weather for London, Ontario." in effective
     assert "headlines" not in effective.lower()
     assert "brent" not in effective.lower()
+
+
+def test_sectioned_capability_stress_prompt_compiles_all_24_requirements():
+    from tools.task_requirements import derive_requirements, detect_fact_frame_types
+
+    request = '''EXECUTION RULES
+1. Use the most specific available tool.
+2. Do not repeat equivalent failed calls indefinitely.
+
+REMOTE / INTERNET TOOLS
+1. Determine the current weather for London, Ontario.
+2. Retrieve exactly 3 of the latest local London, Ontario news headlines.
+3. Retrieve the current/latest available Brent crude oil price.
+4. Retrieve https://example.com and report HTTP status, title, and canonical URL.
+
+SYSTEM TOOLS
+5. Determine the current system/local time using a system capability.
+6. Report basic operating-system information: kernel/system name, kernel release, architecture, hostname.
+7. Perform a harmless shell/system execution test and verify HARNESS_SYSTEM_TOOL_OK.
+8. Inspect available filesystem information and report free space for the agent workspace filesystem.
+
+HOST TOOLS
+9. Obtain a host snapshot and report uptime, total memory, available memory, load, and root filesystem utilization.
+10. Report CPU identity/model and logical CPU count.
+11. Report host thermal information if available; check temperature sensors.
+12. Determine whether Ollama is currently running on the host.
+
+GOOGLE ACCOUNT TOOLS
+13. Gmail: determine access and report the 3 most recent inbox messages.
+14. Google Calendar: report the next 3 upcoming calendar events.
+15. Google Drive: list the 3 most recently modified files.
+
+NETWORK TOOLS
+16. Resolve example.com with the available DNS/network tool.
+17. Probe TCP connectivity to example.com port 443.
+18. Perform an HTTPS probe against https://example.com.
+19. Test DNS resolution for harness-stress-test-invalid.example and treat NXDOMAIN as PASS.
+20. Check localhost connectivity to http://127.0.0.1:11434/api/version.
+
+CROSS-CAPABILITY CONSISTENCY TESTS
+21. Compare the system time result with timestamps returned by at least one current remote source.
+22. Verify that the HTTP page retrieval result for example.com and the network HTTPS probe agree about basic reachability.
+23. Verify that every successful requirement has actual tool evidence.
+24. Check the observations generated during this test for truncation warnings and recover any middle truncation.
+
+FINAL OUTPUT
+Return the requested sectioned report.'''
+
+    requirements = derive_requirements(request)
+    assert len(requirements) == 24
+    assert [item.key for item in requirements] == [f"stress:{i:02d}" for i in range(1, 25)]
+    tools = [item.tool for item in requirements]
+    assert tools.count("dns_query") == 2
+    assert tools.count("http_probe") == 2
+    assert tools[14] == "google_drive_list_files"
+    assert tools[20:24] == [
+        "__derived_time_consistency__",
+        "__derived_reachability_consistency__",
+        "__derived_evidence_audit__",
+        "__derived_truncation_audit__",
+    ]
+    assert detect_fact_frame_types(request) == {"weather", "news", "market_price", "current_time"}
+    # Execution rules are not compiled as tasks.
+    assert all("Use the most specific" not in str(item.scope.get("source_text") or "") for item in requirements)
+
+
+def test_duplicate_primitives_track_scoped_requirements_independently():
+    from tools.task_requirements import Requirement, TaskRequirementLedger
+
+    ledger = TaskRequirementLedger([
+        Requirement("one", "dns_query", "example", scope={"target": "example.com"}),
+        Requirement("two", "dns_query", "negative", scope={"target": "invalid.example"}),
+    ])
+    ledger.record_tool(
+        "dns_query", status="ok", reason="ok",
+        arguments={"name": "example.com", "record_type": "A"},
+        result_text='{"status":"NOERROR","answers":["example.com. A 1.2.3.4"]}',
+    )
+    assert ledger.requirements[0].status == "satisfied"
+    assert ledger.requirements[0].attempts == 1
+    assert ledger.requirements[1].status == "pending"
+    assert ledger.requirements[1].attempts == 0

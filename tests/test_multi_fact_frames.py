@@ -520,3 +520,160 @@ At the end, provide a concise structured answer with:
     assert "### File summary" in content and "unresolved" in content
     assert "### Any unresolved items" in content
     assert "hard turn/model-call budget exhausted" not in content
+
+
+def test_sectioned_24_item_capability_stress_finishes_without_model_loop(monkeypatch):
+    from al_agent import turn_engine as te
+
+    request = '''REMOTE / INTERNET TOOLS
+1. Determine the current weather for London, Ontario.
+2. Retrieve exactly 3 of the latest local London, Ontario news headlines.
+3. Retrieve the current/latest available Brent crude oil price.
+4. Retrieve https://example.com and report HTTP status, title, and canonical URL.
+SYSTEM TOOLS
+5. Determine the current system/local time using a system capability.
+6. Report basic operating-system information: kernel/system name, kernel release, architecture, hostname.
+7. Perform a harmless shell/system execution test and verify HARNESS_SYSTEM_TOOL_OK.
+8. Inspect available filesystem information and report free space for the agent workspace filesystem.
+HOST TOOLS
+9. Obtain a host snapshot and report uptime, total memory, available memory, load, and root filesystem utilization.
+10. Report CPU identity/model and logical CPU count.
+11. Report host thermal information if available; check temperature sensors.
+12. Determine whether Ollama is currently running on the host.
+GOOGLE ACCOUNT TOOLS
+13. Gmail: determine access and report the 3 most recent inbox messages.
+14. Google Calendar: report the next 3 upcoming calendar events.
+15. Google Drive: list the 3 most recently modified files.
+NETWORK TOOLS
+16. Resolve example.com with the available DNS/network tool.
+17. Probe TCP connectivity to example.com port 443.
+18. Perform an HTTPS probe against https://example.com.
+19. Test DNS resolution for harness-stress-test-invalid.example and treat NXDOMAIN as PASS.
+20. Check localhost connectivity to http://127.0.0.1:11434/api/version.
+CROSS-CAPABILITY CONSISTENCY TESTS
+21. Compare the system time result with timestamps returned by at least one current remote source.
+22. Verify that the HTTP page retrieval result for example.com and the network HTTPS probe agree about basic reachability.
+23. Verify that every successful requirement has actual tool evidence.
+24. Check the observations generated during this test for truncation warnings and recover any middle truncation.
+FINAL OUTPUT
+Return the requested sectioned report.'''
+
+    calls = []
+
+    def fake_weather_recovery(user_request, memory_context="", *, frame=None):
+        return {
+            "ok": True,
+            "stages": [
+                {"id": "place", "tool": "geocode_location", "ok": True, "args": {"query": "London, Ontario"}},
+                {"id": "forecast", "tool": "weather_forecast", "ok": True,
+                 "args": {"latitude": 42.98, "longitude": -81.24, "forecast_days": 1}},
+                {"id": "result", "tool": "compose_object", "ok": True},
+            ],
+            "result": {
+                "location": "London, Ontario, Canada",
+                "place": {"name": "London", "admin1": "Ontario", "country": "Canada"},
+                "forecast": {
+                    "provider": "Open-Meteo", "retrieved_at": "2026-09-23T11:15:00+00:00",
+                    "timezone_abbreviation": "EDT",
+                    "current": {"time": "2026-09-23T07:15", "temperature_2m": 14.0,
+                                "apparent_temperature": 13.0, "weather_code": 2,
+                                "relative_humidity_2m": 65, "wind_speed_10m": 12.0},
+                },
+            },
+            "grounding_recovery": {"fact_type": "weather", "location": "London, Ontario, Canada"},
+        }
+
+    def fake_execute(name, args):
+        calls.append((name, dict(args)))
+        if name == "news_search":
+            return json.dumps([
+                {"title": f"Headline {i}", "url": f"https://news.example/{i}",
+                 "source": "London Free Press", "date": "2026-09-23T10:00:00Z"}
+                for i in range(1, 5)
+            ])
+        if name == "market_quote":
+            return json.dumps({"quotes": [{"instrument": "brent", "name": "Brent Crude Oil Futures",
+                "symbol": "BZ=F", "price": 98.15, "currency": "USD", "unit": "USD/barrel",
+                "as_of": "2026-09-23T11:05:00+00:00"}], "errors": []})
+        if name == "current_time":
+            return json.dumps({"utc": "2026-09-23T11:16:00+00:00", "local": "2026-09-23T07:16:00-04:00", "timezone": "America/Toronto"})
+        if name == "page_metadata":
+            return json.dumps({"url": "https://example.com", "canonical": "https://example.com/", "http_status": 200, "title": "Example Domain"})
+        if name == "environment_summary":
+            return json.dumps({"platform": "Linux-test", "kernel": "6.17-test", "architecture": "x86_64", "host_hostname": "host"})
+        if name == "execute_shell":
+            return "STDOUT: HARNESS_SYSTEM_TOOL_OK\nSTDERR:"
+        if name == "filesystem_snapshot":
+            return json.dumps({"filesystems": [{"mountpoint": "/", "free_gb": 100.0, "used_percent": 25.0}]})
+        if name == "host_snapshot":
+            return json.dumps({"uptime_seconds": 1234, "load_average": [0.5, 0.4, 0.3],
+                "memory": {"total_mb": 16000, "available_mb": 8000}, "disk": {"used_percent": 25.0}})
+        if name == "cpu_info":
+            return json.dumps({"models": ["Test CPU"], "logical_cpus": 12})
+        if name == "temperature_sensors":
+            return json.dumps({"k10temp": [{"current": 52.0}]})
+        if name == "ollama_runtime_snapshot":
+            return json.dumps({"models": [{"name": "agent-main:4b"}]})
+        if name == "gmail_search_messages":
+            return json.dumps({"ok": True, "messages": [
+                {"from": "a@example.com", "subject": "A", "date": "2026-09-23"},
+                {"from": "b@example.com", "subject": "B", "date": "2026-09-22"},
+                {"from": "c@example.com", "subject": "C", "date": "2026-09-21"},
+            ]})
+        if name == "google_calendar_list_events":
+            return json.dumps({"ok": True, "events": [{"summary": "Review", "start": {"dateTime": "2026-09-24T10:00:00Z"}}]})
+        if name == "google_drive_list_files":
+            return json.dumps({"ok": True, "files": [{"name": "doc.txt", "mime_type": "text/plain", "modified_time": "2026-09-23T10:00:00Z"}]})
+        if name == "dns_query":
+            host = args["name"]
+            if host == "harness-stress-test-invalid.example":
+                return json.dumps({"ok": True, "status": "NXDOMAIN", "answers": [], "elapsed_ms": 3.0})
+            return json.dumps({"ok": True, "status": "NOERROR", "answers": ["example.com. 60 IN A 93.184.216.34"], "elapsed_ms": 2.0})
+        if name == "tcp_connect":
+            return json.dumps({"ok": True, "connected_address": "93.184.216.34", "tcp_connect_ms": 15.0})
+        if name == "http_probe":
+            return json.dumps({"ok": True, "http_ok": True, "http_status": 200,
+                               "time_to_headers_ms": 35.0, "tls_version": "TLSv1.3", "server": "example"})
+        raise AssertionError((name, args))
+
+    class NoModel:
+        def chat(self, **kwargs):
+            raise AssertionError("main model must not be used for deterministic stress probes")
+
+    monkeypatch.setattr(te, "execute_weather_grounding_recovery", fake_weather_recovery)
+    monkeypatch.setattr(te, "_execute_registered_tool", fake_execute)
+    monkeypatch.setattr(te, "WORKING_STATE_ENABLED", False)
+    monkeypatch.setattr(te, "RECIPES_ENABLED", False)
+    monkeypatch.setattr(te, "LOOP_VALIDATOR_ENABLED", False)
+    monkeypatch.setattr(te, "get_conversation_summary", lambda: "")
+    monkeypatch.setattr(te, "build_memory_context", lambda *_: "")
+    monkeypatch.setattr(te, "get_relevant_user_prompt_context", lambda *_: "")
+    monkeypatch.setattr(te, "get_user_location", lambda: "London, Ontario, Canada")
+    monkeypatch.setattr(te, "_bounded_tool_result_with_ref", lambda _name, text: (text, ""))
+    monkeypatch.setattr(te, "evict_report_model_for_interactive", lambda: None)
+    monkeypatch.setattr(te, "_prune_compacted_history", lambda _messages: None)
+    monkeypatch.setattr(te, "log_perf_stats", lambda *a, **k: None)
+
+    messages = [{"role": "system", "content": "system"}]
+    te.handle_user_turn(
+        messages, request, False,
+        runtime_overrides={
+            "OLLAMA": NoModel(), "record_monitor_state": lambda *a, **k: None,
+            "append_and_save": lambda rows, item: rows.append(item),
+            "acquire_turn_lock": lambda: object(), "release_turn_lock": lambda _lock: None,
+            "acquire_inference_lock": lambda: (_ for _ in ()).throw(AssertionError("model lock should not be acquired")),
+            "release_inference_lock": lambda _lock: None, "queue_compaction_if_needed": lambda *a, **k: None,
+        },
+    )
+
+    content = messages[-1]["content"]
+    for heading in ("## Remote tools", "## System tools", "## Host tools", "## Google account tools", "## Network tools", "## Cross-checks", "## Unresolved requirements"):
+        assert heading in content
+    assert "Headline 1" in content and "Headline 3" in content and "Headline 4" not in content
+    assert "HARNESS_SYSTEM_TOOL_OK" in content
+    assert "Expected DNS failure — PASS" in content
+    assert "Time consistency — PASS" in content
+    assert "Evidence audit — PASS" in content
+    assert "hard turn/model-call budget exhausted" not in content
+    assert len([name for name, _ in calls if name == "dns_query"]) == 2
+    assert len([name for name, _ in calls if name == "http_probe"]) == 2

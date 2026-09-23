@@ -19,7 +19,8 @@ from .credential_store import CredentialStoreError, LocalCredentialStore
 
 GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
-GOOGLE_WORKSPACE_SCOPES = (GMAIL_READONLY_SCOPE, CALENDAR_READONLY_SCOPE)
+DRIVE_METADATA_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.metadata.readonly"
+GOOGLE_WORKSPACE_SCOPES = (GMAIL_READONLY_SCOPE, CALENDAR_READONLY_SCOPE, DRIVE_METADATA_READONLY_SCOPE)
 
 GOOGLE_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"

@@ -99,11 +99,12 @@ Each browser thread has its own conversation ID, chat rows, rolling summary, too
 
 ### Google Workspace (read-only)
 
-Open **Connections** in the sidebar to connect Gmail and Google Calendar. The integration requests exactly these two OAuth scopes:
+Open **Connections** in the sidebar to connect Gmail, Google Calendar, and Google Drive metadata. The integration requests exactly these three read-only OAuth scopes:
 
 ```text
 https://www.googleapis.com/auth/gmail.readonly
 https://www.googleapis.com/auth/calendar.readonly
+https://www.googleapis.com/auth/drive.metadata.readonly
 ```
 
 The registered tools are:
@@ -115,13 +116,14 @@ The registered tools are:
 | Calendar | `google_calendar_list_calendars` | List visible calendars |
 | Calendar | `google_calendar_list_events` | List events in a bounded time range |
 | Calendar | `google_calendar_get_event` | Read one event and bounded attendee/details data |
+| Drive | `google_drive_list_files` | List bounded file metadata ordered by modification time; file contents are not opened |
 
-None of these tools can send or modify email, add labels, create or edit events, invite attendees, or delete Google data. Google-derived text is marked as untrusted external content in every tool response so instructions inside a message or event are treated as data, not agent commands.
+None of these tools can send or modify email, add labels, create or edit events, invite attendees, modify Drive files, or delete Google data. Google-derived text is marked as untrusted external content in every tool response so instructions inside a message or event are treated as data, not agent commands.
 
 #### Google Cloud setup
 
 1. Create or select a Google Cloud project.
-2. Enable both the **Gmail API** and **Google Calendar API**.
+2. Enable the **Gmail API**, **Google Calendar API**, and **Google Drive API**.
 3. Configure the OAuth consent screen. For an External app in testing, add the connecting Google account as a test user.
 4. Create an **OAuth client ID** with application type **Web application**.
 5. Add the redirect URI shown in the Connections screen. With the default configuration it is:
@@ -210,7 +212,7 @@ Examples of available tool families include:
 - **Research:** `enqueue_research`, `get_research_status`
 - **Automation:** `schedule_reminder`, `list_reminders`, durable jobs
 - **Media/profile:** `image_info`, `attach_media`, `set_profile_image`, `profile_image_info`
-- **Google Workspace:** `gmail_search_messages`, `gmail_read_message`, `google_calendar_list_events`, `google_calendar_get_event`, `google_calendar_list_calendars`
+- **Google Workspace:** `gmail_search_messages`, `gmail_read_message`, `google_calendar_list_events`, `google_calendar_get_event`, `google_calendar_list_calendars`, `google_drive_list_files`
 - **Recipes:** `search_recipes`, `run_recipe`, `save_recipe`, `run_pipeline`
 - **Skills:** `search_skills`, `load_skill` (metadata-first, full instructions loaded lazily)
 

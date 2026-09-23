@@ -163,16 +163,17 @@
         <div class="integration-intro">
           <span class="readonly-badge">Read-only</span>
           <h3>Connect Google Workspace</h3>
-          <p>Search and read Gmail, calendars, and events when you ask. Al Agent cannot send mail or change either service.</p>
+          <p>Read Gmail, Calendar, and Drive metadata when you ask. Al Agent cannot send mail or modify Google data.</p>
         </div>
         <div class="capability-grid">
           <article class="capability-card"><div class="capability-icon"><span class="mdi mdi-email-outline mdi-ui" data-fallback="M" aria-hidden="true"></span></div><div><strong>Gmail</strong><p>Search messages and read bounded message bodies. Attachments are not downloaded.</p><code>gmail.readonly</code></div></article>
           <article class="capability-card"><div class="capability-icon calendar"><span class="mdi mdi-calendar-month-outline mdi-ui" data-fallback="31" aria-hidden="true"></span></div><div><strong>Calendar</strong><p>List calendars and inspect schedules and event details.</p><code>calendar.readonly</code></div></article>
+          <article class="capability-card"><div class="capability-icon"><span class="mdi mdi-google-drive mdi-ui" data-fallback="D" aria-hidden="true"></span></div><div><strong>Drive</strong><p>List recently modified file metadata without opening file contents.</p><code>drive.metadata.readonly</code></div></article>
         </div>
         <details class="oauth-guide">
           <summary>Google Cloud setup</summary>
           <ol>
-            <li>Enable the Gmail API and Google Calendar API in your Google Cloud project.</li>
+            <li>Enable the Gmail API, Google Calendar API, and Google Drive API in your Google Cloud project.</li>
             <li>Configure the OAuth consent screen and add yourself as a test user when applicable.</li>
             <li>Create an OAuth 2.0 <strong>Web application</strong> client and add this authorized redirect URI:<code id="googleRedirectUri">Loading…</code></li>
             <li>Download the client JSON, select it below, then connect.</li>

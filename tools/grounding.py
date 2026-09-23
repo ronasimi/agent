@@ -74,7 +74,12 @@ _WEATHER_NUMERIC_FIELD_RE = re.compile(
     r"(?:temperature(?:\s+2m)?|apparent temperature|feels like|humidity|wind(?: speed)?(?:\s+10m)?|"
     r"wind gusts?(?:\s+10m)?|precipitation(?: probability)?|rain(?:fall)?|snow(?:fall)?|"
     r"pressure|visibility|dew point|cloud cover|highs?|lows?)"
-    r"[^0-9+\-]{0,40}[+\-]?\d+(?:\.\d+)?",
+    # Require a field-like separator/value shape.  The older expression allowed
+    # arbitrary prose for 40 characters, so article text such as
+    # ``snow? 1:03`` or ``high pressure grips Ontario ... 1:33`` could be
+    # mistaken for a meteorological reading.
+    r"[\"']?\s*(?:(?::|=|--?)\s*)?(?:N|NNE|NE|ENE|E|ESE|SE|SSE|S|SSW|SW|WSW|W|WNW|NW|NNW)?\s*"
+    r"[+\-]?\d+(?:\.\d+)?(?:\s*(?:°\s*[CF]|%|km/h|kph|mph|hPa|mb|mm|cm|m|km))?",
     re.I,
 )
 _WEATHER_CONDITION_RE = re.compile(

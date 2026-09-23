@@ -58,6 +58,8 @@ TOOL_BUNDLES = (
      ('gmail_search_messages', 'gmail_read_message')),
     ({'calendar', 'agenda', 'meeting', 'meetings', 'appointment', 'appointments', 'events'},
      ('google_calendar_list_events', 'google_calendar_get_event', 'google_calendar_list_calendars')),
+    ({'drive', 'google drive', 'files'},
+     ('google_drive_list_files',)),
     ({'clock', 'time', 'local', 'today', 'utc', 'timezone', 'date'},
      ('current_time', 'hostname', 'environment_summary')),
     ({'convert', 'hash', 'calculate', 'calculation', 'encode', 'decode', 'conversion', 'base64', 'units', 'compare'},

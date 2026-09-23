@@ -536,7 +536,7 @@ def _bounded_tool_result_with_ref(tool_name: str, result: Any) -> tuple[str, str
         marker = (
             f"\n\n[Harness: middle truncated; full {len(text)}-character result stored as observation "
             f"{observation_id}. You MUST use read_observation(observation_id='{observation_id}', "
-            f"offset={head}, length=10000) to retrieve missing middle data before summarizing.]\n\n"
+            f"offset={head}, length=3500) to retrieve missing middle data before summarizing.]\n\n"
         )
         remaining = max(200, MAX_TOOL_OUTPUT - len(marker))
         next_head = remaining // 2
@@ -547,7 +547,7 @@ def _bounded_tool_result_with_ref(tool_name: str, result: Any) -> tuple[str, str
     marker = (
         f"\n\n[Harness: middle truncated; full {len(text)}-character result stored as observation "
         f"{observation_id}. You MUST use read_observation(observation_id='{observation_id}', "
-        f"offset={head}, length=10000) to retrieve missing middle data before summarizing.]\n\n"
+        f"offset={head}, length=3500) to retrieve missing middle data before summarizing.]\n\n"
     )
     remaining = max(200, MAX_TOOL_OUTPUT - len(marker))
     head = remaining // 2

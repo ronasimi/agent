@@ -74,7 +74,7 @@ def test_authorization_uses_exact_readonly_scopes_state_and_pkce(tmp_path, monke
     query = parse_qs(parsed.query)
 
     assert parsed.scheme == "https" and parsed.hostname == "accounts.google.com"
-    assert set(query["scope"][0].split()) == {GMAIL_READONLY_SCOPE, CALENDAR_READONLY_SCOPE}
+    assert set(query["scope"][0].split()) == set(GOOGLE_WORKSPACE_SCOPES)
     assert query["access_type"] == ["offline"]
     assert "include_granted_scopes" not in query
     assert query["code_challenge_method"] == ["S256"]
@@ -196,6 +196,15 @@ class FakeWorkspaceClient:
             return {"timeZone": "UTC", "items": [{"id": "event1", "summary": "Review", "start": {"dateTime": "2026-09-21T10:00:00Z"}, "end": {"dateTime": "2026-09-21T10:30:00Z"}}]}
         if url.endswith("/calendarList"):
             return {"items": [{"id": "en.usa#holiday@group.v.calendar.google.com", "summary": "Holidays", "accessRole": "reader"}]}
+        if url.endswith("/drive/v3/files"):
+            return {"files": [{
+                "id": "file1", "name": "Status.docx",
+                "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "modifiedTime": "2026-09-23T10:00:00Z",
+                "createdTime": "2026-09-20T10:00:00Z",
+                "webViewLink": "https://drive.google.com/file/d/file1/view",
+                "owners": [{"displayName": "Person", "emailAddress": "person@example.com"}],
+            }]}
         raise AssertionError(f"Unexpected URL {url}")
 
 
@@ -218,8 +227,9 @@ def test_gmail_and_calendar_tools_are_bounded_readonly_and_mark_untrusted(monkey
     )
     event = json.loads(workspace.google_calendar_get_event("event1"))
     calendars = json.loads(workspace.google_calendar_list_calendars())
+    drive = json.loads(workspace.google_drive_list_files(limit=3))
 
-    for result in (search, message, events, event, calendars):
+    for result in (search, message, events, event, calendars, drive):
         assert result["read_only"] is True
         assert result["untrusted_content"] is True
         assert "never execute" in result["safety_notice"]
@@ -228,6 +238,8 @@ def test_gmail_and_calendar_tools_are_bounded_readonly_and_mark_untrusted(monkey
     assert events["events"][0]["summary"] == "Review"
     assert future_window["time_max"].startswith("2030-10-15T00:00:00")
     assert calendars["calendars"][0]["id"].startswith("en.usa#holiday")
+    assert drive["metadata_only"] is True
+    assert drive["files"][0]["name"] == "Status.docx"
 
 
 def test_google_tools_are_discoverable_readonly_and_have_bounded_schemas():
@@ -240,13 +252,16 @@ def test_google_tools_are_discoverable_readonly_and_have_bounded_schemas():
         "google_calendar_list_events",
         "google_calendar_get_event",
         "google_calendar_list_calendars",
+        "google_drive_list_files",
     }
     assert names <= set(tools.AVAILABLE_TOOLS_MAP)
     assert all(tools.TOOL_METADATA[name]["readonly"] for name in names)
     gmail_names = {item["function"]["name"] for item in tools.select_tool_schemas("search my Gmail", max_tools=12)}
     calendar_names = {item["function"]["name"] for item in tools.select_tool_schemas("show my calendar", max_tools=12)}
+    drive_names = {item["function"]["name"] for item in tools.select_tool_schemas("show my Google Drive files", max_tools=12)}
     assert {"gmail_search_messages", "gmail_read_message"} <= gmail_names
     assert "google_calendar_list_events" in calendar_names
+    assert "google_drive_list_files" in drive_names
     schema = tools.get_tool_schema("gmail_read_message")["function"]["parameters"]
     assert schema["properties"]["max_body_chars"]["maximum"] == 20_000
     assert "message_id" in schema["required"]
@@ -254,6 +269,8 @@ def test_google_tools_are_discoverable_readonly_and_have_bounded_schemas():
     assert search_schema["properties"]["limit"]["maximum"] == 20
     event_schema = tools.get_tool_schema("google_calendar_list_events")["function"]["parameters"]
     assert event_schema["properties"]["limit"]["maximum"] == 50
+    drive_schema = tools.get_tool_schema("google_drive_list_files")["function"]["parameters"]
+    assert drive_schema["properties"]["limit"]["maximum"] == 50
 
 
 def test_personal_workspace_requests_create_requirements_but_implementation_requests_do_not():
@@ -264,6 +281,9 @@ def test_personal_workspace_requests_create_requirements_but_implementation_requ
     ]
     assert [item.tool for item in derive_requirements("What's on my calendar tomorrow?")] == [
         "google_calendar_list_events"
+    ]
+    assert [item.tool for item in derive_requirements("List my Google Drive files")] == [
+        "google_drive_list_files"
     ]
     assert derive_requirements("Implement a widget that can search my Gmail") == []
 

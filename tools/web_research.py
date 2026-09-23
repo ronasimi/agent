@@ -31,12 +31,26 @@ def _page(url: str, max_bytes: int = 2 * 1024 * 1024) -> tuple[str, str, Beautif
 
 
 def page_metadata(url: str) -> str:
-    """Extract title, canonical URL, authorship/date hints, OpenGraph, Twitter, and JSON-LD metadata from a public page."""
+    """Extract status/title/canonical URL and bounded metadata from a public page."""
     try:
-        final_url, content_type, soup, _ = _page(url)
+        final_url, response, raw = fetch_bytes(
+            str(url), max_bytes=2 * 1024 * 1024,
+            allowed_types={"text/html", "application/xhtml+xml", "text/plain"},
+        )
+        content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        encoding = response.encoding or "utf-8"
+        try:
+            body = raw.decode(encoding, errors="replace")
+        except LookupError:
+            body = raw.decode("utf-8", errors="replace")
+        soup = BeautifulSoup(body, "html.parser")
     except Exception as exc:
         return f"Error: page metadata fetch failed: {exc}"
-    metadata: dict = {"url": final_url, "content_type": content_type, "title": soup.title.get_text(" ", strip=True)[:500] if soup.title else ""}
+    metadata: dict = {
+        "url": final_url, "http_status": int(response.status_code),
+        "content_type": content_type,
+        "title": soup.title.get_text(" ", strip=True)[:500] if soup.title else "",
+    }
     canonical = soup.find("link", rel=lambda v: v and "canonical" in (v if isinstance(v, list) else [v]))
     if canonical and canonical.get("href"):
         metadata["canonical"] = urljoin(final_url, canonical.get("href"))

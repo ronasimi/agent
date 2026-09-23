@@ -6,4 +6,5 @@ TOOL_SPECS = [
     ("google_workspace", "google_calendar_list_events"),
     ("google_workspace", "google_calendar_get_event"),
     ("google_workspace", "google_calendar_list_calendars"),
+    ("google_workspace", "google_drive_list_files"),
 ]

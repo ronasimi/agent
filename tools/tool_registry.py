@@ -65,6 +65,8 @@ _SCHEMA_OVERRIDES: dict[tuple[str, str], dict[str, Any]] = {
     ("google_calendar_list_events", "calendar_id"): {"maxLength": 1024},
     ("google_calendar_list_events", "limit"): {"maximum": 50},
     ("google_calendar_list_events", "account"): {"maxLength": 160},
+    ("google_drive_list_files", "limit"): {"maximum": 50},
+    ("google_drive_list_files", "account"): {"maxLength": 160},
     ("google_calendar_get_event", "event_id"): {"maxLength": 1024},
     ("google_calendar_get_event", "calendar_id"): {"maxLength": 1024},
     ("google_calendar_get_event", "account"): {"maxLength": 160},

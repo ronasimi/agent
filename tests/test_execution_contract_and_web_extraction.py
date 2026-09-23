@@ -97,7 +97,7 @@ def test_truncated_tool_result_forces_read_observation_before_summary(monkeypatc
         if name == "browse_url":
             return (
                 "HEAD\n\n[Harness: middle truncated; full 36000-character result stored as observation obs123. "
-                "You MUST use read_observation(observation_id='obs123', offset=6000, length=10000) "
+                "You MUST use read_observation(observation_id='obs123', offset=6000, length=3500) "
                 "to retrieve missing middle data before summarizing.]\n\nTAIL",
                 "obs123",
             )
@@ -155,6 +155,6 @@ def test_truncated_tool_result_forces_read_observation_before_summary(monkeypatc
     )
 
     reads = [item for item in calls if item[0] == "tool" and item[1] == "read_observation"]
-    assert [row[2]["offset"] for row in reads] == [6000, 16000, 26000]
+    assert [row[2]["offset"] for row in reads] == [6000, 9500, 13000, 16500, 20000, 23500, 27000, 30500, 34000]
     assert model.calls == 2
     assert messages[-1]["content"] == "The article summary uses the recovered middle data."

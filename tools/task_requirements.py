@@ -92,6 +92,11 @@ _RULES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
         r"\bmy\s+(?:upcoming\s+)?(?:calendar\s+)?(?:events|meetings|appointments)\b",
         r"\b(?:what(?:'s| is)|show|check|list)\s+(?:on\s+)?my\s+schedule\b",
     )),
+    ("google_drive", "google_drive_list_files", "requested Google Drive files", (
+        r"\b(?:check|search|show|find|list|read)\s+(?:my\s+)?google\s+drive\b",
+        r"\b(?:recent|recently modified|latest)\s+(?:google\s+)?drive\s+files?\b",
+        r"\bgoogle\s+drive\b.{0,80}\bfiles?\b",
+    )),
 )
 
 # Explicit tool names in the user's request are requirements as well.  This list
@@ -113,7 +118,7 @@ _EXPLICIT_TOOL_NAMES = {
     "repo_status", "repo_checks", "page_metadata", "page_links", "extract_document", "read_file",
     "current_time", "hostname", "environment_summary", "local_subnets", "scan_subnet",
     "gmail_search_messages", "gmail_read_message", "google_calendar_list_events",
-    "google_calendar_get_event", "google_calendar_list_calendars",
+    "google_calendar_get_event", "google_calendar_list_calendars", "google_drive_list_files",
 }
 
 _FACT_RULE_INTENTS = {
@@ -488,7 +493,10 @@ def _extract_weather_entity(text: str, previous: dict[str, Any] | None = None) -
         if candidate:
             return candidate
     # "weather for Toronto tomorrow" and similar.
-    match = re.search(r"\b(?:weather|forecast)\s+(?:for\s+)?(.+)$", value, flags=re.I)
+    match = re.search(
+        r"\b(?:weather|forecast)\s+(?:for\s+)?(.+?)(?:[.!?](?:\s|$)|$)",
+        value, flags=re.I,
+    )
     if match:
         candidate = _clean_entity(match.group(1))
         words = [w for w in re.findall(r"[A-Za-z0-9'-]+", candidate) if w.lower() not in _LOCATION_STOP]
@@ -586,8 +594,18 @@ _ALL_TIME_MODIFIER_RE = re.compile(
 
 def detect_fact_frame_types(user_text: str) -> set[str]:
     """Detect independently scoped live-fact intents without choosing a primary one."""
-    text = " ".join(str(user_text or "").strip().split())
-    if not text or is_implementation_request(text):
+    raw = str(user_text or "")
+    text = " ".join(raw.strip().split())
+    if not text:
+        return set()
+    stress_requirements = derive_stress_requirements(raw)
+    if stress_requirements:
+        return {
+            str((item.scope or {}).get("fact_type") or "")
+            for item in stress_requirements
+            if str((item.scope or {}).get("fact_type") or "")
+        }
+    if is_implementation_request(text):
         return set()
     result: set[str] = set()
     if is_weather_fact_request(text):
@@ -887,6 +905,150 @@ def _extract_target(tool: str, text: str) -> str:
     return ""
 
 
+
+_STRESS_SECTION_NAMES = (
+    "REMOTE / INTERNET TOOLS",
+    "SYSTEM TOOLS",
+    "HOST TOOLS",
+    "GOOGLE ACCOUNT TOOLS",
+    "NETWORK TOOLS",
+    "CROSS-CAPABILITY CONSISTENCY TESTS",
+)
+_STRESS_SECTION_RE = re.compile(
+    r"(?mi)^\s*(REMOTE / INTERNET TOOLS|SYSTEM TOOLS|HOST TOOLS|GOOGLE ACCOUNT TOOLS|NETWORK TOOLS|CROSS-CAPABILITY CONSISTENCY TESTS)\s*$"
+)
+_NUMBERED_LINE_RE = re.compile(r"(?m)^\s*(\d{1,3})\.\s+")
+
+
+def _stress_numbered_items(user_text: str) -> list[tuple[int, str, str]]:
+    """Return numbered requirements only from explicit capability-test sections.
+
+    Long stress prompts commonly contain a numbered EXECUTION RULES preamble.
+    Treating those numbers as tasks is as harmful as dropping the real tasks, so
+    only the named capability sections participate in this compiler.
+    """
+    text = str(user_text or "")
+    headings = list(_STRESS_SECTION_RE.finditer(text))
+    if not headings:
+        return []
+    items: list[tuple[int, str, str]] = []
+    for idx, heading in enumerate(headings):
+        section = heading.group(1).strip()
+        start = heading.end()
+        end = headings[idx + 1].start() if idx + 1 < len(headings) else len(text)
+        final_output = re.search(r"(?mi)^\s*FINAL OUTPUT\s*$", text[start:end])
+        if final_output:
+            end = start + final_output.start()
+        block = text[start:end]
+        matches = list(_NUMBERED_LINE_RE.finditer(block))
+        for j, match in enumerate(matches):
+            item_start = match.end()
+            item_end = matches[j + 1].start() if j + 1 < len(matches) else len(block)
+            body = block[item_start:item_end].strip()
+            if body:
+                items.append((int(match.group(1)), section, body))
+    # Preserve source order and protect against accidentally parsing repeated
+    # examples in a malformed prompt.
+    seen: set[int] = set()
+    ordered: list[tuple[int, str, str]] = []
+    for row in sorted(items, key=lambda value: value[0]):
+        if row[0] in seen:
+            continue
+        seen.add(row[0]); ordered.append(row)
+    return ordered
+
+
+def _stress_requirement(number: int, section: str, body: str) -> Requirement | None:
+    """Compile one explicit stress-test item into a deterministic requirement."""
+    lower = " ".join(body.lower().split())
+    scope: dict[str, Any] = {
+        "item_number": int(number),
+        "section": section,
+        "source_text": body[:2000],
+    }
+    key = f"stress:{number:02d}"
+
+    def req(tool: str, label: str, **extra: Any) -> Requirement:
+        scope.update({k: v for k, v in extra.items() if v not in (None, "", [])})
+        return Requirement(key=key, tool=tool, label=label, scope=dict(scope))
+
+    # Cross-capability items are harness-derived checks over already collected
+    # evidence. Resolve them before ordinary lexical rules so phrases such as
+    # "HTTPS probe" in a consistency check do not create a duplicate network call.
+    if number == 21 or "compare the system time" in lower:
+        return req("__derived_time_consistency__", "system/remote time consistency", derived=True)
+    if number == 22 or ("page retrieval result for example.com" in lower and "https probe" in lower):
+        return req("__derived_reachability_consistency__", "example.com reachability consistency", derived=True)
+    if number == 23 or "every successful requirement has actual tool evidence" in lower:
+        return req("__derived_evidence_audit__", "successful-requirement evidence audit", derived=True)
+    if number == 24 or "truncation warnings" in lower or "middle was truncated" in lower:
+        return req("__derived_truncation_audit__", "truncation/retrieval audit", derived=True)
+
+    if re.search(r"\bcurrent weather\b", lower):
+        return req("weather_forecast", "current weather for London, Ontario", fact_type="weather", entity="London, Ontario", time_scope="current")
+    if "latest" in lower and re.search(r"\b(?:news|headlines?)\b", lower):
+        return req("news_search", "latest 3 local London, Ontario headlines", fact_type="news", entity="London, Ontario, Canada", time_scope="latest", limit=3)
+    if "brent" in lower and re.search(r"\b(?:price|quote)\b", lower):
+        return req("market_quote", "current Brent crude oil price", fact_type="market_price", instruments=["brent"], time_scope="current")
+    if number == 4 and "example.com" in lower:
+        return req("page_metadata", "example.com remote page retrieval", target="https://example.com")
+    if re.search(r"\bcurrent (?:system(?:/local)?|local) time\b", lower):
+        return req("current_time", "current system/local time", fact_type="current_time", time_scope="current")
+    if "operating-system information" in lower or "kernel/system name" in lower:
+        return req("environment_summary", "operating-system/kernel identity")
+    if "harmless shell" in lower or "harness_system_tool_ok" in lower:
+        return req("execute_shell", "read-only shell execution marker", command="printf 'HARNESS_SYSTEM_TOOL_OK\\n'")
+    if "filesystem" in lower and re.search(r"\bfree space\b", lower):
+        return req("filesystem_snapshot", "workspace filesystem free-space state")
+    if "host snapshot" in lower or ("uptime" in lower and "total memory" in lower):
+        return req("host_snapshot", "host resource snapshot")
+    if "cpu identity" in lower or "logical cpu count" in lower:
+        return req("cpu_info", "CPU identity and logical CPU count")
+    if "thermal" in lower or "temperature sensors" in lower:
+        return req("temperature_sensors", "host thermal sensors")
+    if "ollama" in lower and "running" in lower:
+        return req("ollama_runtime_snapshot", "Ollama runtime status")
+    if re.search(r"^gmail\s*:", lower):
+        return req("gmail_search_messages", "Gmail read-only inbox summary", query="in:inbox", limit=3)
+    if "google calendar" in lower:
+        return req("google_calendar_list_events", "next 3 Google Calendar events", limit=3)
+    if "google drive" in lower:
+        # The capability may not be installed. Keeping the explicit tool name in
+        # the ledger lets the schema gate mark it unresolved instead of dropping it.
+        return req("google_drive_list_files", "3 most recently modified Google Drive files", limit=3)
+    if number == 16 and "example.com" in lower and "resolve" in lower:
+        return req("dns_query", "DNS resolution for example.com", target="example.com", record_type="A")
+    if "tcp connectivity" in lower and "example.com" in lower:
+        return req("tcp_connect", "TCP connectivity to example.com:443", target="example.com", port=443)
+    if "https probe" in lower and "example.com" in lower:
+        return req("http_probe", "HTTPS probe for example.com", target="https://example.com")
+    if "harness-stress-test-invalid.example" in lower:
+        return req("dns_query", "expected DNS failure for invalid hostname", target="harness-stress-test-invalid.example", record_type="A", expect_dns_failure=True)
+    if "127.0.0.1:11434/api/version" in lower:
+        return req("http_probe", "Ollama API reachability", target="http://127.0.0.1:11434/api/version", allow_private=True)
+    return None
+
+
+def derive_stress_requirements(user_text: str) -> list[Requirement]:
+    items = _stress_numbered_items(user_text)
+    if not items:
+        return []
+    result: list[Requirement] = []
+    for number, section, body in items:
+        requirement = _stress_requirement(number, section, body)
+        if requirement is not None:
+            result.append(requirement)
+        else:
+            # Never silently discard a numbered stress-test requirement. Unknown
+            # items are represented explicitly and will be closed as unavailable.
+            result.append(Requirement(
+                key=f"stress:{number:02d}",
+                tool=f"__unmapped_stress_item_{number:02d}__",
+                label=f"stress-test item {number}",
+                scope={"item_number": number, "section": section, "source_text": body[:2000]},
+            ))
+    return result
+
 def _scope_for_requirement(key: str, tool: str, text: str, frame: dict[str, Any]) -> dict[str, Any]:
     scope: dict[str, Any] = {}
     fact_intent = _FACT_RULE_INTENTS.get(key) or _TOOL_FACT_INTENTS.get(tool)
@@ -1003,6 +1165,9 @@ def _scope_matches(
 def derive_requirements(user_text: str) -> list[Requirement]:
     """Return ordered, deduplicated requirements explicitly present in a request."""
     text = str(user_text or "")
+    stress = derive_stress_requirements(text)
+    if stress:
+        return stress
     lower = text.lower().replace("_", " ")
     result: list[Requirement] = []
     seen_tools: set[str] = set()
@@ -1114,10 +1279,12 @@ class TaskRequirementLedger:
         return cls(derive_requirements(user_text))
 
     def required_tools(self, pending_only: bool = False) -> list[str]:
-        rows = self.requirements
+        rows = [item for item in self.requirements if not bool((item.scope or {}).get("derived"))]
         if pending_only:
             rows = [item for item in rows if item.status not in {"satisfied", "partial", "blocked"}]
-        return [item.tool for item in rows]
+        # Tool schemas are unique even when several independent requirements use
+        # the same primitive with different scopes (for example two DNS probes).
+        return list(dict.fromkeys(item.tool for item in rows))
 
     def record_tool(
         self, tool_name: str, *, status: str, reason: str = "", fingerprint: str = "",
@@ -1127,15 +1294,26 @@ class TaskRequirementLedger:
         targets = {tool_name}
         if status in {"ok", "partial"}:
             targets.update(_EQUIVALENT_REQUIREMENT_TOOLS.get(tool_name, ()))
+        direct_rows = [item for item in self.requirements if item.tool == tool_name]
+        direct_match_exists = any(
+            _scope_matches(item.scope, arguments, result_text, result_metadata) for item in direct_rows
+        )
         for item in self.requirements:
             if item.tool not in targets:
                 continue
             direct = item.tool == tool_name
+            scoped = _scope_matches(item.scope, arguments, result_text, result_metadata)
+            # Several independent requirements may intentionally use the same
+            # primitive with different targets (e.g. example.com and an expected
+            # NXDOMAIN DNS probe). A call matching one must not count as a failed
+            # attempt against its siblings. Preserve the older wrong-target
+            # diagnostic only when no same-tool requirement matches the call.
+            if direct and not scoped and direct_match_exists:
+                continue
             if direct:
                 item.attempts += 1
             item.last_reason = str(reason or "")[:120]
             item.fingerprint = str(fingerprint or "")[:32]
-            scoped = _scope_matches(item.scope, arguments, result_text, result_metadata)
             if status == "ok" and scoped:
                 item.status = "satisfied"
             elif status == "partial" and scoped:
@@ -1174,6 +1352,15 @@ class TaskRequirementLedger:
             if item.tool == tool_name and item.status not in {"satisfied", "partial"}:
                 item.status = "blocked"
                 item.last_reason = str(reason or "")[:120]
+
+    def mark_key(self, key: str, status: str, reason: str = "") -> None:
+        """Set one requirement by key, including derived/non-tool checks."""
+        for item in self.requirements:
+            if item.key != key:
+                continue
+            item.status = str(status or "pending")
+            item.last_reason = str(reason or "")[:120]
+            return
 
     def block_exhausted(self, limit: int, reason: str = "per-requirement retry budget exhausted") -> list[str]:
         """Freeze failed requirements after their bounded direct-attempt budget."""

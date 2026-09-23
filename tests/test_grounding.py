@@ -332,6 +332,23 @@ def test_weather_shell_with_no_data_and_navigation_numbers_is_not_current_weathe
     assert is_weather_data_evidence(shell) is False
 
 
+
+
+def test_weather_shell_with_article_durations_and_pressure_prose_is_not_evidence():
+    from tools.grounding import is_weather_data_evidence
+
+    shell = (
+        "Hourly Today’s Conditions -- Sunrise -- Sunset -- No Data Available "
+        "Wind -- Gust: -- No Data Available Pressure -- No Data Available "
+        "Humidity -- No Data Available Visibility -- No Data Available Ceiling -- "
+        "No Data Available Yesterday -- No Data Available 7 Days 14 Days Radar Map News "
+        "Welcome to fall, Canada! Here's your next 3 months of weather 2:00 "
+        "Canada officially welcomes fall with early signs of...snow? 1:03 Could the fall "
+        "equinox enhance aurora chances Wednesday night? Category 5 Hurricane Polo 1:07. "
+        "Coldest air in months: Unusually strong high pressure grips Ontario, Quebec 1:33."
+    )
+    assert is_weather_data_evidence(shell) is False
+
 def test_weather_numeric_values_still_qualify_when_an_unrelated_field_is_unavailable():
     from tools.grounding import is_weather_data_evidence
 
