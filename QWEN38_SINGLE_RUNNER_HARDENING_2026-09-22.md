@@ -1,5 +1,8 @@
 # Qwen3.8 single-runner hardening
 
+> **Historical status:** This is a point-in-time engineering/review record and is intentionally preserved as written. Model roles, tool counts, test totals, limits, and runtime behavior may have changed since this revision. For the current harness use `CURRENT_STATE.md`, `README.md`, and `ARCHITECTURE.md`.
+
+
 - Main, fast-validator, compaction, and configured vision role use the literal `agent-main:2b` identity.
 - All same-model runtime paths use `num_ctx: 16384`; no 4K interactive/validator override remains.
 - Main/fast/vision keep-alive paths retain the shared runner indefinitely where those roles are active.

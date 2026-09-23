@@ -1,4 +1,4 @@
-"""Dedicated semantic recipe storage for reusable successful workflows."""
+"""Dedicated recipe storage with local FTS/token-overlap retrieval."""
 from __future__ import annotations
 
 import hashlib

@@ -134,6 +134,9 @@ RECIPE_PREFLIGHT_LIMIT = max(1, min(int(RECIPE_CFG.get("preflight_limit", 3)), 8
 RECIPE_VALIDATOR_FALLBACK = bool(RECIPE_CFG.get("validator_fallback_enabled", True))
 RECIPE_VALIDATOR_MAX_STAGES = max(1, min(int(RECIPE_CFG.get("validator_fallback_max_stages", 4)), 8))
 RECIPE_VALIDATOR_MAX_TOOLS = max(1, min(int(RECIPE_CFG.get("validator_fallback_max_tools", 12)), LOOP_VALIDATOR_MAX_TOOLS))
+RECIPE_FAST_PARAMETER_INFERENCE = bool(RECIPE_CFG.get("fast_parameter_inference", True))
+RECIPE_FAST_PARAMETER_MIN_STAGES = max(2, int(RECIPE_CFG.get("fast_parameter_min_stages", 2)))
+RECIPE_FAST_PARAMETER_MAX_CALLS = max(0, min(int(RECIPE_CFG.get("fast_parameter_max_calls_per_turn", 1)), 2))
 INFERENCE_LOCK_PATH = os.environ.get("AGENT_INFERENCE_LOCK", "/app/workspace/.agent_inference.lock")
 
 OLLAMA = Client(host=OLLAMA_HOST, timeout=MODEL_TRANSPORT_TIMEOUT)

@@ -6,16 +6,16 @@
 
 **Al Agent** is a local, Ollama-powered assistant harness designed for long-running work without making interactive chat feel sluggish. Its sole user interface is a localhost-first Web UI backed by typed tools, reusable recipes, durable memory, background research, system/network diagnostics, and reminders.
 
-The default configuration uses three base Qwen3.5 roles plus an embedding model:
+The default configuration uses three generative Ollama roles. An embedding model is configured but optional because semantic memory is disabled by default:
 
 - **Main model:** `agent-main:4b` → `hf.co/empero-ai/Qwen3.8-4B-Distill-GGUF:Q4_K_M`
 - **Vision role:** `agent-main:4b` by default, reusing the warm main runner; may be pointed at a dedicated multimodal model later
 - **Fast model:** `agent-main:2b` → `hf.co/empero-ai/Qwen3.8-2B-Distill-GGUF:Q8_0`
 - **Report model:** `agent-report:9b` → `qwen3.5:9b`
-- **Embedding model:** `nomic-embed-text`
-- **Context window:** 16K for the main agent
+- **Embedding model (optional):** `nomic-embed-text`
+- **Context:** 16K for main and fast roles; 8K for the report role
 
-The main model handles conversation and interactive reasoning. The 2B fast model handles recovery validation, lightweight planning, source distillation, and other bounded reasoning. The 9B model is loaded only for long-form report synthesis. `nomic-embed-text` provides semantic retrieval for memory, knowledge, and recipes.
+The main model handles conversation and interactive reasoning. The 2B fast model handles bounded validation/recovery, research support, source distillation, and advisory semantic naming for automatically generalized recipe parameters. The 9B model is loaded only for long-form report synthesis. `nomic-embed-text` is used only by semantic-memory embedding calls when `semantic_memory_enabled: true` (or when the explicit semantic-memory tools/embedding benchmark are invoked); recipe search, skills, tool discovery, and normal routing do not use it. See `CURRENT_STATE.md` for the canonical current-state summary.
 
 ## Quick start
 
@@ -27,18 +27,29 @@ You need:
 - a running Ollama server reachable from the host network
 - the models configured in `config/config.yaml`
 
-Create the stable role aliases after pulling the base Qwen3.5 models:
+Create the stable interactive role aliases. The helper pulls the configured Qwen3.8 main/fast sources and creates the aliases:
 
 ```bash
-# Create the role aliases from already-pulled base Qwen3.5 models:
 ./scripts/create_ollama_aliases.sh
 ```
 
-The aliases map to:
+It creates:
 
 - `agent-main:4b` → `hf.co/empero-ai/Qwen3.8-4B-Distill-GGUF:Q4_K_M`
 - `agent-main:2b` → `hf.co/empero-ai/Qwen3.8-2B-Distill-GGUF:Q8_0`
-- `agent-report:9b` → `qwen3.5:9b`
+
+The report alias is separate and is needed only for the dedicated long-form research/report stage:
+
+```bash
+ollama pull qwen3.5:9b
+ollama cp qwen3.5:9b agent-report:9b
+```
+
+With the default `semantic_memory_enabled: false`, you do **not** need to pull `nomic-embed-text` for normal harness operation. Pull it only if you enable semantic memory or explicitly use semantic-memory embedding tools:
+
+```bash
+ollama pull nomic-embed-text
+```
 
 The harness passes explicit sampling/context settings per role, so behavior does not depend on alias-local Modelfile parameters.
 
@@ -86,7 +97,7 @@ The Web UI provides a ChatGPT-style local interface with:
 - a complete-chat copy button
 - collapsible navigation and workspace sidebars
 - drag-and-drop attachments
-- inline previews for generated artifacts
+- inline previews for generated artifacts; internal transient fixtures such as `generalized_recipe_test/targets.txt` are intentionally suppressed from chat-inline rendering while remaining available to workspace tools
 - workspace upload/download controls
 - jobs, reminders, and working-state views
 - persistent branding and profile images
@@ -205,7 +216,7 @@ Live-fact routing is separated from implementation intent before schemas reach t
 Examples of available tool families include:
 
 - **Time/system:** `current_time`, `environment_summary`, `host_snapshot`
-- **Files/text:** `read_text`, `read_lines`, `text_search`, `json_query`, `write_file`
+- **Files/text:** `read_file`, `read_text`, `read_lines`, `text_search`, `json_query`, `write_file`, `path_stat`, workspace-bounded `remove_path`
 - **Network:** `local_subnets`, `scan_subnet`, `dns_diagnose`, `network_path`, `http_probe`
 - **Web:** `web_search`, `browse_url`, `extract_document`, `page_diff`
 - **Weather:** `geocode_location`, `weather_forecast` (structured first; verified web fallback)
@@ -215,16 +226,21 @@ Examples of available tool families include:
 - **Automation:** `schedule_reminder`, `list_reminders`, durable jobs
 - **Media/profile:** `image_info`, `attach_media`, `set_profile_image`, `profile_image_info`
 - **Google Workspace:** `gmail_search_messages`, `gmail_read_message`, `google_calendar_list_events`, `google_calendar_get_event`, `google_calendar_list_calendars`, `google_drive_list_files`
-- **Recipes:** `search_recipes`, `run_recipe`, `save_recipe`, `run_pipeline`
+- **Recipes:** `search_recipes`, `list_recipes`, `load_recipe`, `save_recipe`, `run_recipe`, `run_pipeline`
 - **Skills:** `search_skills`, `load_skill` (metadata-first, full instructions loaded lazily)
+- **Capability discovery:** `tool_search` for a capability not initially exposed; `tool_health` for registry/dependency diagnostics
 
 Generic shell and Python execution exist as fallback capabilities, but structured tools are preferred and are only exposed when relevant or explicitly requested.
 
 ## Recipes
 
-Recipes are durable reusable workflows built from primitives. The harness performs a recipe preflight before planning a task.
+Recipes are durable reusable workflows built from primitives. The harness performs a local recipe preflight before planning a task. Recipe lookup is SQLite FTS5/token-overlap based; it does not require the embedding model.
 
 When a successful workflow with at least two meaningful stages does not match an existing recipe, the agent can ask whether you want to save it. A built-in workflow such as the structured weather path is not suggested as a duplicate recipe. Recipes are stored separately from model prompts and remain subject to current tool policy and user constraints. Explicit `save recipe` wording is used for recipe persistence so a request such as “save it as report.md” remains an artifact-save request.
+
+Before proposing a saved recipe, the harness automatically generalizes successful read-only tool traces. Repeated/task-defining constants become shared parameters, and derived strings such as `https://example.com` become templates tied to the same `hostname` parameter instead of separate captured defaults. Operational controls (timeouts, limits, booleans, offsets, and ordinary fixed ports) remain constants unless the request explicitly makes them variable. The resident fast model may suggest semantic parameter names for ambiguous literals, but those hints are advisory: deterministic code requires every value to exist in the successful trace, rejects secret-like values, and verifies the final pipeline before it can be saved.
+
+Large tool results use durable observation handles. Genuine harness `middle truncated` markers are recovered deterministically with `read_observation` before evidence audits. Preview-only `[clipped]` text is never treated as a truncation signal, and a failed archive recovery becomes a terminal unresolved evidence gap rather than reopening the main-model recovery loop.
 
 Typical examples:
 
@@ -324,10 +340,11 @@ Model-facing reminder tools use the host's user-level systemd environment rather
 
 Al Agent separates several kinds of state:
 
-- `memory/knowledge.db` — durable memories, conversation rows, job state, observations
+- `memory/knowledge.db` — durable ordinary memories, semantic-memory rows, conversation rows, job state, and observations
+- `memory/recipes.db` — durable recipe definitions/candidates and the local FTS recipe index
 - rolling conversation summary — older conversation context after compaction
-- working state — current objective, requirements, evidence, failures, and validator decisions
-- `workspace/` — files, uploads, generated artifacts, reports, recipes/custom tools where applicable
+- working state — current objective, requirements, evidence, failures, and validator decisions; up to 96 requirements are persisted while only 24 are rendered into the model-facing requirement window
+- `workspace/` — files, uploads, generated artifacts, reports, and custom tools
 - `workspace/skills/` — optional Markdown skills; metadata is matched cheaply and full instructions are loaded only on demand
 
 Large tool outputs are stored as durable observations. During a long tool loop the newest results remain raw, the next few older transactions are microcompacted into retrievable observation handles, and still older transactions are dropped from the live prompt before normal context fitting. Background rolling-summary jobs also microcompact old tool bodies before inference. The model can retrieve exact archived content with `read_observation` instead of carrying every raw result through every inference.
@@ -343,6 +360,12 @@ The Web UI's **copy entire chat** function is different: it can export the compl
 The Ollama boundary is deliberately isolated from the semantic/tool loop. Streamed `tool_calls` are accumulated across chunks, tool results use Ollama-native `tool_name`, and local bookkeeping fields are stripped before messages are sent on the wire. A transient model transport failure may be retried only **before** the first streamed chunk; after any output or tool call arrives, the request is never replayed because doing so could duplicate output or side effects. These settings live under `agent.model_transport`.
 
 See `HARNESS_BEST_PRACTICES_REVIEW.md` for the 2026 small-local-model architecture review and comparison with smolagents, LangGraph/Deep Agents, PocketFlow, Ollama, and llama.cpp patterns.
+
+### Optional semantic memory / `nomic-embed-text`
+
+`semantic_memory_enabled` defaults to `false`. In that state, normal turn memory retrieval uses the deterministic lexical `search_memory()` path and the harness does not need `nomic-embed-text` installed. When semantic memory is enabled, `get_relevant_memories()` uses `search_semantic_memory()`, which embeds the query with the configured `embed_model`; explicit `remember_semantic()` also requires the embedding model. Semantic search falls back to lexical memory search if embedding generation is unavailable.
+
+The embedding model is **not** used for recipe search, skills, `tool_search`, observations, requirement routing, or ordinary conversation. `scripts/benchmark_model_roles.py` benchmarks embedding latency only when semantic memory is enabled.
 
 ## Failure recovery and validator
 
@@ -402,20 +425,21 @@ agent:
   model: "agent-main:4b"
   fast_model: "agent-main:2b"
   vision_model: "agent-main:4b"
-  vision_model_keep_alive: -1
   report_model: "agent-report:9b"
+  embed_model: "nomic-embed-text"
+  semantic_memory_enabled: false
+
   fast_model_keep_alive: -1
+  vision_model_keep_alive: -1
   report_model_keep_alive: "10m"
   report_restore_models_after_stage: true
 
-  report_options:
-    num_ctx: 8192
-    temperature: 0.6
-    top_p: 0.95
-    top_k: 20
-  thinking_default: false
-  max_iterations: 12
+  max_iterations: 6
+  max_iterations_hard: 10
+  max_model_calls_per_turn: 6
+  max_validator_calls_per_turn: 2
   max_tools_per_turn: 12
+  requirement_tool_cap: 24
 
   context:
     num_ctx: 16384
@@ -423,6 +447,18 @@ agent:
     compact_at_tokens: 9000
     max_tool_output_chars: 4000
     volatile_blocks_last: true
+
+  main_options:
+    num_ctx: 16384
+    temperature: 0.6
+
+  fast_options:
+    num_ctx: 16384
+    temperature: 0.1
+
+  report_options:
+    num_ctx: 8192
+    temperature: 0.6
 
   warmup:
     enabled: true
@@ -435,27 +471,18 @@ agent:
   grounding:
     max_candidate_discards: 3
 
-  main_options:
-    num_ctx: 16384
-    temperature: 0.6
-    top_p: 0.95
-    top_k: 20
-
-  fast_options:
-    num_ctx: 4096
-    temperature: 0.6
-    top_p: 0.95
-    top_k: 20
-
   recipes:
     validator_fallback_enabled: true
     validator_fallback_max_stages: 4
     validator_fallback_max_tools: 12
+    fast_parameter_inference: true
+    fast_parameter_min_stages: 2
+    fast_parameter_max_calls_per_turn: 1
 ```
 
 `vision_model` defaults to the same alias as `model`. In that configuration image-bearing turns remain single-pass and reuse the already-resident main Ollama runner with the same context size. If `vision_model` is changed to a distinct model, the harness automatically performs a no-tools vision sidecar pass, converts the pixels into a bounded visual observation, and returns text-only context to the main agent.
 
-`fast_model_keep_alive: -1` pins the canonical 4K fast runner after its first load. With `OLLAMA_MAX_LOADED_MODELS=2`, the 4B main and 2B fast roles can normally coexist. Startup warms main first and then schedules fast prewarming; report teardown restores main synchronously and schedules fast only after foreground inference is available again.
+`fast_model_keep_alive: -1` pins the 2B fast runner after its first load. Main and fast both use the configured 16K context, so their runner identity remains stable across their normal paths. With `OLLAMA_MAX_LOADED_MODELS=2`, the 4B main and 2B fast roles can normally coexist. Startup warms main first and then schedules fast prewarming; report teardown restores main synchronously and schedules fast only after foreground inference is available again.
 
 ### Ollama server settings
 
@@ -549,12 +576,14 @@ Some especially useful modules:
 - `tools/catalog.py` — dynamic tool loading and schema selection
 - `tools/loop_validator.py` — fast-model recovery decisions
 - `tools/working_state.py` — durable objective/evidence/requirements state
-- `tools/recipe_store.py` — semantic recipe storage and lookup
+- `tools/recipe_store.py` — recipe storage plus FTS5/token-overlap lookup
+- `tools/recipe_learning.py` — deterministic workflow generalization and recipe-candidate abstraction
+- `al_agent/fast_tasks.py` — bounded advisory fast-model extraction/classification helpers
 - `tools/network_diagnostics.py` — host/network diagnosis
 - `tools/user_profile.py` — profile data and durable profile image handling
 - `tools/credential_store.py` — provider-neutral encrypted local credential vault
 - `tools/google_workspace_auth.py` — OAuth state, PKCE, refresh, and revocation
-- `tools/google_workspace.py` — read-only Gmail and Calendar tools
+- `tools/google_workspace.py` — read-only Gmail, Calendar, and Drive-metadata tools
 - `webui/server.py` — Web UI API
 - `webui/static/app.js` — browser interaction and streaming UI
 
@@ -566,7 +595,7 @@ The runtime deliberately keeps the model hierarchy small:
 - `vision_model` is an explicit multimodal role. When configured to a different model it is restricted to no-tools visual interpretation; the main model retains tool selection and final reasoning.
 - `agent-main:2b` handles tool-loop validation, recovery reasoning, research planning, source distillation, and other bounded auxiliary work.
 - `agent-report:9b` is admitted only for long-form research synthesis and factuality repair.
-- `nomic-embed-text` supplies semantic vectors for memory, knowledge, and recipe retrieval.
+- `nomic-embed-text` is optional and supplies vectors only for semantic-memory operations; normal memory is lexical by default and recipe retrieval is FTS5/token-overlap based.
 
 Deterministic fast paths remain preferred for exact requests such as current time, structured weather, and market quotes; those paths avoid an unnecessary model call entirely.
 
@@ -591,6 +620,8 @@ contention. Use `--skip-residency` when you do not want the benchmark to disturb
 current Ollama residency (`--skip-load-swap` remains a compatibility alias).
 
 ## Testing
+
+Current repository baseline: **520 passed, 1 skipped**, with the generated builtin manifest current at **232 tools**. Historical engineering notes elsewhere in the repository retain the test/tool counts from the revisions they documented; `CURRENT_STATE.md` and this section describe the current tree.
 
 Run the unit suite with:
 
@@ -660,7 +691,7 @@ docker compose logs -f webui
 
 ### A tool exists but the model says it is unavailable
 
-The harness intentionally exposes only a relevant subset of tool schemas each turn. The model's system policy tells it that absence from the current schema set does not mean the capability does not exist. For discovery, the harness should use `tool_health`; `/reload` is for an actual registry reload, not routine discovery.
+The harness intentionally exposes only a relevant subset of tool schemas each turn. Absence from the current schema set does not mean a capability is missing. Use `tool_search` to discover a capability that was not initially exposed; use `tool_health` to inspect registry/dependency health. `/reload` is for an actual registry reload, not routine discovery.
 
 ### Profile image does not appear
 

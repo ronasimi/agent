@@ -1,5 +1,8 @@
 # Interactive Turn / TTFT Refactor — 2026-09-22
 
+> **Historical status:** This is a point-in-time engineering/review record and is intentionally preserved as written. Model roles, tool counts, test totals, limits, and runtime behavior may have changed since this revision. For the current harness use `CURRENT_STATE.md`, `README.md`, and `ARCHITECTURE.md`.
+
+
 ## Execution path
 
 1. `webui/chat.py` accepts a message, resolves its conversation, installs an event/cancellation context, and dispatches `runtime.handle_user_turn()` on a worker thread.

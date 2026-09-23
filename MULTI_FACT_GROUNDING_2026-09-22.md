@@ -1,5 +1,8 @@
 # Multi-Fact Grounding Refactor — 2026-09-22
 
+> **Historical status:** This is a point-in-time engineering/review record and is intentionally preserved as written. Model roles, tool counts, test totals, limits, and runtime behavior may have changed since this revision. For the current harness use `CURRENT_STATE.md`, `README.md`, and `ARCHITECTURE.md`.
+
+
 ## Architectural rule
 
 A turn may have one primary conversational intent, but any number of independently scoped factual requirements.

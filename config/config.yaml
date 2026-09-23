@@ -29,6 +29,9 @@ agent:
   # evict it under memory pressure; it is then restored outside the foreground
   # inference lock during the next idle window.
   fast_model_keep_alive: -1
+  # Optional semantic-memory model. Normal turn memory lookup is lexical while
+  # semantic_memory_enabled is false, so this model does not need to be pulled
+  # for ordinary chat/tool/recipe operation.
   embed_model: "nomic-embed-text"
   timezone: "America/Toronto"
   semantic_memory_enabled: false
@@ -118,8 +121,9 @@ agent:
     # Set false again if the Ollama runner rejects multimodal requests.
     supports_images: true
 
-  # Share bounded semantic state between the main and fast roles. Both roles
-  # intentionally use the exact same resident agent-main model and 16K runner. This is prompt-level context sharing, not a cross-model KV cache.
+  # Share bounded semantic state between the distinct main (4B) and fast (2B)
+  # roles. Both use a 16K context, but this is prompt-level state sharing, not a
+  # cross-model KV cache.
   # Raw tool output stays in the normal loop transcript and remains untrusted.
   model_context_sharing:
     enabled: true
@@ -177,8 +181,8 @@ agent:
     max_candidate_tools: 24
     timeout_seconds: 25
     max_transcript_chars: 12000
-    # Use the same indefinite residency policy and 4K runner configuration as
-    # every other fast-role request so Ollama never reloads it for validation.
+    # Use the same indefinite residency policy and 16K runner configuration as
+    # every other fast-role request so Ollama does not reload it for validation.
     keep_alive: -1
     options:
       num_ctx: 16384
@@ -199,7 +203,8 @@ agent:
     max_candidate_discards: 3
 
   # Reusable Unix-style workflows are persisted separately from conversation
-  # memory. FTS5 provides local semantic-ish lookup without another model call.
+  # memory. Recipe lookup uses SQLite FTS5 + token-overlap scoring and does not
+  # depend on the optional embedding model.
   recipes:
     enabled: true
     suggest_after_success: true
@@ -215,6 +220,12 @@ agent:
     validator_fallback_enabled: true
     validator_fallback_max_stages: 4
     validator_fallback_max_tools: 12
+    # Small-model semantic extraction for automatic recipe generalization. The
+    # fast model may only suggest names for literal values already present in a
+    # successful trace; deterministic code validates and rewrites the recipe.
+    fast_parameter_inference: true
+    fast_parameter_min_stages: 2
+    fast_parameter_max_calls_per_turn: 1
 
   # Native tool schemas are selected deterministically per turn to reduce prefill.
   max_tools_per_turn: 12

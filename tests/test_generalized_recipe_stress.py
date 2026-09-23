@@ -220,3 +220,22 @@ def test_generalized_recipe_stress_finishes_without_model_loop(monkeypatch):
         assert row.evidence
         assert row.evidence[0]["source"] == "tool_call"
         assert row.evidence[0]["tool"] == "tool_search"
+
+
+def test_generalized_recipe_targets_fixture_is_hidden_from_fallback_file_summary():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "al_agent" / "turn_engine.py").read_text(encoding="utf-8")
+    assert 'return value == "generalized_recipe_test/targets.txt"' in source
+    assert "if _hide_inline_file_summary(target):" in source
+
+
+def test_generalized_truncation_audit_recovers_before_finalization():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "al_agent" / "turn_engine.py").read_text(encoding="utf-8")
+    anchor = source.index('if pending_truncated_observations:\n                recover_pending_truncated_observations()', source.index('# 51-58:'))
+    audit = source.index('_genrecipe_mark("genrecipe:55"', anchor)
+    assert anchor < audit
+    assert "unresolved_truncated_observations" in source
+    assert "Recovery failures are terminal evidence gaps" in source

@@ -1,5 +1,8 @@
 # Harness Reliability Fixes — 2026-09-19
 
+> **Historical status:** This is a point-in-time engineering/review record and is intentionally preserved as written. Model roles, tool counts, test totals, limits, and runtime behavior may have changed since this revision. For the current harness use `CURRENT_STATE.md`, `README.md`, and `ARCHITECTURE.md`.
+
+
 This pass targets the tool-routing failures visible in the supplied chat transcript and the Web UI status/copy behavior.
 
 ## Failure analysis and corrections

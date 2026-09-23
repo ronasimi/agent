@@ -32,6 +32,7 @@ from tools.media import unpack_media_result
 from tools.market import extract_market_instruments, format_market_quotes, is_simple_market_price_request
 from tools.model_context import SharedModelContext
 from tools.recipe_learning import handle_recipe_confirmation, maybe_create_recipe_candidate, pending_recipe_prompt
+from .fast_tasks import infer_recipe_parameter_hints
 from tools.pipeline import execute_pipeline
 from tools.recipe_store import check_recipes_for_task, render_recipe_preflight
 from tools.reflection import render_relevant_reflections
@@ -99,6 +100,7 @@ def handle_user_turn(
     vision_observation_cache: dict[str, str] = {}
     model_calls = 0
     validator_calls = 0
+    auxiliary_fast_calls = 0
     inference_lock = None
     model_lock_requested_at: float | None = None
     model_lock_acquired_at: float | None = None
@@ -562,6 +564,10 @@ def handle_user_turn(
         # The cursor advances only across contiguous recovered chunks so a single
         # partial read cannot incorrectly clear a large omitted middle.
         pending_truncated_observations: dict[str, dict[str, int]] = {}
+        # Recovery failures are terminal evidence gaps, not a reason to reopen
+        # the model loop. Keep them separately so deterministic finalization can
+        # report UNRESOLVED without burning the model-call budget.
+        unresolved_truncated_observations: dict[str, dict[str, Any]] = {}
         iteration_limit = _adaptive_iteration_limit(len(requirement_ledger.requirements))
         recipe_fallback_attempted = False
         fallback_recipe_candidate: dict[str, Any] | None = None
@@ -619,6 +625,32 @@ def handle_user_turn(
 
         def soft_turn_budget_exhausted() -> bool:
             return turn_elapsed_seconds() >= TURN_SOFT_TIMEOUT_SECONDS
+
+        def recipe_parameter_hints(trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            """Use the fast role only for bounded semantic naming/extraction.
+
+            The returned hints cannot authorize tools or rewrite a pipeline;
+            tools.recipe_learning re-validates every value against the successful
+            trace and falls back to deterministic inference when this call fails.
+            This auxiliary post-success call is intentionally separate from the
+            main/recovery model-call budget.
+            """
+            nonlocal auxiliary_fast_calls
+            if not RECIPE_FAST_PARAMETER_INFERENCE:
+                return []
+            eligible = [row for row in trace if row.get("success") and row.get("readonly", True)]
+            if len(eligible) < RECIPE_FAST_PARAMETER_MIN_STAGES:
+                return []
+            if auxiliary_fast_calls >= RECIPE_FAST_PARAMETER_MAX_CALLS:
+                return []
+            # Do not start optional semantic work after the soft turn deadline.
+            if soft_turn_budget_exhausted():
+                return []
+            auxiliary_fast_calls += 1
+            return infer_recipe_parameter_hints(
+                _validator_client, model=FAST_MODEL, objective=user_input, trace=eligible,
+                options=LOOP_VALIDATOR_OPTIONS, keep_alive=LOOP_VALIDATOR_KEEP_ALIVE,
+            )
 
         def terminal_tool_failure(tool_name: str, result_text: str, reason: str) -> str:
             """Return a terminal blocker reason for deterministic non-retryable failures."""
@@ -1080,6 +1112,7 @@ def handle_user_turn(
                         ]
                         fallback_recipe_candidate = maybe_create_recipe_candidate(
                             user_input, trace, RECIPE_MIN_STAGES,
+                            semantic_hints=recipe_parameter_hints(trace),
                         )
                     except Exception:
                         fallback_recipe_candidate = None
@@ -1447,35 +1480,53 @@ def handle_user_turn(
                         )
             block_exhausted_requirements()
 
-        def recover_pending_truncated_observations(*, max_calls: int = 12) -> None:
-            """Deterministically retrieve omitted middle chunks before synthesis.
+        def recover_pending_truncated_observations(*, max_calls: int = 48) -> None:
+            """Deterministically recover genuine omitted middle chunks.
 
-            Pre-grounding tools can legitimately exceed the normal prompt-output
-            budget. If that happens, honor the harness's own middle-truncation
-            contract without spending a model iteration merely to call
-            read_observation. Recovery is contiguous, bounded, and stops on any
-            non-progress/failure.
+            Recovery never consumes a model iteration. A failed/non-progressing
+            archive read is moved to ``unresolved_truncated_observations`` and
+            becomes a terminal evidence gap rather than a loop gate. Preview
+            strings such as ``[clipped]`` never enter this registry; only the
+            canonical harness middle-truncation marker registered at tool-result
+            creation does.
             """
             calls = 0
             for observation_id in list(pending_truncated_observations):
+                failure_reason = ""
                 while observation_id in pending_truncated_observations and calls < max_calls:
                     state = pending_truncated_observations.get(observation_id) or {}
                     offset = max(0, int(state.get("next_offset") or 0))
+                    end_offset = max(offset, int(state.get("end_offset") or 0))
                     before = offset
                     calls += 1
+                    length = min(3500, max(1, end_offset - offset)) if end_offset else 3500
                     ok = _record_harness_recovery_tool(
                         "read_observation",
-                        {"observation_id": observation_id, "offset": offset, "length": 3500},
+                        {"observation_id": observation_id, "offset": offset, "length": length},
                         trigger="pre_generation:middle_truncation_recovery",
                     )
                     if not ok:
+                        failure_reason = "read_observation failed while recovering omitted middle"
                         break
                     state = pending_truncated_observations.get(observation_id)
                     if state is None:
                         break
                     if int(state.get("next_offset") or 0) <= before:
+                        failure_reason = "read_observation made no contiguous recovery progress"
                         break
+                if observation_id in pending_truncated_observations and not failure_reason and calls >= max_calls:
+                    failure_reason = f"deterministic truncation recovery exceeded {max_calls} archive reads"
+                if failure_reason and observation_id in pending_truncated_observations:
+                    state = dict(pending_truncated_observations.pop(observation_id))
+                    state["reason"] = failure_reason
+                    unresolved_truncated_observations[observation_id] = state
                 if calls >= max_calls:
+                    # Any remaining entries are terminally unresolved for this
+                    # turn. Do not hand them to the main/validator model.
+                    for remaining in list(pending_truncated_observations):
+                        state = dict(pending_truncated_observations.pop(remaining))
+                        state["reason"] = f"deterministic truncation recovery exceeded {max_calls} archive reads"
+                        unresolved_truncated_observations[remaining] = state
                     break
 
         def _tooltest_mark(key: str, status: str, reason: str) -> None:
@@ -2043,10 +2094,18 @@ def handle_user_turn(
             evidence_kinds_ok = all(bool((rows[f"genrecipe:{n:02d}"].scope or {}).get("derived")) for n in (25, 29, 32, 40, 41, 42, 44, 45, 46))
             _genrecipe_mark("genrecipe:54", "satisfied" if evidence_kinds_ok else "failed", "derived audits are explicitly marked separately from direct tool requirements" if evidence_kinds_ok else "direct/derived evidence classification is inconsistent")
 
+            # All deterministic tool/recipe work above may have created large
+            # archived observations. Recover them *before* auditing rule 13/55;
+            # the old ordering audited first and then recovered, permanently
+            # poisoning the finalization gate.
             if pending_truncated_observations:
-                _genrecipe_mark("genrecipe:55", "blocked", f"{len(pending_truncated_observations)} actual observation middle(s) remain unrecovered")
+                recover_pending_truncated_observations()
+            if pending_truncated_observations:
+                _genrecipe_mark("genrecipe:55", "blocked", f"{len(pending_truncated_observations)} actual observation middle(s) remain pending recovery")
+            elif unresolved_truncated_observations:
+                _genrecipe_mark("genrecipe:55", "blocked", f"{len(unresolved_truncated_observations)} actual observation middle(s) could not be recovered deterministically")
             else:
-                _genrecipe_mark("genrecipe:55", "satisfied", "no unrecovered actual middle truncations remain")
+                _genrecipe_mark("genrecipe:55", "satisfied", "all actual middle truncations were recovered, or none occurred")
             recursive = any(
                 str(item.get("tool") or "") == "read_observation"
                 and str(item.get("evidence_ref") or "") in pending_truncated_observations
@@ -2096,7 +2155,7 @@ def handle_user_turn(
                 5: len(genrecipe_context.get("equivalent_recipe_names") or []) == 1,
                 6: not any(str(entry.get("tool") or "") == "execute_shell" for entry in successful_execution_trace),
                 7: not unnecessary, 8: True, 9: first_preserved, 10: not repeated,
-                11: not repeated, 12: True, 13: not pending_truncated_observations,
+                11: not repeated, 12: True, 13: not pending_truncated_observations and not unresolved_truncated_observations,
                 14: True, 15: True,
             }
             for number, ok in rule_results.items():
@@ -2489,9 +2548,13 @@ def handle_user_turn(
             # previews do not create recovery requirements, and read_observation
             # results are already excluded from recursive truncation registration.
             if pending_truncated_observations:
-                _tooltest_mark("tooltest:28", "blocked", f"{len(pending_truncated_observations)} observation middle(s) remain unrecovered")
+                recover_pending_truncated_observations()
+            if pending_truncated_observations:
+                _tooltest_mark("tooltest:28", "blocked", f"{len(pending_truncated_observations)} observation middle(s) remain pending recovery")
+            elif unresolved_truncated_observations:
+                _tooltest_mark("tooltest:28", "blocked", f"{len(unresolved_truncated_observations)} actual observation middle(s) could not be recovered deterministically")
             else:
-                _tooltest_mark("tooltest:28", "satisfied", "no unrecovered actual middle truncations remain")
+                _tooltest_mark("tooltest:28", "satisfied", "all actual middle truncations were recovered, or none occurred")
             recursive = any(
                 str(item.get("tool") or "") == "read_observation"
                 and str(item.get("evidence_ref") or "") in pending_truncated_observations
@@ -2912,6 +2975,18 @@ def handle_user_turn(
         if composite and finish_deterministic(composite):
             return
 
+        def _hide_inline_file_summary(target: str) -> bool:
+            """Keep harness-internal disposable fixtures out of chat presentation.
+
+            The underlying file remains available to tools and working-state
+            evidence; this only suppresses user-facing inline/file-summary output.
+            """
+            value = str(target or "").replace("\\", "/").strip()
+            if value.startswith("/app/workspace/"):
+                value = value[len("/app/workspace/"):]
+            value = value.strip("/")
+            return value == "generalized_recipe_test/targets.txt"
+
         def _extractive_file_summary(text: str, limit: int = 700) -> str:
             clean = " ".join(str(text or "").split())
             if not clean:
@@ -3006,6 +3081,10 @@ def handle_user_turn(
                 sections.append("### Network check\n" + value)
 
             file_result = deterministic_tool_results.get("read_file") or {}
+            if file_result:
+                target = str((file_result.get("arguments") or {}).get("filename") or "the requested file")
+                if _hide_inline_file_summary(target):
+                    file_result = {}
             if file_result:
                 target = str((file_result.get("arguments") or {}).get("filename") or "the requested file")
                 if file_result.get("success"):
@@ -4337,7 +4416,10 @@ def handle_user_turn(
                 emit_event("assistant_final", content=full_content, finalization=False)
                 if RECIPES_ENABLED and RECIPE_SUGGEST and not requirement_ledger.pending():
                     try:
-                        candidate = maybe_create_recipe_candidate(user_input, successful_execution_trace, RECIPE_MIN_STAGES)
+                        candidate = maybe_create_recipe_candidate(
+                            user_input, successful_execution_trace, RECIPE_MIN_STAGES,
+                            semantic_hints=recipe_parameter_hints(successful_execution_trace),
+                        )
                     except Exception:
                         candidate = None
                     if candidate:

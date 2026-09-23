@@ -280,11 +280,13 @@ function restoreRecipeSuggestions(conversationId){
 }
 function artifactKindFromPath(path){const ext=String(path||'').toLowerCase().split('.').pop();if(['png','jpg','jpeg','webp','gif'].includes(ext))return'image';if(ext==='pdf')return'pdf';if(['md','markdown'].includes(ext))return'markdown';if(['txt','json','yaml','yml','csv','log','py','js','ts','html','css','sh','toml','ini','xml','rst','cfg','conf'].includes(ext))return'text';if(['mp3','wav','ogg','m4a','flac'].includes(ext))return'audio';if(['mp4','webm','mov','m4v'].includes(ext))return'video';if(['docx','xlsx','pptx','odt','ods','odp','rtf'].includes(ext))return'document';return'download';}
 function artifactRelative(item){if(item?.relative)return String(item.relative);const path=String(item?.path||'');return path.startsWith('/app/workspace/')?path.slice('/app/workspace/'.length):'';}
+const INLINE_ARTIFACT_HIDDEN_RELATIVE=new Set(['generalized_recipe_test/targets.txt']);
+function inlineArtifactHidden(item){const rel=artifactRelative(item).replace(/\\/g,'/').replace(/^\/+|\/+$/g,'');return INLINE_ARTIFACT_HIDDEN_RELATIVE.has(rel);}
 function artifactUrl(item,download=false){const rel=artifactRelative(item);return rel?`/api/files/${encodePath(rel)}${download?'?download=true':''}`:'#';}
 function artifactPreviewUrl(item){const rel=artifactRelative(item);return rel?`/api/preview/${encodePath(rel)}`:'#';}
 function artifactPdfPreviewUrl(item){const rel=artifactRelative(item);return rel?`/api/pdf-preview/${encodePath(rel)}`:'#';}
 async function addArtifact(item,{container=messagesEl,dedupe=true}={}){
-  const path=String(item?.path||'');if(!path.startsWith('/app/workspace/'))return null;
+  const path=String(item?.path||'');if(!path.startsWith('/app/workspace/')||inlineArtifactHidden(item))return null;
   if(dedupe&&artifactCards.has(path))return artifactCards.get(path);
   const localMatch=Array.from(container.querySelectorAll?.('[data-artifact-path]')||[]).find(node=>node.dataset.artifactPath===path);if(localMatch)return localMatch;
   removeEmptyChat();

@@ -23,6 +23,6 @@ ARTIFACT_SCAN_LIMIT = max(250, min(int(os.environ.get("WEBUI_ARTIFACT_SCAN_LIMIT
 ARTIFACT_MAX_PER_TURN = max(1, min(int(os.environ.get("WEBUI_ARTIFACT_MAX_PER_TURN", "24")), 100))
 MARKDOWN_EXT = {".md", ".markdown"}
 TEXT_PREVIEW_EXT = ALLOWED_TEXT_EXT | {".xml", ".rst", ".cfg", ".conf"}
-ARTIFACT_IGNORE_RELATIVE = {".agent_inference.lock"}
+ARTIFACT_IGNORE_RELATIVE = {".agent_inference.lock", "generalized_recipe_test/targets.txt"}
 ARTIFACT_IGNORE_SUFFIXES = {".lock"}
 PDF_PREVIEW_DIR = Path(os.environ.get("WEBUI_PDF_PREVIEW_DIR", "/tmp/agent_webui_pdf_previews"))

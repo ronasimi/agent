@@ -1,12 +1,13 @@
 # Tool and Primitive Reliability Audit
 
+> **Current-state update (2026-09-23):** This audit has been refreshed to the current tree. See `CURRENT_STATE.md` for model/deployment details and `ARCHITECTURE.md` for extension boundaries.
+
 This repository-wide audit covers the generated builtin manifest and the shared execution, working-state, grounding, recipe/pipeline, requirement-ledger, and loop-validation paths used by the harness.
 
 ## Inventory
 
-- 223 registered builtin tools
-- 45 tool/provider modules
-- 223 unique registered tool names
+- 232 registered builtin tools
+- 232 unique registered tool names
 - No duplicate top-level primitive function definitions after cleanup
 - Generated builtin manifest matches the source registry
 
@@ -28,20 +29,23 @@ This repository-wide audit covers the generated builtin manifest and the shared 
 14. **Local-news recovery is bounded inside the primitive.** `news_search` no longer duplicates an already-scoped location in its query; DDGS `No results found` is normalized to an empty result, and a sparse daily result gets exactly one locality-heavy weekly fallback.
 15. **Ambiguous-city news is scope checked for explicit conflicts.** A result explicitly referring to another city-country pairing (for example `London, England`) cannot satisfy `London, Ontario, Canada` merely because `Ontario` appears elsewhere in the story.
 16. **News-only retrieval misses terminate deterministically.** After the bounded provider lookup returns no qualifying rows or a provider error, the harness reports that retrieval state directly instead of giving the main model repeated opportunities to mutate and retry the same search.
+17. **Persistent requirements are separate from prompt rendering.** Working state retains up to 96 requirement entries while the model-facing requirement block is capped at 24, so large structured tasks remain auditable without injecting the full ledger on every inference.
+18. **Discovery provenance is explicit.** Capability checks record whether a tool was already exposed or was discovered through `tool_search`; repeated workflow phases can attach evidence to a specific requirement key.
+19. **Observation recovery is metadata-driven and bounded.** Preview `…[clipped]…` text is never treated as middle truncation. Genuine structured middle truncations are recovered with `read_observation` before evidence audits, and failed/non-progressing recovery becomes terminally unresolved instead of consuming the model-call budget.
+20. **Recipe learning generalizes successful traces conservatively.** Task-defining literals can become shared parameters and derived strings can become `$template` references; operational constants and secret-like values remain fixed/excluded unless the objective explicitly requires otherwise. Fast-model naming hints are advisory and deterministically validated.
+21. **Recipe retrieval does not depend on embeddings.** Recipe candidates are found locally with SQLite FTS5 and token-overlap scoring. `nomic-embed-text` is used only by optional semantic-memory paths.
 
 ## Validation
 
-The audit added regressions for clipped market/page evidence, partial quote coverage, wrong encyclopedic subjects, current-time place/time-zone linkage, weather coordinate linkage, failed/skipped recipe provenance, malformed structured output, valid negative network diagnostics, invalid IANA zones, DDGS empty-news exceptions, duplicate locality injection, ambiguous-city news conflicts, and explicit structured-tool error classification.
+Current repository baseline after the latest routing, recipe-generalization, truncation-recovery, ledger/provenance, and WebUI artifact-filter changes:
 
-Final validation in the audit environment:
-
-- `pytest`: 380 passed, 1 skipped
+- `pytest`: **520 passed, 1 skipped**
 - `compileall`: passed
-- builtin manifest check: current (223 tools)
+- WebUI JavaScript `node --check`: passed
+- builtin manifest check: current (**232 tools**)
 - duplicate registered tool names: none
-- duplicate top-level primitive functions: none
 
-The audit environment does not provide the real `ollama` and `ddgs` Python packages. Minimal import stubs were used only to allow repository tests that do not exercise those external services to collect; those stubs are **not** included in this repository.
+Historical test totals in the dated engineering reports describe those earlier revisions and are intentionally preserved.
 
 ## News search scope and provider fallback hardening (2026-09-21)
 

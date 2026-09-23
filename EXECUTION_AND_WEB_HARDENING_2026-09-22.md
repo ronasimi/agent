@@ -1,5 +1,8 @@
 # Execution and Web Grounding Hardening — 2026-09-22
 
+> **Historical status:** This is a point-in-time engineering/review record and is intentionally preserved as written. Model roles, tool counts, test totals, limits, and runtime behavior may have changed since this revision. For the current harness use `CURRENT_STATE.md`, `README.md`, and `ARCHITECTURE.md`.
+
+
 This revision tightens three agent-loop contracts:
 
 1. **Truncated observations must be read before summarization.** The stable system policy now explicitly requires `read_observation` whenever the harness emits a `middle truncated` warning. The bounded-result marker includes the first omitted offset, `read_observation` is automatically exposed, and candidate final answers are blocked until a successful read retrieves data from the omitted region.

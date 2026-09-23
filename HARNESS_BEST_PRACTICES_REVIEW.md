@@ -1,5 +1,8 @@
 # Small-Model Harness Review — 2026-09-19
 
+> **Historical status:** This is a point-in-time engineering/review record and is intentionally preserved as written. Model roles, tool counts, test totals, limits, and runtime behavior may have changed since this revision. For the current harness use `CURRENT_STATE.md`, `README.md`, and `ARCHITECTURE.md`.
+
+
 This review focuses on a local Ollama deployment where a small main model must remain responsive, use tools reliably, recover from mistakes, and preserve enough state for long-running work. The goal is not to copy a large agent framework; it is to keep deterministic responsibilities in the harness and leave semantic decisions to the model.
 
 ## Executive summary

@@ -1,5 +1,8 @@
 # Tool-Call Pipeline Stress Test
 
+> **Historical status:** This is a point-in-time engineering/review record and is intentionally preserved as written. Model roles, tool counts, test totals, limits, and runtime behavior may have changed since this revision. For the current harness use `CURRENT_STATE.md`, `README.md`, and `ARCHITECTURE.md`.
+
+
 Baseline: `agent-master-qa-stress-fixes.zip`
 
 ## Phase 1 — 15 stress prompts

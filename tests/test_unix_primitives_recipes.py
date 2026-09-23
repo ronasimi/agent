@@ -467,3 +467,69 @@ def test_fixed_probe_recipes_execute_both_transport_branches_without_type_loss(m
     secure = execute_pipeline(http, {"url": "https://example.com/", "timeout": 5.0, "allow_private": False})
     assert plain["ok"] is True and plain["result"]["transport"]["connected"] is True
     assert secure["ok"] is True and secure["result"]["transport"]["tls"] is True
+
+
+def test_recipe_learning_generalizes_hostname_across_host_and_url_args():
+    from tools.recipe_learning import build_candidate
+
+    trace = [
+        {"tool": "dns_query", "args": {"name": "example.com", "record_type": "A"}, "success": True, "readonly": True},
+        {"tool": "tcp_connect", "args": {"host": "example.com", "port": 443, "timeout": 5.0}, "success": True, "readonly": True},
+        {"tool": "http_probe", "args": {"url": "https://example.com", "timeout": 8.0, "allow_private": False}, "success": True, "readonly": True},
+        {"tool": "page_metadata", "args": {"url": "https://example.com"}, "success": True, "readonly": True},
+    ]
+    stages, params = build_candidate("check example.com endpoint health", trace)
+    assert "hostname" in params
+    assert params["hostname"]["default"] == "example.com"
+    assert stages[0]["args"]["name"]["$param"] == "hostname"
+    assert stages[0]["args"]["record_type"] == "A"
+    assert params["hostname"]["type"] == "string"
+    assert stages[1]["args"]["host"]["$param"] == "hostname"
+    assert stages[1]["args"]["port"] == 443
+    assert stages[1]["args"]["timeout"] == 5.0
+    assert stages[2]["args"]["allow_private"] is False
+    assert stages[2]["args"]["url"]["$template"] == "https://{hostname}"
+    assert stages[3]["args"]["url"]["$template"] == "https://{hostname}"
+
+
+def test_recipe_learning_fast_hints_are_advisory_and_cannot_inject_values():
+    from tools.recipe_learning import build_candidate
+
+    trace = [
+        {"tool": "dns_query", "args": {"name": "example.com", "record_type": "A"}, "success": True, "readonly": True},
+        {"tool": "http_probe", "args": {"url": "https://example.com", "timeout": 8.0}, "success": True, "readonly": True},
+    ]
+    stages, params = build_candidate(
+        "check example.com",
+        trace,
+        semantic_hints=[
+            {"name": "site", "value": "example.com"},
+            {"name": "injected", "value": "evil.example"},
+            {"name": "token", "value": "abcdefghijklmnopqrstuvwxyz0123456789"},
+        ],
+    )
+    assert "site" in params
+    assert params["site"]["default"] == "example.com"
+    assert all(meta.get("default") != "evil.example" for meta in params.values())
+    assert "token" not in params
+    assert stages[1]["args"]["url"]["$template"] == "https://{site}"
+
+
+def test_fast_recipe_parameter_classifier_returns_bounded_json_hints():
+    from al_agent.fast_tasks import infer_recipe_parameter_hints
+
+    class FakeClient:
+        def chat(self, **kwargs):
+            assert kwargs["tools"] == []
+            assert kwargs["think"] is False
+            return {"message": {"content": '{"parameters":[{"name":"hostname","value":"example.com"}]}'}}
+
+    hints = infer_recipe_parameter_hints(
+        FakeClient(), model="fast", objective="check example.com",
+        trace=[
+            {"tool": "dns_query", "args": {"name": "example.com"}, "success": True, "readonly": True},
+            {"tool": "http_probe", "args": {"url": "https://example.com"}, "success": True, "readonly": True},
+        ],
+        options={"num_ctx": 4096}, keep_alive=-1,
+    )
+    assert hints == [{"name": "hostname", "value": "example.com"}]

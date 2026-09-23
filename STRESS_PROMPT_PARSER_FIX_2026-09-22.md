@@ -1,5 +1,8 @@
 # Compound Stress-Prompt Parser Fix — 2026-09-22
 
+> **Historical status:** This is a point-in-time engineering/review record and is intentionally preserved as written. Model roles, tool counts, test totals, limits, and runtime behavior may have changed since this revision. For the current harness use `CURRENT_STATE.md`, `README.md`, and `ARCHITECTURE.md`.
+
+
 This revision fixes a compound-task failure exposed by the evaluation prompt that requests weather, local news, Brent crude, HTTP reachability, and a file summary.
 
 ## Root causes

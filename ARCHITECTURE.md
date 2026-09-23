@@ -1,5 +1,7 @@
 # Al Agent architecture
 
+> **Current-state note (2026-09-23):** This document describes the current architecture. `CURRENT_STATE.md` is the compact canonical deployment/status summary; dated review files are historical snapshots.
+
 The repository uses **thin composition roots + domain modules + declarative providers**.  The goal is that adding a capability is normally additive: create a focused implementation and register a small manifest, rather than editing the agent loop.
 
 ## Runtime layers
@@ -15,6 +17,7 @@ webui/__main__.py / worker.py           executable entry points
         │   ├── turn_support.py         deterministic loop helpers
         │   ├── turn_engine.py          one responsibility: model/tool state machine
         │   ├── model_protocol.py       Ollama wire normalization + safe stream transport behavior
+        │   ├── fast_tasks.py           bounded advisory fast-model extraction/classification helpers
         │   ├── slash_commands.py       browser command registry + handlers
         │   └── background/             durable worker subsystem
         │       ├── resources.py        foreground/resource arbitration
@@ -30,7 +33,8 @@ webui/__main__.py / worker.py           executable entry points
         │   ├── primitive_modules/      Unix-style primitive domains
         │   ├── primitive_ops.py        compatibility re-export facade
         │   ├── pipeline.py             bounded read-only composition
-        │   ├── recipe_store.py         semantic recipe persistence
+        │   ├── recipe_store.py         recipe persistence + local FTS/token lookup
+        │   ├── recipe_learning.py      successful-trace generalization + save candidates
         │   ├── credential_store.py     encrypted provider-neutral secret vault
         │   ├── google_workspace_auth.py OAuth state/PKCE/token lifecycle
         │   ├── google_workspace.py     bounded read-only Gmail/Calendar tools
@@ -91,9 +95,19 @@ Before a fact-retrieval answer can finalize, `tools/grounding.py` compares the r
 
 ## Pipelines and recipes
 
-`run_pipeline` is the preferred composition mechanism for deterministic read-only chains. Intermediate stage values remain in the harness and can be referenced using `$ref`; bounded `foreach`, `$item`, conditional `when`, and optional stages cover common Unix-style map/filter/branch patterns without another model turn. Successful reusable workflows may be saved to the semantic recipe database without changing Python code.
+`run_pipeline` is the preferred composition mechanism for deterministic read-only chains. Intermediate stage values remain in the harness and can be referenced using `$ref`; bounded `foreach`, `$item`, conditional `when`, and optional stages cover common Unix-style map/filter/branch patterns without another model turn. Successful reusable workflows may be saved to the recipe database without changing Python code. Recipe lookup is local SQLite FTS5 candidate retrieval plus bounded token-overlap scoring; it does not use the embedding model.
 
-Harness-owned compatibility recipes live in auto-discovered `tools/recipe_provider_groups/` manifests. They are seeded idempotently into the semantic recipe database with `origin=builtin`, a stable key/version, and a target monolithic tool. Every high-level tool in the diagnostic/web/repository compatibility surface must either have a full/partial recipe or an explicit `NATIVE_ONLY` reason; `recipe_coverage()` exposes that matrix. Add new compatibility recipes as provider manifests rather than hard-coding them into the recipe store.
+Harness-owned compatibility recipes live in auto-discovered `tools/recipe_provider_groups/` manifests. They are seeded idempotently into the recipe database with `origin=builtin`, a stable key/version, and a target monolithic tool. Every high-level tool in the diagnostic/web/repository compatibility surface must either have a full/partial recipe or an explicit `NATIVE_ONLY` reason; `recipe_coverage()` exposes that matrix. Add new compatibility recipes as provider manifests rather than hard-coding them into the recipe store.
+
+`tools/recipe_learning.py` generalizes successful read-only traces before a user recipe candidate is offered. It infers shared task inputs across stages, keeps operational constants fixed unless the objective makes them variable, rejects secret-like literals, and rewrites derived strings with bounded `$template` references. `al_agent/fast_tasks.py` may ask the fast role for semantic parameter-name hints, but the fast model cannot rewrite the pipeline or introduce unseen values; deterministic code validates every hint and performs the actual rewrite.
+
+## Working state, requirements, and observations
+
+Working state is persisted per conversation with schema version 3. The durable requirement ledger stores up to 96 entries, while only 24 requirement rows are rendered into the model-facing working-state block. Required native tool schemas are independently bounded by `requirement_tool_cap` (24 by default). This separation lets large deterministic plans remain inspectable and resumable without paying their full token cost on every model call.
+
+Requirement evidence is provenance-aware and can distinguish direct tool observations, tool-surface discovery, `tool_search` discovery, and derived audits. Repeated use of the same primitive can be recorded against a specific requirement key so an early call does not accidentally satisfy a later workflow phase.
+
+Large results are persisted as tool observations. Preview compaction may render `…[clipped]…`, but only structured middle-truncation metadata creates a recovery obligation. The turn engine performs bounded `read_observation` recovery before truncation/evidence audits; a failed or non-progressing recovery becomes a terminal unresolved evidence gap instead of consuming the model-call budget in a recovery loop.
 
 ## Dependency direction
 
@@ -107,14 +121,14 @@ Harness-owned compatibility recipes live in auto-discovered `tools/recipe_provid
 
 ## Model roles
 
-The runtime deliberately uses three generative Ollama roles plus one embedding model:
+The runtime uses three generative Ollama roles plus an optional embedding model:
 
-- `agent-main:4b` (`empero-ai/Qwen3.8-4B-Distill-GGUF:Q4_K_M`) is the foreground reasoning, coding, conversation, tool-orchestration, and configured vision model.
-- `agent-main:2b` (`empero-ai/Qwen3.8-2B-Distill-GGUF:Q8_0`) remains the bounded fast model for loop validation, recovery planning, research planning, source distillation, and related lightweight reasoning.
-- `agent-report:9b` (`qwen3.5:9b`) is admitted only for long-form research synthesis and factuality repair; the worker evicts the normal interactive roles before loading it and restores them afterward.
-- `nomic-embed-text` creates semantic vectors for memory, knowledge, and recipe retrieval and does not generate user-facing text.
+- `agent-main:4b` (`hf.co/empero-ai/Qwen3.8-4B-Distill-GGUF:Q4_K_M`) is the foreground reasoning, coding, conversation, tool-orchestration, and default configured vision model. It uses a 16K context.
+- `agent-main:2b` (`hf.co/empero-ai/Qwen3.8-2B-Distill-GGUF:Q8_0`) is the bounded fast role for loop validation/recovery, research planning/source distillation, and advisory recipe-parameter naming. It also uses a 16K context and is prewarmed/pinned by default.
+- `agent-report:9b` (`qwen3.5:9b`) is admitted only for long-form research synthesis and factuality repair with an 8K context; the worker evicts normal interactive residency before loading it and restores the interactive roles afterward.
+- `nomic-embed-text` is optional because `semantic_memory_enabled` defaults to `false`. It is used only by semantic-memory embedding operations (`remember_semantic`, `search_semantic_memory`/`get_relevant_memories` when enabled) and the optional embedding benchmark. Recipe search, skill search, tool discovery, observations, and ordinary routing do not use it.
 
-Deterministic routing, requirements, grounding, safety policy, and exact fast-path renderers remain authoritative and bypass model inference whenever possible. `scripts/benchmark_model_roles.py` measures the live deployment cost of each role so additional model tiers are added only when they demonstrate a net benefit on the target host.
+Deterministic routing, requirements, grounding, safety policy, parameter validation, recipe execution, and exact fast-path renderers remain authoritative and bypass model inference whenever possible. Fast-model helpers return bounded advisory JSON and fail back to deterministic behavior. `scripts/benchmark_model_roles.py` measures the live deployment cost of each role so additional model tiers are added only when they demonstrate a net benefit on the target host.
 
 ## Multi-fact turn model
 

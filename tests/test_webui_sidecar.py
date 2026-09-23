@@ -246,6 +246,35 @@ def test_artifact_snapshot_detects_only_new_workspace_files(tmp_path, monkeypatc
     assert artifacts[0]["preview_kind"] == "markdown"
 
 
+def test_generated_artifact_snapshot_hides_generalized_recipe_targets_fixture(tmp_path, monkeypatch):
+    from webui import server
+
+    workspace = tmp_path.resolve()
+    monkeypatch.setattr(server, "WORKSPACE", workspace)
+    before = server._workspace_file_snapshot()
+
+    fixture = workspace / "generalized_recipe_test" / "targets.txt"
+    fixture.parent.mkdir(parents=True)
+    fixture.write_text("example.com\nwww.iana.org\n", encoding="utf-8")
+    visible = workspace / "reports" / "result.txt"
+    visible.parent.mkdir(parents=True)
+    visible.write_text("visible", encoding="utf-8")
+
+    after = server._workspace_file_snapshot()
+    artifacts = server._new_artifacts(before, after)
+
+    assert "generalized_recipe_test/targets.txt" not in after
+    assert [a["relative"] for a in artifacts] == ["reports/result.txt"]
+
+
+def test_webui_defensively_hides_targets_fixture_from_inline_artifacts():
+    root = Path(__file__).resolve().parents[1]
+    js = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
+    assert "INLINE_ARTIFACT_HIDDEN_RELATIVE" in js
+    assert "generalized_recipe_test/targets.txt" in js
+    assert "inlineArtifactHidden(item)" in js
+
+
 def test_text_preview_is_bounded_and_download_metadata_is_available(tmp_path, monkeypatch):
     from webui import server
 
