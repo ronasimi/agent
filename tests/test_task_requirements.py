@@ -318,3 +318,25 @@ def test_duplicate_primitives_track_scoped_requirements_independently():
     assert ledger.requirements[0].attempts == 1
     assert ledger.requirements[1].status == "pending"
     assert ledger.requirements[1].attempts == 0
+
+
+def test_direct_requirement_retains_durable_evidence_reference_and_excerpt():
+    ledger = TaskRequirementLedger.from_request("What time is it?")
+    ledger.record_tool(
+        "current_time",
+        status="ok",
+        reason="ok",
+        fingerprint="clock-fingerprint",
+        arguments={},
+        result_text='{"local":"2026-09-23T16:22:36-04:00"}',
+        evidence_ref="observation-clock-1",
+    )
+    row = ledger.as_list()[0]
+    assert row["status"] == "satisfied"
+    assert row["evidence"]
+    evidence = row["evidence"][-1]
+    assert evidence["source"] == "tool_call"
+    assert evidence["tool"] == "current_time"
+    assert evidence["evidence_ref"] == "observation-clock-1"
+    assert "2026-09-23" in evidence["evidence_preview"]
+    assert evidence["arguments_digest"]

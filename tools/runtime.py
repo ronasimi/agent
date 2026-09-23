@@ -259,6 +259,29 @@ def get_job(job_id: str) -> Optional[dict[str, Any]]:
     return item
 
 
+
+def find_active_job_by_idempotency(job_type: str, idempotency_key: str) -> Optional[dict[str, Any]]:
+    """Return a pending/running job with a matching payload idempotency key."""
+    key = str(idempotency_key or "").strip()
+    if not key:
+        return None
+    init_runtime_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM agent_jobs WHERE job_type = ? AND status IN ('pending', 'running') ORDER BY created_at ASC",
+            (str(job_type),),
+        ).fetchall()
+    for row in rows:
+        item = dict(row)
+        payload = _parse_json(item.get("payload_json"), {})
+        if str(payload.get("idempotency_key") or "") != key:
+            continue
+        item["payload"] = payload
+        item["state"] = _parse_json(item.pop("state_json", "{}"), {})
+        item.pop("payload_json", None)
+        return item
+    return None
+
 def list_jobs(status: str = "", limit: int = 25) -> list[dict[str, Any]]:
     init_runtime_db()
     limit = max(1, min(int(limit), 100))
@@ -268,7 +291,7 @@ def list_jobs(status: str = "", limit: int = 25) -> list[dict[str, Any]]:
                 """
                 SELECT id, job_type, title, status, priority, attempts, max_attempts,
                        worker_id, next_run_at, created_at, updated_at, started_at,
-                       completed_at, result, error
+                       completed_at, result, error, state_json
                 FROM agent_jobs
                 WHERE status = ?
                 ORDER BY priority DESC, created_at ASC
@@ -281,7 +304,7 @@ def list_jobs(status: str = "", limit: int = 25) -> list[dict[str, Any]]:
                 """
                 SELECT id, job_type, title, status, priority, attempts, max_attempts,
                        worker_id, next_run_at, created_at, updated_at, started_at,
-                       completed_at, result, error
+                       completed_at, result, error, state_json
                 FROM agent_jobs
                 ORDER BY
                   CASE status WHEN 'running' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
@@ -290,7 +313,22 @@ def list_jobs(status: str = "", limit: int = 25) -> list[dict[str, Any]]:
                 """,
                 (limit,),
             ).fetchall()
-    return [dict(r) for r in rows]
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        state = _parse_json(item.pop("state_json", "{}"), {})
+        if item.get("job_type") == "durable_compute":
+            item["progress"] = {
+                "machine_status": state.get("status") or ("not_started" if not state else "unknown"),
+                "machine_state": state.get("machine_state"),
+                "steps": int(state.get("steps", 0) or 0),
+                "yield_count": int(state.get("yield_count", 0) or 0),
+                "checkpoint_generation": int(state.get("checkpoint_generation", 0) or 0),
+                "head": int(state.get("head", 0) or 0),
+                "tape_cells": int(state.get("tape_cells", 0) or 0),
+            }
+        out.append(item)
+    return out
 
 
 def claim_next_job(worker_id: str, allowed_types: Optional[list[str]] = None) -> Optional[dict[str, Any]]:
@@ -375,6 +413,137 @@ def save_checkpoint(job_id: str, state: dict[str, Any], step: Optional[int] = No
         )
     return True
 
+
+
+def _next_checkpoint_step(conn: sqlite3.Connection, job_id: str, requested: Optional[int]) -> int:
+    """Resolve a monotonic checkpoint step inside an existing transaction."""
+    if requested is not None:
+        return max(1, int(requested))
+    row = conn.execute(
+        "SELECT COALESCE(MAX(step), 0) + 1 FROM agent_job_checkpoints WHERE job_id = ?",
+        (job_id,),
+    ).fetchone()
+    return int(row[0] or 1)
+
+
+def checkpoint_and_defer_job(
+    job_id: str,
+    state: dict[str, Any],
+    *,
+    step: Optional[int] = None,
+    delay_seconds: float = 1.0,
+) -> bool:
+    """Atomically checkpoint healthy progress and release a running job.
+
+    A cooperative yield is not a retry/failure, so the claim attempt consumed by
+    this execution slice is returned.  Persisting the checkpoint and changing
+    the queue state happen in one SQLite transaction to avoid exposing a newer
+    queue state with an older machine checkpoint after a process crash.
+    """
+    init_runtime_db()
+    now = datetime.now(timezone.utc)
+    next_run = (now + timedelta(seconds=max(0.0, float(delay_seconds)))).isoformat(timespec="seconds")
+    now_iso = now.isoformat(timespec="seconds")
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT status FROM agent_jobs WHERE id = ?", (job_id,)).fetchone()
+        if not row or row[0] != JobStatus.RUNNING.value:
+            conn.rollback()
+            return False
+        checkpoint_step = _next_checkpoint_step(conn, job_id, step)
+        conn.execute(
+            "INSERT OR REPLACE INTO agent_job_checkpoints (job_id, step, state_json, created_at) VALUES (?, ?, ?, ?)",
+            (job_id, checkpoint_step, _json(state or {}), now_iso),
+        )
+        cur = conn.execute(
+            """
+            UPDATE agent_jobs
+            SET status = ?, worker_id = NULL, heartbeat_at = NULL,
+                attempts = MAX(0, attempts - 1), next_run_at = ?,
+                updated_at = ?, state_json = ?, error = NULL
+            WHERE id = ? AND status = ?
+            """,
+            (JobStatus.PENDING.value, next_run, now_iso, _json(state or {}), job_id, JobStatus.RUNNING.value),
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            return False
+        conn.commit()
+    return True
+
+
+def checkpoint_and_complete_job(
+    job_id: str,
+    state: dict[str, Any],
+    result: str = "",
+    *,
+    step: Optional[int] = None,
+) -> bool:
+    """Atomically persist the terminal checkpoint and mark a job completed."""
+    init_runtime_db()
+    now = utc_now()
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT status FROM agent_jobs WHERE id = ?", (job_id,)).fetchone()
+        if not row or row[0] != JobStatus.RUNNING.value:
+            conn.rollback()
+            return False
+        checkpoint_step = _next_checkpoint_step(conn, job_id, step)
+        conn.execute(
+            "INSERT OR REPLACE INTO agent_job_checkpoints (job_id, step, state_json, created_at) VALUES (?, ?, ?, ?)",
+            (job_id, checkpoint_step, _json(state or {}), now),
+        )
+        cur = conn.execute(
+            """
+            UPDATE agent_jobs
+            SET status = ?, result = ?, completed_at = ?, heartbeat_at = NULL,
+                worker_id = NULL, updated_at = ?, state_json = ?, error = NULL
+            WHERE id = ? AND status = ?
+            """,
+            (JobStatus.COMPLETED.value, str(result), now, now, _json(state or {}), job_id, JobStatus.RUNNING.value),
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            return False
+        conn.commit()
+    return True
+
+
+def checkpoint_and_fail_job(
+    job_id: str,
+    state: dict[str, Any],
+    error: str,
+    *,
+    step: Optional[int] = None,
+) -> bool:
+    """Atomically persist a terminal machine failure without retrying it."""
+    init_runtime_db()
+    now = utc_now()
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT status FROM agent_jobs WHERE id = ?", (job_id,)).fetchone()
+        if not row or row[0] != JobStatus.RUNNING.value:
+            conn.rollback()
+            return False
+        checkpoint_step = _next_checkpoint_step(conn, job_id, step)
+        conn.execute(
+            "INSERT OR REPLACE INTO agent_job_checkpoints (job_id, step, state_json, created_at) VALUES (?, ?, ?, ?)",
+            (job_id, checkpoint_step, _json(state or {}), now),
+        )
+        cur = conn.execute(
+            """
+            UPDATE agent_jobs
+            SET status = ?, heartbeat_at = NULL, worker_id = NULL, updated_at = ?,
+                state_json = ?, error = ?
+            WHERE id = ? AND status = ?
+            """,
+            (JobStatus.FAILED.value, now, _json(state or {}), str(error), job_id, JobStatus.RUNNING.value),
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            return False
+        conn.commit()
+    return True
 
 def load_checkpoint(job_id: str) -> dict[str, Any]:
     init_runtime_db()

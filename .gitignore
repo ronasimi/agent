@@ -2,6 +2,9 @@ workspace/
 memory/
 
 __pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
 *.py[cod]
 *$py.class
 *.so

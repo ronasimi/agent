@@ -251,6 +251,16 @@ def test_generalized_recipe_stress_finishes_without_model_loop(monkeypatch):
         assert row.evidence[0]["source"] == "tool_call"
         assert row.evidence[0]["tool"] == "tool_search"
 
+    # Small direct results are archived specifically for requirement durability,
+    # even when they are far below the normal large-observation threshold.
+    for key in tuple(f"genrecipe:{n:02d}" for n in range(16, 25)):
+        row = next(item for item in ledger.requirements if item.key == key)
+        assert row.evidence, key
+        direct = row.evidence[-1]
+        assert direct["source"] == "tool_call"
+        assert direct.get("evidence_ref"), key
+        assert direct.get("evidence_preview"), key
+
 
 def test_generalized_recipe_targets_fixture_is_hidden_from_fallback_file_summary():
     from pathlib import Path

@@ -234,7 +234,9 @@ def _args_digest(arguments: Any) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:12]
 
 
-def _clean_requirements(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+def _clean_requirements(
+    items: list[dict[str, Any]], limit: int, *, evidence_preview_chars: int = 280,
+) -> list[dict[str, Any]]:
     clean: list[dict[str, Any]] = []
     for item in list(items or [])[:limit]:
         if not isinstance(item, dict):
@@ -257,6 +259,8 @@ def _clean_requirements(items: list[dict[str, Any]], limit: int) -> list[dict[st
                     "fingerprint": _clip(row.get("fingerprint"), 32),
                     "arguments_digest": _clip(row.get("arguments_digest"), 24),
                     "evidence_ref": _clip(row.get("evidence_ref"), 80),
+                    **({"evidence_preview": _clip(row.get("evidence_preview"), evidence_preview_chars)}
+                       if evidence_preview_chars > 0 and row.get("evidence_preview") else {}),
                 }
                 for row in list(item.get("evidence") or [])[-4:] if isinstance(row, dict)
             ],
@@ -625,7 +629,14 @@ class WorkingStateStore:
             "persistent_goal": dict(state.get("persistent_goal", {}) or {}),
             "background": dict(state.get("background", {}) or {}),
             "constraints": list(state.get("constraints", []) or []),
-            "requirements": _clean_requirements(list(state.get("requirements", []) or []), self.limits["requirement_items"]),
+            # Requirement-level evidence excerpts are persisted in SQLite for
+            # auditability, but are intentionally omitted from the model-facing
+            # canonical state. The model already receives a separately bounded
+            # observation evidence block.
+            "requirements": _clean_requirements(
+                list(state.get("requirements", []) or []), self.limits["requirement_items"],
+                evidence_preview_chars=0,
+            ),
             "tool_capabilities": list(state.get("tool_capabilities", []) or []) if include_tool_capabilities else [],
             "verified_observations": [
                 {key: value for key, value in item.items() if key not in {"evidence_preview", "grounding_proof"}}

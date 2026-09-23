@@ -39,6 +39,8 @@ COMPACTION_TIMEOUT_SECONDS = max(1.0, float(WORKER_CFG.get(
 )))
 STALE_SECONDS = int(WORKER_CFG.get("stale_job_seconds", 180))
 MAX_JOB_RUNTIME_SECONDS = max(60.0, float(WORKER_CFG.get("max_job_runtime_seconds", 7200)))
+DURABLE_COMPUTE_QUANTUM = max(1, min(int(WORKER_CFG.get("durable_compute_quantum", 10000)), 100000))
+DURABLE_COMPUTE_YIELD_DELAY_SECONDS = max(0.0, float(WORKER_CFG.get("durable_compute_yield_delay_seconds", 1.0)))
 INTERACTIVE_COOLDOWN = float(WORKER_CFG.get("interactive_cooldown_seconds", 10))
 MIN_AVAILABLE_RAM_MB = int(WORKER_CFG.get("min_available_memory_mb", 900))
 MAX_AGENT_VRAM_MB = int(WORKER_CFG.get("max_agent_vram_mb", 7200))

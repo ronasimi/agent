@@ -1,4 +1,4 @@
-from ..handlers import JobHandler
+from ..types import JobHandler
 from ..rethink import run_rethink_job
 
 

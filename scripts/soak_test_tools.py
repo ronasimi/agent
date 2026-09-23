@@ -135,6 +135,7 @@ ISOLATABLE_MUTATORS = {
     "render_document_page", "image_resize", "image_crop", "image_convert",
     "archive_extract", "page_diff", "generate_pdf_report",
     "save_recipe", "enqueue_research", "cancel_background_job",
+    "start_computation", "cancel_computation",
     "set_goal", "clear_goal", "reload_tools",
 }
 
@@ -354,6 +355,12 @@ def _seed_isolated_state(env: dict[str, str], pass_no: int = 1) -> dict[str, Any
         from tools.runtime import create_job, init_runtime_db
         init_runtime_db()
         ids["job_id"] = create_job("audit", f"Tool soak audit fixture {suffix}", {"audit": True, "pass": int(pass_no)}, max_attempts=1)
+        ids["compute_job_id"] = create_job(
+            "durable_compute",
+            f"Tool soak durable compute fixture {suffix}",
+            {"program": {"initial_state": "HALT", "halt_states": ["HALT"], "transitions": {}}},
+            max_attempts=1,
+        )
         from tools.memory import init_db, remember, store_tool_observation
         init_db()
         remember(f"tool-soak-audit-{suffix}", f"tool soak audit synthetic fact {suffix}")
@@ -821,6 +828,16 @@ def tool_args(target: Target, fixtures: dict[str, Any], ids: dict[str, Any]) -> 
         "get_research_status": {"job_id": ids.get("job_id", "audit-job")},
         "list_background_jobs": {"limit": 5},
         "cancel_background_job": {"job_id": ids.get("job_id", "audit-job")},
+        "start_computation": {
+            "program": {
+                "initial_state": "run",
+                "halt_states": ["HALT"],
+                "transitions": {"run": {"_": {"write": "1", "move": "N", "next": "HALT"}}},
+            },
+            "idempotency_key": f"tool-soak-{Path(fixtures['base']).name}",
+        },
+        "get_computation_status": {"job_id": ids.get("compute_job_id", "audit-compute"), "tape_cells": 8},
+        "cancel_computation": {"job_id": ids.get("compute_job_id", "audit-compute")},
         "enqueue_self_optimization": {"objective": "tool soak synthetic no-op", "target_metric": "none", "priority": -100},
         "get_self_optimization_status": {"candidate_id": ids.get("candidate_id", "audit-candidate")},
         "list_self_optimization_candidates": {"limit": 5},

@@ -1,6 +1,6 @@
 from tools.self_optimization import run_self_optimization_job
 from ..config import CONFIG
-from ..handlers import JobHandler
+from ..types import JobHandler
 from ..resources import InferenceDeferred, _ensure_interactive_idle, _memory_available_mb
 
 def _run(job_id: str, worker_id: str):

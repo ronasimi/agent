@@ -158,3 +158,13 @@ def test_truncated_tool_result_forces_read_observation_before_summary(monkeypatc
     assert [row[2]["offset"] for row in reads] == [6000, 9500, 13000, 16500, 20000, 23500, 27000, 30500, 34000]
     assert model.calls == 2
     assert messages[-1]["content"] == "The article summary uses the recovered middle data."
+
+
+def test_generic_execution_timeout_schema_matches_runtime_clamp():
+    from tools.system import execute_python, execute_shell
+    from tools.tool_registry import function_schema
+
+    for func in (execute_shell, execute_python):
+        timeout = function_schema(func)["function"]["parameters"]["properties"]["timeout"]
+        assert timeout["minimum"] == 1
+        assert timeout["maximum"] == 120

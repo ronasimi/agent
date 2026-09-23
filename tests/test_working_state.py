@@ -354,3 +354,43 @@ def test_requirement_persistence_keeps_72_item_generalized_recipe_plan(monkeypat
         assert persisted["requirements"][-1]["key"] == "genrecipe:72"
         rendered = json.loads(store.render())
         assert len(rendered["requirements"]) <= 24
+
+
+def test_requirement_evidence_preview_persists_but_is_omitted_from_model_render(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        store = _store(monkeypatch, td, max_render_chars=7000)
+        requirement = {
+            "key": "current_time",
+            "tool": "current_time",
+            "label": "current time",
+            "status": "satisfied",
+            "attempts": 1,
+            "last_reason": "ok",
+            "fingerprint": "clock",
+            "scope": {},
+            "evidence": [{
+                "source": "tool_call",
+                "tool": "current_time",
+                "status": "ok",
+                "reason": "ok",
+                "arguments_digest": "abc123",
+                "evidence_ref": "obs-clock",
+                "evidence_preview": "durable clock evidence 2026-09-23T16:22:36-04:00",
+            }],
+        }
+        store.begin_turn(
+            turn_id=1,
+            objective="What time is it?",
+            rolling_summary="",
+            recalled_context="",
+            recent_messages=[],
+            policy_note="",
+            tool_schemas=[],
+            requirements=[requirement],
+        )
+        persisted = store.load()["requirements"][0]
+        assert persisted["evidence"][0]["evidence_ref"] == "obs-clock"
+        assert "durable clock evidence" in persisted["evidence"][0]["evidence_preview"]
+        rendered = json.loads(store.render())
+        assert rendered["requirements"][0]["evidence"][0]["evidence_ref"] == "obs-clock"
+        assert "evidence_preview" not in rendered["requirements"][0]["evidence"][0]

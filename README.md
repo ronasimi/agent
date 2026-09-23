@@ -104,7 +104,7 @@ The Web UI provides a ChatGPT-style local interface with:
 
 The full Al Agent image is used as the application logo. The yellow smiley face is used as the browser favicon.
 
-On first run, the Web UI opens a profile questionnaire for stable user context (name, role, timezone, optional location/email/interests, response style, research depth, and optional profile image). **Profile setup** in the sidebar can rerun it and replace questionnaire-owned context; `/profile` opens the same editor.
+On first run, the Web UI opens a profile questionnaire for stable user context (name, role, timezone, optional location/email/interests, response style, research depth, and optional profile image). **Profile setup** in the sidebar can rerun it and replace questionnaire-owned context; `/profile` opens the same editor. Explicit read-only questions about those saved fields (for example, “what is my name?”, “what is my saved location?”, or “what is my timezone?”) are resolved directly from the profile store before recipe/tool selection or model inference. The same resolver covers role, email, interests, response style, research depth, and profile-image presence. If a specifically requested field is not configured, the request falls through to normal memory/model handling rather than fabricating a value.
 
 Each browser thread has its own conversation ID, chat rows, rolling summary, tool observations, compaction watermark, and working state. Creating a new chat no longer deletes the previous thread.
 
@@ -317,6 +317,14 @@ interactive path evicts any lingering report model before loading main. This beh
 is controlled by `agent.report_model`, `agent.report_options`, and
 `agent.report_restore_models_after_stage`.
 
+## Durable deterministic computation
+
+The foreground LLM/tool loop remains deliberately bounded for responsiveness and recovery safety. For deterministic workloads that may need more work than one turn or subprocess timeout can provide, the harness exposes a checkpointed `durable_compute` worker. Each claim executes a finite transition quantum, atomically saves the continuation state, and yields back to the queue; there is no mandatory total transition or yield count. A program ends on `HALT`, explicit cancellation, failure, or an optional resource policy supplied when the job is created.
+
+Model-facing tools are `start_computation`, `get_computation_status`, and `cancel_computation`. Starts are idempotency-protected, status returns bounded progress/tape windows, and the Jobs view shows machine state, transitions, yields, tape-cell count, and cancellation for active jobs. The deterministic machine format, recovery semantics, safety model, and examples are documented in [`DURABLE_COMPUTE.md`](DURABLE_COMPUTE.md).
+
+Generic `execute_shell` and `execute_python` calls remain bounded to **120 seconds**; durable computation does not weaken those subprocess safeguards or the recipe/foreground iteration limits.
+
 ## Reminders and scheduled work
 
 The harness supports durable reminders and background jobs. The Web UI exposes them in dedicated views.
@@ -343,11 +351,11 @@ Al Agent separates several kinds of state:
 - `memory/knowledge.db` — durable ordinary memories, semantic-memory rows, conversation rows, job state, and observations
 - `memory/recipes.db` — durable recipe definitions/candidates and the local FTS recipe index
 - rolling conversation summary — older conversation context after compaction
-- working state — current objective, requirements, evidence, failures, and validator decisions; up to 96 requirements are persisted while only 24 are rendered into the model-facing requirement window
+- working state — current objective, requirements, evidence, failures, and validator decisions; up to 96 requirements are persisted while only 24 are rendered into the model-facing requirement window. Direct requirement executions retain per-requirement tool provenance, a durable observation reference, and a bounded audit excerpt even after the shared verified-observation window rotates.
 - `workspace/` — files, uploads, generated artifacts, reports, and custom tools
 - `workspace/skills/` — optional Markdown skills; metadata is matched cheaply and full instructions are loaded only on demand
 
-Large tool outputs are stored as durable observations. During a long tool loop the newest results remain raw, the next few older transactions are microcompacted into retrievable observation handles, and still older transactions are dropped from the live prompt before normal context fitting. Background rolling-summary jobs also microcompact old tool bodies before inference. The model can retrieve exact archived content with `read_observation` instead of carrying every raw result through every inference.
+Large tool outputs are stored as durable observations. In addition, any tool result used to close an explicit direct requirement is archived even when the result is small, so a PASS does not lose its underlying evidence merely because it falls below the normal large-result archive threshold. Each requirement stores its own bounded evidence excerpt and `evidence_ref`; the excerpt remains in persisted working state for auditability but is omitted from the model-facing requirement JSON to avoid prompt growth. During a long tool loop the newest results remain raw, the next few older transactions are microcompacted into retrievable observation handles, and still older transactions are dropped from the live prompt before normal context fitting. Background rolling-summary jobs also microcompact old tool bodies before inference. Exact archived content remains retrievable with `read_observation`.
 
 ### Why old chats do not continuously grow the prompt
 
@@ -620,9 +628,17 @@ main request while fast prewarming is in flight to expose server-level resource
 contention. Use `--skip-residency` when you do not want the benchmark to disturb
 current Ollama residency (`--skip-load-swap` remains a compatibility alias).
 
+Benchmark the deterministic durable-compute core and SQLite checkpoint path independently of Ollama:
+
+```bash
+python scripts/benchmark_durable_compute.py
+```
+
+The benchmark reports transition throughput at several quantum sizes plus checkpoint/defer persistence latency. It uses a temporary database and imposes no production-state side effects.
+
 ## Testing
 
-Current repository baseline: **520 passed, 1 skipped**, with the generated builtin manifest current at **232 tools**. Historical engineering notes elsewhere in the repository retain the test/tool counts from the revisions they documented; `CURRENT_STATE.md` and this section describe the current tree.
+Current repository baseline: **545 passed, 1 skipped**, with the generated builtin manifest current at **235 tools**. Historical engineering notes elsewhere in the repository retain the test/tool counts from the revisions they documented; `CURRENT_STATE.md` and this section describe the current tree.
 
 Run the unit suite with:
 

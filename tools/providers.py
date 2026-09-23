@@ -5,7 +5,7 @@ import importlib
 import pkgutil
 from . import provider_groups
 
-MUTATING_TOOLS = {'set_goal', 'clear_goal', 'set_user_identity', 'set_research_preference', 'set_profile_image', 'image_crop', 'enqueue_self_optimization', 'write_file', 'remove_path', 'execute_python', 'reload_tools', 'render_document_page', 'remember_semantic', 'cancel_reminder', 'create_or_update_tool', 'install_package', 'enqueue_research', 'cancel_background_job', 'schedule_reminder', 'queue_work', 'generate_pdf_report', 'save_recipe', 'image_convert', 'execute_shell', 'page_diff', 'take_web_screenshot', 'map_network', 'notify_desktop', 'archive_extract', 'update_work_status', 'remember', 'image_resize'}
+MUTATING_TOOLS = {'set_goal', 'clear_goal', 'set_user_identity', 'set_research_preference', 'set_profile_image', 'image_crop', 'enqueue_self_optimization', 'write_file', 'remove_path', 'execute_python', 'reload_tools', 'render_document_page', 'remember_semantic', 'cancel_reminder', 'create_or_update_tool', 'install_package', 'enqueue_research', 'cancel_background_job', 'start_computation', 'cancel_computation', 'schedule_reminder', 'queue_work', 'generate_pdf_report', 'save_recipe', 'image_convert', 'execute_shell', 'page_diff', 'take_web_screenshot', 'map_network', 'notify_desktop', 'archive_extract', 'update_work_status', 'remember', 'image_resize'}
 
 REPEAT_SAFE_TOOLS = {'generate_pdf_report', 'take_web_screenshot', 'map_network'}
 
@@ -84,6 +84,8 @@ TOOL_BUNDLES = (
      ('get_goal', 'set_goal', 'clear_goal')),
     ({'remember', 'preference', 'recall', 'profile', 'identity'},
      ('search_memory', 'remember', 'set_user_identity', 'set_research_preference', 'profile_image_info')),
+    ({'compute', 'computation', 'durable', 'turing', 'machine', 'non-halting', 'unbounded'},
+     ('start_computation', 'get_computation_status', 'cancel_computation', 'list_background_jobs')),
     ({'timer', 'schedule', 'remind', 'reminder'},
      ('schedule_reminder', 'cancel_reminder', 'list_reminders')),
 )

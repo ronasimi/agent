@@ -334,6 +334,11 @@ worker:
   # requeues/fails the job and exits so Compose can kill any stuck Python thread
   # and restart a clean worker process.
   max_job_runtime_seconds: 7200
+  # Durable deterministic computations execute cooperatively. This limits one
+  # worker slice only; a healthy computation may checkpoint and resume for an
+  # arbitrary number of slices until HALT or explicit cancellation.
+  durable_compute_quantum: 10000
+  durable_compute_yield_delay_seconds: 1
   interactive_cooldown_seconds: 10
   min_available_memory_mb: 900
   # This is a scheduling guard, not an Ollama server limit. Keep the actual

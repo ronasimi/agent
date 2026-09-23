@@ -243,3 +243,5 @@ html.mdi-ready .mdi-ui::after{content:none;display:none}
    upgraded to full Markdown when assistant_final arrives. This prevents a
    burst of WebSocket deltas from monopolizing the browser's layout/paint loop. */
 .message.assistant .bubble.streaming{white-space:pre-wrap;overflow-wrap:anywhere;}
+
+.job-card-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.job-cancel{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border);border-radius:8px;background:transparent;color:var(--text);padding:6px 9px;cursor:pointer}.job-cancel:hover{background:var(--hover)}.job-cancel:disabled{opacity:.55;cursor:default}.job-progress{display:flex;flex-wrap:wrap;gap:7px 14px;margin-top:9px;font-size:12px;color:var(--muted)}.job-progress span{display:inline-flex;align-items:center;gap:4px}

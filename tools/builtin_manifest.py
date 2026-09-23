@@ -623,7 +623,7 @@ BUILTIN_MANIFEST = [{'module': 'memory',
                                                                     'description': 'Timeout in seconds.',
                                                                     'default': 30,
                                                                     'minimum': 1,
-                                                                    'maximum': 300}},
+                                                                    'maximum': 120}},
                                          'required': ['command'],
                                          'additionalProperties': False}}},
   'readonly': False,
@@ -643,7 +643,7 @@ BUILTIN_MANIFEST = [{'module': 'memory',
                                                                     'description': 'Timeout in seconds.',
                                                                     'default': 30,
                                                                     'minimum': 1,
-                                                                    'maximum': 300}},
+                                                                    'maximum': 120}},
                                          'required': ['code'],
                                          'additionalProperties': False}}},
   'readonly': False,
@@ -3942,6 +3942,103 @@ BUILTIN_MANIFEST = [{'module': 'memory',
   'schema': {'type': 'function',
              'function': {'name': 'cancel_background_job',
                           'description': 'Cancel a pending or running durable background job.',
+                          'parameters': {'type': 'object',
+                                         'properties': {'job_id': {'type': 'string',
+                                                                   'description': 'Durable job identifier.'}},
+                                         'required': ['job_id'],
+                                         'additionalProperties': False}}},
+  'readonly': False,
+  'repeat_safe': False,
+  'safe_artifact': False,
+  'timeout': None},
+ {'module': 'job_tools',
+  'function': 'start_computation',
+  'schema': {'type': 'function',
+             'function': {'name': 'start_computation',
+                          'description': 'Start a durable deterministic computation that resumes until HALT or '
+                                         'cancellation.',
+                          'parameters': {'type': 'object',
+                                         'properties': {'program': {'type': 'object',
+                                                                    'description': 'Deterministic machine program '
+                                                                                   'object with initial_state, '
+                                                                                   'halt_states, blank, and '
+                                                                                   'transitions.'},
+                                                        'input_text': {'type': 'string',
+                                                                       'description': 'Initial tape input written from '
+                                                                                      'cell zero to the right.',
+                                                                       'default': ''},
+                                                        'quantum': {'type': 'integer',
+                                                                    'description': 'Transitions per worker slice; zero '
+                                                                                   'uses the configured default and '
+                                                                                   'does not cap total steps.',
+                                                                    'default': 0,
+                                                                    'minimum': 0,
+                                                                    'maximum': 100000},
+                                                        'max_steps': {'type': 'integer',
+                                                                      'description': 'Optional total transition '
+                                                                                     'policy; zero means no '
+                                                                                     'harness-imposed step limit.',
+                                                                      'default': 0,
+                                                                      'minimum': 0},
+                                                        'max_tape_cells': {'type': 'integer',
+                                                                           'description': 'Optional '
+                                                                                          'populated-tape-cell policy; '
+                                                                                          'zero means no '
+                                                                                          'harness-imposed tape-cell '
+                                                                                          'limit.',
+                                                                           'default': 0,
+                                                                           'minimum': 0},
+                                                        'max_wall_time_seconds': {'type': 'number',
+                                                                                  'description': 'Optional total '
+                                                                                                 'wall-clock policy; '
+                                                                                                 'zero means no '
+                                                                                                 'harness-imposed '
+                                                                                                 'lifetime limit.',
+                                                                                  'default': 0,
+                                                                                  'minimum': 0},
+                                                        'idempotency_key': {'type': 'string',
+                                                                            'description': 'Optional stable key used '
+                                                                                           'to deduplicate active '
+                                                                                           'computation creation '
+                                                                                           'retries.',
+                                                                            'default': ''}},
+                                         'required': ['program'],
+                                         'additionalProperties': False}}},
+  'readonly': False,
+  'repeat_safe': False,
+  'safe_artifact': False,
+  'timeout': None},
+ {'module': 'job_tools',
+  'function': 'get_computation_status',
+  'schema': {'type': 'function',
+             'function': {'name': 'get_computation_status',
+                          'description': 'Inspect durable computation progress and a bounded sparse tape window.',
+                          'parameters': {'type': 'object',
+                                         'properties': {'job_id': {'type': 'string',
+                                                                   'description': 'Durable job identifier.'},
+                                                        'tape_start': {'type': 'integer',
+                                                                       'description': 'Optional first tape address for '
+                                                                                      'a bounded inspection window; '
+                                                                                      'omit to center around the '
+                                                                                      'head.'},
+                                                        'tape_cells': {'type': 'integer',
+                                                                       'description': 'Number of tape addresses to '
+                                                                                      'inspect in the bounded status '
+                                                                                      'window.',
+                                                                       'default': 32,
+                                                                       'minimum': 1,
+                                                                       'maximum': 256}},
+                                         'required': ['job_id'],
+                                         'additionalProperties': False}}},
+  'readonly': True,
+  'repeat_safe': False,
+  'safe_artifact': False,
+  'timeout': None},
+ {'module': 'job_tools',
+  'function': 'cancel_computation',
+  'schema': {'type': 'function',
+             'function': {'name': 'cancel_computation',
+                          'description': 'Cancel a pending or running durable deterministic computation.',
                           'parameters': {'type': 'object',
                                          'properties': {'job_id': {'type': 'string',
                                                                    'description': 'Durable job identifier.'}},

@@ -45,7 +45,7 @@ The embedding model is currently used by `remember_semantic()`, `search_semantic
 
 ## Tool routing and execution
 
-The harness exposes a bounded, deterministic subset of the registered tools rather than placing the complete catalog in every prompt. The generated builtin manifest currently contains **232 tools**.
+The harness exposes a bounded, deterministic subset of the registered tools rather than placing the complete catalog in every prompt. The generated builtin manifest currently contains **235 tools**.
 
 Important routing properties:
 
@@ -58,6 +58,18 @@ Important routing properties:
 
 The hard per-turn model-call budget remains a safety bound. Deterministic evidence collection, requirement closure, truncation recovery, and final structured formatting should not consume model calls merely for bookkeeping. Repeated empty responses, unusable/invented tool calls, and repeated inference exceptions are independently bounded by `model_no_progress_max_retries` (default **2**) so the global six-call budget remains a last-resort circuit breaker rather than the normal loop terminator.
 
+### Durable deterministic compute
+
+Universal-duration deterministic work is deliberately separated from that bounded foreground loop. `start_computation` queues a `durable_compute` job whose versioned machine state and sparse bidirectional tape are persisted in SQLite. Each worker claim executes a bounded quantum (10,000 transitions by default), then atomically checkpoints and either completes or defers the job. A healthy defer does not consume retry attempts, and there is no mandatory total transition/yield ceiling. Optional `max_steps`, `max_tape_cells`, and `max_wall_time_seconds` policies default to `0` (unbounded) and are explicit job policy rather than hidden runtime limits.
+
+`get_computation_status` exposes bounded progress and a bounded tape window; `cancel_computation` is the operator escape hatch. Active start requests are idempotency-protected so ambiguous/retried tool calls do not create duplicate jobs. Stale worker claims resume from the latest durable checkpoint. The Web UI Jobs panel shows machine state, transitions, yields, tape-cell count, and a cancel action. See `DURABLE_COMPUTE.md` for the machine schema and recovery contract.
+
+The generic `execute_shell` / `execute_python` capability contract and implementation both cap one subprocess call at **120 seconds**. Recipes and the foreground LLM loop remain bounded; practical Turing completeness comes from arbitrarily many resumable deterministic worker quanta, not from removing those safeguards.
+
+## Deterministic profile-fact reads
+
+Explicit read-only questions for OOBE/profile-owned facts are resolved before recipe preflight, tool selection, prompt construction, or Ollama lock acquisition. The deterministic resolver currently covers name, saved location, timezone, role, email, interests, response style, research depth, profile-image presence, and broad saved-profile inspection. Mutation wording is never intercepted. If a specifically requested fact is absent, the turn falls through to the normal memory/model path rather than inventing a profile value.
+
 ## Working state and requirement ledger
 
 Working state schema version 3 is persisted per conversation. The durable requirement ledger and model-visible requirement window are intentionally separate:
@@ -67,7 +79,7 @@ Working state schema version 3 is persisted per conversation. The durable requir
 - explicit required tool schemas are also bounded by `requirement_tool_cap: 24`;
 - the working-state renderer remains subject to its overall character budget.
 
-This allows large deterministic plans to remain inspectable/resumable without injecting the entire ledger into every model request. Requirement entries retain key, status, attempts, reason, scope, fingerprint, and provenance/evidence where applicable.
+This allows large deterministic plans to remain inspectable/resumable without injecting the entire ledger into every model request. Requirement entries retain key, status, attempts, reason, scope, fingerprint, and provenance/evidence where applicable. Direct tool-backed requirements additionally persist a stable observation reference and a bounded evidence excerpt. Small direct results are force-archived when they close an explicit requirement, so evidence durability is independent of the shared `verified_observations` retention window. Persisted excerpts are deliberately removed from the model-facing requirement rendering; only their compact provenance/reference metadata is shown there.
 
 ## Observation storage and truncation recovery
 
@@ -167,9 +179,9 @@ Drive metadata access also requires the Google Drive API to be enabled in the OA
 
 For this repository state:
 
-- full deterministic/offline test suite: **520 passed, 1 skipped**;
+- full deterministic/offline test suite: **545 passed, 1 skipped**;
 - Python byte-compilation: pass;
 - Web UI JavaScript `node --check`: pass;
-- generated builtin manifest: current at **232 tools**.
+- generated builtin manifest: current at **235 tools**.
 
-Live model latency/quality remains deployment-specific; use `scripts/benchmark_model_roles.py` on the actual Ollama host for TTFT, validator latency, report throughput, residency, and optional embedding measurements.
+Live model latency/quality remains deployment-specific; use `scripts/benchmark_model_roles.py` on the actual Ollama host for TTFT, validator latency, report throughput, residency, and optional embedding measurements. Use `scripts/benchmark_durable_compute.py` for model-independent transition/checkpoint throughput.

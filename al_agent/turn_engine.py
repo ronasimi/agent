@@ -45,7 +45,7 @@ from tools.task_requirements import (
     is_evidence_reuse_request, is_task_continuation, news_region_for_frame, select_primary_fact_frame,
 )
 from tools.turn_policy import derive_turn_tool_policy
-from tools.user_profile import get_relevant_user_prompt_context, get_user_location
+from tools.user_profile import get_relevant_user_prompt_context, get_user_location, resolve_profile_fact_query
 from tools.weather import format_weather_recovery, is_simple_weather_request
 from tools.web import (
     format_encyclopedia_result, format_news_no_results, format_news_provider_error, format_news_results,
@@ -190,6 +190,27 @@ def handle_user_turn(
         _append_and_save_fn(messages, msg)
         current_turn_id = int(msg.get("_db_id") or 0)
 
+        # Explicit OOBE/profile fact reads are deterministic database lookups.
+        # Resolve them before recipe search, tool selection, prompt construction,
+        # or acquiring the Ollama inference lock. If the requested profile field
+        # is not configured, continue through normal retrieval/model inference.
+        try:
+            profile_resolution = resolve_profile_fact_query(user_input)
+        except Exception:
+            profile_resolution = {"matched": False, "resolved": False}
+        if profile_resolution.get("matched") and profile_resolution.get("resolved"):
+            profile_reply = str(profile_resolution.get("response") or "").strip()
+            if profile_reply:
+                _append_and_save_fn(messages, {"role": "assistant", "content": profile_reply})
+                answer_first_visible_at = answer_first_visible_at or time.monotonic()
+                print(f"\nAgent: {profile_reply}\n")
+                emit_event(
+                    "assistant_final", content=profile_reply, finalization=True, deterministic=True,
+                    profile_fact_resolved=True, requested_profile_fields=list(profile_resolution.get("requested") or []),
+                )
+                emit_event("history_refresh")
+                return
+
         system_prompt = build_system_prompt()
         previous_working_state = WORKING_STATE.load() if WORKING_STATE_ENABLED else {}
         previous_frame = dict(previous_working_state.get("task_frame") or {})
@@ -221,6 +242,33 @@ def handle_user_turn(
         effective_request = effective_request_for_frame(user_input, task_frame)
         requirement_request = effective_request if continuation else user_input
         requirement_ledger = _task_requirement_ledger_cls.from_request(requirement_request)
+
+        def ensure_requirement_evidence_ref(
+            tool_name: str, result_text: str, observation_id: str = "", *, requirement_key: str = "",
+        ) -> str:
+            """Archive direct requirement evidence even when the normal preview is small.
+
+            The general observation stream remains bounded, but a requirement that
+            reaches PASS/FAILED must retain a stable read_observation handle so its
+            provenance survives eviction from verified_observations.
+            """
+            existing = str(observation_id or "").strip()
+            if existing or str(tool_name or "") == "read_observation":
+                return existing
+            key_matches = bool(requirement_key) and any(
+                item.key == str(requirement_key) for item in requirement_ledger.requirements
+            )
+            tool_matches = any(
+                item.tool == str(tool_name or "") and not bool((item.scope or {}).get("derived"))
+                for item in requirement_ledger.requirements
+            )
+            if not (key_matches or tool_matches):
+                return ""
+            try:
+                return str(store_tool_observation(str(tool_name or ""), str(result_text or "")) or "")
+            except Exception:
+                return ""
+
         required_fact_types = requested_fact_types(
             user_input, task_frame=task_frame, fact_frames=fact_frames,
         ) if GROUNDING_ENABLED else set()
@@ -1199,6 +1247,9 @@ def handle_user_turn(
                 }
             result_with_status = _tool_status_prefix(success, reason, status) + "\n" + result_content
             result_text, observation_id = _bounded_tool_result_with_ref(name, result_with_status)
+            observation_id = ensure_requirement_evidence_ref(
+                name, result_with_status, observation_id, requirement_key=requirement_key,
+            )
             if name != "read_observation":
                 register_truncated_observation(result_with_status, result_text, observation_id)
             emit_event(
@@ -1210,11 +1261,13 @@ def handle_user_turn(
                     requirement_key, name, status=status, reason=reason,
                     fingerprint=str(outcome.get("fingerprint") or ""),
                     arguments=normalized, result_text=result_content,
+                    evidence_ref=observation_id, evidence_preview=result_content,
                 )
             else:
                 requirement_ledger.record_tool(
                     name, status=status, reason=reason, fingerprint=str(outcome.get("fingerprint") or ""),
                     arguments=normalized, result_text=result_content,
+                    evidence_ref=observation_id, evidence_preview=result_content,
                 )
             deterministic_tool_results[name] = {
                 "success": success, "status": status, "reason": reason,
@@ -4666,6 +4719,7 @@ def handle_user_turn(
                     )
                 result_with_status = _tool_status_prefix(success, reason, outcome_status) + "\n" + result_content
                 result_text, observation_id = _bounded_tool_result_with_ref(name, result_with_status)
+                observation_id = ensure_requirement_evidence_ref(name, result_with_status, observation_id)
                 if name != "read_observation":
                     register_truncated_observation(result_with_status, result_text, observation_id)
                 print(f"  \033[90m{result_text[:300].replace(chr(10), ' ')}{'...' if len(result_text) > 300 else ''}\033[0m")
@@ -4708,6 +4762,7 @@ def handle_user_turn(
                     fingerprint=str(outcome.get("fingerprint") or ""),
                     arguments=args if isinstance(args, dict) else raw_args,
                     result_text=result_content,
+                    evidence_ref=observation_id, evidence_preview=result_content,
                 )
                 if not success:
                     terminal_reason = terminal_tool_failure(name, result_content, reason)

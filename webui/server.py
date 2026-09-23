@@ -33,7 +33,7 @@ from tools import (
     rename_conversation,
 )
 from tools.reminders import list_reminders
-from tools.runtime import list_jobs
+from tools.runtime import cancel_job, get_job, list_jobs
 from tools.user_profile import (
     complete_onboarding_profile,
     get_onboarding_state,
@@ -429,6 +429,17 @@ def state(conversation_id: str = "default") -> dict[str, Any]:
 @app.get("/api/jobs")
 def jobs(limit: int = 25) -> list[dict[str, Any]]:
     return list_jobs(limit=max(1, min(int(limit), 100)))
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job_route(job_id: str) -> dict[str, Any]:
+    """Cancel one active durable job without waiting for its worker slice."""
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not cancel_job(job_id):
+        raise HTTPException(status_code=409, detail="Job is already terminal")
+    return {"ok": True, "job_id": job_id, "status": "cancelled"}
 
 
 @app.get("/api/reminders")

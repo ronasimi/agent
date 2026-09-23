@@ -6,8 +6,8 @@ This repository-wide audit covers the generated builtin manifest and the shared 
 
 ## Inventory
 
-- 232 registered builtin tools
-- 232 unique registered tool names
+- 235 registered builtin tools
+- 235 unique registered tool names
 - No duplicate top-level primitive function definitions after cleanup
 - Generated builtin manifest matches the source registry
 
@@ -37,12 +37,12 @@ This repository-wide audit covers the generated builtin manifest and the shared 
 
 ## Validation
 
-Current repository baseline after the latest routing, recipe-generalization, truncation-recovery, ledger/provenance, and WebUI artifact-filter changes:
+Current repository baseline after the durable-compute, routing, recipe-generalization, truncation-recovery, ledger/provenance, and WebUI observability changes:
 
-- `pytest`: **520 passed, 1 skipped**
+- `pytest`: **545 passed, 1 skipped**
 - `compileall`: passed
 - WebUI JavaScript `node --check`: passed
-- builtin manifest check: current (**232 tools**)
+- builtin manifest check: current (**235 tools**)
 - duplicate registered tool names: none
 
 Historical test totals in the dated engineering reports describe those earlier revisions and are intentionally preserved.

@@ -18,6 +18,9 @@ _REQUIRED_OVERRIDES = {
     "enqueue_research": {"topic"},
     "get_research_status": {"job_id"},
     "cancel_background_job": {"job_id"},
+    "start_computation": {"program"},
+    "get_computation_status": {"job_id"},
+    "cancel_computation": {"job_id"},
     "enqueue_self_optimization": {"objective"},
     "get_self_optimization_status": {"candidate_id"},
     "schedule_reminder": {"title"},
@@ -74,6 +77,16 @@ _SCHEMA_OVERRIDES: dict[tuple[str, str], dict[str, Any]] = {
     ("google_calendar_list_calendars", "account"): {"maxLength": 160},
     ("load_skill", "name"): {"description": "Installed skill id/name to load."},
     ("load_skill", "length"): {"minimum": 500, "maximum": 5000},
+    # Keep native tool schemas aligned with the hard process timeout enforced
+    # by tools.system. Other tools may legitimately use the generic 300-second
+    # timeout schema limit, so scope this override to generic execution only.
+    ("execute_shell", "timeout"): {"minimum": 1, "maximum": 120},
+    ("execute_python", "timeout"): {"minimum": 1, "maximum": 120},
+    ("start_computation", "quantum"): {"minimum": 0, "maximum": 100000},
+    ("start_computation", "max_steps"): {"minimum": 0},
+    ("start_computation", "max_tape_cells"): {"minimum": 0},
+    ("start_computation", "max_wall_time_seconds"): {"minimum": 0},
+    ("get_computation_status", "tape_cells"): {"minimum": 1, "maximum": 256},
 }
 
 _SCHEMA_LIMITS_BY_NAME: dict[str, dict[str, Any]] = {
@@ -149,6 +162,15 @@ _PARAMETER_HINTS = {
     "length": "Maximum number of characters/items to return.",
     "network": "CIDR network, for example 192.168.1.0/24.",
     "job_id": "Durable job identifier.",
+    "program": "Deterministic machine program object with initial_state, halt_states, blank, and transitions.",
+    "input_text": "Initial tape input written from cell zero to the right.",
+    "quantum": "Transitions per worker slice; zero uses the configured default and does not cap total steps.",
+    "max_steps": "Optional total transition policy; zero means no harness-imposed step limit.",
+    "max_tape_cells": "Optional populated-tape-cell policy; zero means no harness-imposed tape-cell limit.",
+    "max_wall_time_seconds": "Optional total wall-clock policy; zero means no harness-imposed lifetime limit.",
+    "idempotency_key": "Optional stable key used to deduplicate active computation creation retries.",
+    "tape_start": "Optional first tape address for a bounded inspection window; omit to center around the head.",
+    "tape_cells": "Number of tape addresses to inspect in the bounded status window.",
     "task_id": "Durable task identifier.",
     "observation_id": "Observation handle previously returned by the harness.",
     "package_name": "One or more package names only; do not include shell flags.",

@@ -19,10 +19,13 @@ webui/__main__.py / worker.py           executable entry points
         │   ├── model_protocol.py       Ollama wire normalization + safe stream transport behavior
         │   ├── fast_tasks.py           bounded advisory fast-model extraction/classification helpers
         │   ├── slash_commands.py       browser command registry + handlers
+        │   ├── compute/                deterministic resumable machine core
+        │   │   └── machine.py          versioned sparse-tape quantum executor
         │   └── background/             durable worker subsystem
         │       ├── resources.py        foreground/resource arbitration
         │       ├── research.py         research/report job handler
         │       ├── maintenance.py      compaction + monitoring
+        │       ├── types.py            provider-neutral JobHandler contract
         │       ├── handlers.py         job-provider discovery/dispatch
         │       └── job_providers/      one provider module per job family
         │
@@ -71,7 +74,15 @@ Use the existing `@agent_tool` decorator and save the validated module under `/a
 
 ## Adding a durable background job
 
-Create `al_agent/background/job_providers/pNN_name.py` and export exactly one `JOB_HANDLER`.  The generic worker loop discovers it automatically.  Do not add another branch to `worker.py`.
+Create `al_agent/background/job_providers/pNN_name.py` and export exactly one `JOB_HANDLER` from `al_agent.background.types`. The generic worker loop discovers it automatically. Do not add another branch to `worker.py`.
+
+Long-running deterministic work must be **cooperative**: execute one bounded quantum, persist the complete continuation state, and atomically defer the job. A healthy yield is not a retry and must not consume the job-attempt budget. Keep worker watchdogs scoped to one claim rather than treating them as a lifetime limit. `durable_compute` is the reference implementation; see `DURABLE_COMPUTE.md`.
+
+## Durable deterministic computation
+
+`al_agent.compute.machine` provides the deterministic execution substrate for work that may require an arbitrary number of state transitions. The main LLM loop remains deliberately bounded. `durable_compute` instead executes a bounded quantum, checkpoints a versioned sparse bidirectional tape plus machine state, yields the queue claim, and may be claimed again without a predetermined number of resumptions. `HALT`, explicit cancellation, a malformed program/checkpoint, or an explicitly configured resource policy are terminal.
+
+Checkpoint persistence and the queue-state transition are committed in one SQLite transaction so a worker cannot advertise a resumable job without the corresponding continuation state. Status APIs expose only bounded progress/tape windows rather than the entire checkpoint. This separation is what gives the harness practical universal-computation semantics without turning the probabilistic foreground model loop into an unbounded `while True`.
 
 ## Adding a browser command
 

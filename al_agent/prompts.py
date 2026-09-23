@@ -32,6 +32,7 @@ _CAPABILITY_POLICIES = {
     "host": "Use structured host_snapshot/network diagnostics before generic shell commands. Distinguish container-access limitations from facts about the host.",
     "network": "For LAN discovery, use local_subnets first when multiple interfaces may exist, then scan_subnet per relevant private subnet. network_reachability is not a LAN scanner.",
     "automation": "For long-running work use durable jobs/checkpoints. For reminders use the reminder tools; never create ad-hoc scheduler/systemd state yourself.",
+    "durable_compute": "Use start_computation only for deterministic work that genuinely needs resumable iteration beyond one bounded tool/turn. A successful queued job is valid progress; do not poll it repeatedly in the same turn. Use get_computation_status for explicit status checks and cancel_computation for explicit cancellation.",
     "optimization": "Self-optimization may create and test an isolated candidate, but never claim it is deployed; human approval and separate promotion are required.",
     "profile": "Never infer that a person in an image is the user from appearance alone. Only change the profile image after explicit user direction and a successful set_profile_image tool result.",
     "execution": "execute_shell/execute_python are fallback capabilities. Use them only when a structured tool cannot perform the required operation; normal prose, shell text, or JSON markup is never executed implicitly.",
@@ -52,7 +53,8 @@ def build_turn_capability_context(user_text: str, tool_names: set[str] | None = 
     if "market_quote" in names: add("market")
     if names & {"host_snapshot","process_snapshot","pressure_snapshot","filesystem_snapshot","service_health"}: add("host")
     if names & {"network_snapshot","local_subnets","scan_subnet","neighbor_snapshot","connection_snapshot"}: add("network")
-    if names & {"enqueue_research","schedule_reminder","cancel_reminder","queue_work"}: add("automation")
+    if names & {"enqueue_research","schedule_reminder","cancel_reminder","queue_work","start_computation","get_computation_status","cancel_computation"}: add("automation")
+    if names & {"start_computation","get_computation_status","cancel_computation"}: add("durable_compute")
     if names & {"enqueue_self_optimization","approve_self_optimization"}: add("optimization")
     if names & {"set_profile_image","set_user_identity","set_research_preference"}: add("profile")
     if names & {"execute_shell","execute_python"}: add("execution")

@@ -95,6 +95,7 @@ _JSON_DICT_RESULT_TOOLS = {
     "connection_snapshot", "local_subnets", "scan_subnet", "dns_diagnose",
     "network_path", "endpoint_probe", "http_probe",
     "repo_status", "repo_diff", "repo_checks", "git_status", "git_diff",
+    "start_computation", "get_computation_status", "cancel_computation",
 }
 
 

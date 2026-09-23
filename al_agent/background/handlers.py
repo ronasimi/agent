@@ -3,14 +3,8 @@ from __future__ import annotations
 
 import importlib
 import pkgutil
-from dataclasses import dataclass
-from typing import Callable
 
-
-@dataclass(frozen=True)
-class JobHandler:
-    name: str
-    run: Callable[[str, str], object]
+from .types import JobHandler
 
 
 def discover_job_handlers() -> dict[str, JobHandler]:

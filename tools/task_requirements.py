@@ -6,12 +6,60 @@ a pre-final completeness gate; it does not infer conclusions from tool output.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from .market import extract_market_instruments, is_market_price_request
+
+
+def _evidence_arguments_digest(arguments: Any) -> str:
+    """Return a stable short digest for requirement-level tool evidence."""
+    try:
+        text = json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        text = str(arguments)
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:12]
+
+
+def _evidence_preview(value: Any, limit: int = 320) -> str:
+    """Persist a compact, single-line evidence excerpt without prompt-sized payloads."""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    limit = max(0, int(limit))
+    if not text or not limit:
+        return ""
+    if len(text) <= limit:
+        return text
+    head = max(1, int(limit * 0.68))
+    tail = max(1, limit - head - 15)
+    return text[:head].rstrip() + " …[clipped]… " + text[-tail:].lstrip()
+
+
+def _append_requirement_evidence(
+    item: "Requirement", *, source: str, tool_name: str, status: str, reason: str,
+    fingerprint: str = "", arguments: Any = None, arguments_digest: str = "",
+    evidence_ref: str = "", evidence_preview: str = "",
+) -> None:
+    """Attach durable provenance to one requirement while keeping the ledger bounded."""
+    digest = str(arguments_digest or "").strip()
+    if not digest and arguments is not None:
+        digest = _evidence_arguments_digest(arguments)
+    row = {
+        "source": str(source or "")[:32],
+        "tool": str(tool_name or "")[:80],
+        "status": str(status or "")[:24],
+        "reason": str(reason or "")[:120],
+        "fingerprint": str(fingerprint or "")[:32],
+        "arguments_digest": digest[:24],
+        "evidence_ref": str(evidence_ref or "")[:80],
+        "evidence_preview": _evidence_preview(evidence_preview, 320),
+    }
+    row = {key: value for key, value in row.items() if value not in (None, "")}
+    if row and row not in item.evidence:
+        item.evidence.append(row)
+        item.evidence[:] = item.evidence[-4:]
 
 
 @dataclass
@@ -1588,6 +1636,7 @@ class TaskRequirementLedger:
     def record_tool(
         self, tool_name: str, *, status: str, reason: str = "", fingerprint: str = "",
         arguments: Any = None, result_text: str = "", result_metadata: dict[str, Any] | None = None,
+        evidence_ref: str = "", evidence_preview: str = "",
     ) -> None:
         tool_name = str(tool_name or "")
         targets = {tool_name}
@@ -1622,10 +1671,17 @@ class TaskRequirementLedger:
                 item.last_reason = "successful tool result did not match requested target/scope"
             elif direct and item.status not in {"satisfied", "partial"}:
                 item.status = "failed"
+            if scoped or direct:
+                _append_requirement_evidence(
+                    item, source="tool_call", tool_name=tool_name, status=status,
+                    reason=item.last_reason or reason, fingerprint=fingerprint, arguments=arguments,
+                    evidence_ref=evidence_ref, evidence_preview=evidence_preview or result_text,
+                )
 
     def record_tool_for_key(
         self, key: str, tool_name: str, *, status: str, reason: str = "", fingerprint: str = "",
         arguments: Any = None, result_text: str = "", result_metadata: dict[str, Any] | None = None,
+        evidence_ref: str = "", evidence_preview: str = "",
     ) -> None:
         """Record a deterministic tool result against exactly one requirement.
 
@@ -1655,12 +1711,17 @@ class TaskRequirementLedger:
                 item.last_reason = "successful tool result did not match requested target/scope"
             else:
                 item.status = "failed"
+            _append_requirement_evidence(
+                item, source="tool_call", tool_name=tool_name, status=status,
+                reason=item.last_reason or reason, fingerprint=fingerprint, arguments=arguments,
+                evidence_ref=evidence_ref, evidence_preview=evidence_preview or result_text,
+            )
             return
 
     def record_evidence_for_key(
         self, key: str, *, source: str, tool_name: str = "", status: str = "",
         reason: str = "", fingerprint: str = "", arguments_digest: str = "",
-        evidence_ref: str = "", count_attempt: bool = False,
+        evidence_ref: str = "", evidence_preview: str = "", count_attempt: bool = False,
     ) -> None:
         """Attach explicit provenance to one requirement without changing its outcome.
 
@@ -1674,19 +1735,11 @@ class TaskRequirementLedger:
                 continue
             if count_attempt:
                 item.attempts += 1
-            row = {
-                "source": str(source or "")[:32],
-                "tool": str(tool_name or "")[:80],
-                "status": str(status or "")[:24],
-                "reason": str(reason or "")[:120],
-                "fingerprint": str(fingerprint or "")[:32],
-                "arguments_digest": str(arguments_digest or "")[:24],
-                "evidence_ref": str(evidence_ref or "")[:80],
-            }
-            row = {k: v for k, v in row.items() if v not in (None, "")}
-            if row and row not in item.evidence:
-                item.evidence.append(row)
-                item.evidence[:] = item.evidence[-4:]
+            _append_requirement_evidence(
+                item, source=source, tool_name=tool_name, status=status, reason=reason,
+                fingerprint=fingerprint, arguments_digest=arguments_digest,
+                evidence_ref=evidence_ref, evidence_preview=evidence_preview,
+            )
             return
 
     def mark_fact_satisfied(self, fact_type: str, reason: str = "grounding_evidence") -> None:

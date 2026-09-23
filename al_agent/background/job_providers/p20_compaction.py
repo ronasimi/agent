@@ -1,4 +1,4 @@
-from ..handlers import JobHandler
+from ..types import JobHandler
 from ..maintenance import run_context_compaction_job
 
 def _run(job_id: str, worker_id: str):

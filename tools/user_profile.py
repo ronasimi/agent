@@ -307,6 +307,10 @@ def get_relevant_user_prompt_context(user_text: str) -> str:
         r"\b(?:my profile|about me|what do you know about me|who am i|my identity|my preferences?)\b",
         text,
     ))
+    try:
+        profile_read, requested_profile_fields = _profile_fact_requests(user_text)
+    except Exception:
+        profile_read, requested_profile_fields = False, []
     needs_location = bool(re.search(
         r"\b(?:weather|forecast|near me|nearby|local(?: news| weather| forecast)?|around me)\b",
         text,
@@ -329,6 +333,25 @@ def get_relevant_user_prompt_context(user_text: str) -> str:
         location = get_user_location()
         if location:
             lines.append(f"**Location**: {location}")
+    elif profile_read and requested_profile_fields:
+        snapshot = _profile_fact_snapshot()
+        labels = {
+            "name": "Name", "role": "Role", "timezone": "Timezone", "location": "Location",
+            "email": "Email", "interests": "Interests", "response_style": "Response style",
+            "research_depth": "Research depth", "profile_image": "Profile image",
+        }
+        for key in requested_profile_fields:
+            if key == "profile":
+                continue
+            value = snapshot.get(key)
+            if key == "profile_image":
+                lines.append(f"**{labels[key]}**: {'configured' if value else 'not configured'}")
+            elif value in (None, "", []):
+                lines.append(f"**{labels.get(key, key.title())}**: [not configured]")
+            elif key == "interests":
+                lines.append(f"**{labels[key]}**: {', '.join(map(str, value))}")
+            else:
+                lines.append(f"**{labels.get(key, key.title())}**: {value}")
     else:
         if needs_location:
             location = get_user_location()
@@ -427,6 +450,195 @@ def reset_onboarding_profile() -> dict[str, Any]:
     except OSError:
         pass
     return get_onboarding_state()
+
+
+
+_PROFILE_MUTATION_RE = re.compile(
+    r"\b(?:set|change|update|edit|replace|save|remember|forget|clear|delete|remove)\b",
+    re.I,
+)
+_PROFILE_READ_RE = re.compile(
+    r"\b(?:what|what's|which|where|who|show|tell|list|give|do i have|have i)\b",
+    re.I,
+)
+_PROFILE_BROAD_RE = re.compile(
+    r"\b(?:what do you know about me|what(?:'s| is) my profile|show (?:me )?my profile|"
+    r"tell me (?:about )?my profile|who am i)\b",
+    re.I,
+)
+
+
+def _profile_fact_requests(user_text: str) -> tuple[bool, list[str]]:
+    """Return whether a request is a read-only profile query and which fields it names.
+
+    This parser is intentionally conservative. It handles explicit first-person
+    OOBE/profile questions but does not intercept mutation requests or ordinary
+    mentions of the same words in unrelated prompts.
+    """
+    text = " ".join(str(user_text or "").strip().split())
+    lower = text.lower()
+    if not text or _PROFILE_MUTATION_RE.search(lower):
+        return False, []
+    if _PROFILE_BROAD_RE.search(lower):
+        return True, ["profile"]
+    if not _PROFILE_READ_RE.search(lower) and "?" not in text:
+        return False, []
+
+    fields: list[str] = []
+    patterns: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("name", (
+            r"\bmy\s+(?:full\s+)?name\b",
+            r"\bwhat(?:'s| is)\s+(?:the\s+)?name\s+(?:you\s+have|saved|stored)\s+for\s+me\b",
+        )),
+        ("location", (
+            r"\bmy\s+(?:saved\s+|home\s+)?location\b",
+            r"\bmy\s+(?:home\s+)?city\b",
+            r"\bwhere\s+do\s+i\s+live\b",
+            r"\bwhat(?:'s| is)\s+(?:the\s+)?location\s+(?:you\s+have|saved|stored)\s+for\s+me\b",
+        )),
+        ("timezone", (
+            r"\bmy\s+time\s*zone\b",
+            r"\bwhat\s+time\s*zone\s+am\s+i\s+in\b",
+            r"\bwhich\s+time\s*zone\s+am\s+i\s+in\b",
+        )),
+        ("role", (
+            r"\bmy\s+(?:saved\s+)?role\b",
+            r"\bwhat(?:'s| is)\s+(?:the\s+)?role\s+(?:you\s+have|saved|stored)\s+for\s+me\b",
+        )),
+        ("email", (
+            r"\bmy\s+(?:saved\s+)?(?:email|e-mail)(?:\s+address)?\b",
+            r"\bwhat\s+(?:email|e-mail)\s+(?:do\s+you\s+have|is\s+saved)\s+for\s+me\b",
+        )),
+        ("interests", (
+            r"\bmy\s+(?:saved\s+)?interests?\b",
+            r"\bwhat\s+am\s+i\s+interested\s+in\b",
+        )),
+        ("response_style", (
+            r"\bmy\s+(?:saved\s+)?response\s+style\b",
+            r"\bhow\s+do\s+i\s+prefer\s+(?:you\s+to\s+)?respond\b",
+        )),
+        ("research_depth", (
+            r"\bmy\s+(?:saved\s+)?research\s+(?:depth|preference)\b",
+            r"\bhow\s+deep\s+do\s+i\s+prefer\s+research\b",
+        )),
+        ("profile_image", (
+            r"\bmy\s+(?:saved\s+)?profile\s+(?:image|photo|picture)\b",
+            r"\bdo\s+i\s+have\s+(?:a\s+)?profile\s+(?:image|photo|picture)\b",
+        )),
+    )
+    for field, regexes in patterns:
+        if any(re.search(pattern, lower, re.I) for pattern in regexes):
+            fields.append(field)
+    return bool(fields), fields
+
+
+def _profile_fact_snapshot() -> dict[str, Any]:
+    """Return OOBE/profile-owned fields in one deterministic snapshot."""
+    identity = get_user_identity()
+    prefs = get_user_preferences()
+    return {
+        "name": identity.get("name"),
+        "role": identity.get("role"),
+        "timezone": identity.get("timezone"),
+        "location": get_user_location(),
+        "email": identity.get("email"),
+        "interests": identity.get("interests") or [],
+        "response_style": (prefs.get("response") or {}).get("style"),
+        "research_depth": (prefs.get("search_depth") or {}).get("depth"),
+        "profile_image": bool(get_profile_image_path(migrate_legacy=True)),
+    }
+
+
+def resolve_profile_fact_query(user_text: str) -> dict[str, Any]:
+    """Resolve explicit profile/OOBE fact questions without invoking an LLM.
+
+    ``matched`` means the request is an explicit read-only profile query.
+    ``resolved`` is true only when all specifically requested facts are available.
+    Callers should fall back to normal model inference when a requested fact is
+    absent, allowing other memory/retrieval mechanisms to participate.
+    """
+    matched, requested = _profile_fact_requests(user_text)
+    if not matched:
+        return {"matched": False, "resolved": False, "requested": [], "facts": {}, "missing": [], "response": ""}
+
+    snapshot = _profile_fact_snapshot()
+    if requested == ["profile"]:
+        requested = [
+            "name", "role", "location", "timezone", "email", "interests",
+            "response_style", "research_depth", "profile_image",
+        ]
+        # A broad profile request is useful when at least one human-entered field
+        # exists. profile_image=False alone must not make an otherwise empty
+        # profile appear configured.
+        present = {
+            key: value for key, value in snapshot.items()
+            if key != "profile_image" and value not in (None, "", [])
+        }
+        if not present:
+            return {
+                "matched": True, "resolved": False, "requested": requested,
+                "facts": {}, "missing": requested, "response": "",
+            }
+        requested = [key for key in requested if key == "profile_image" or snapshot.get(key) not in (None, "", [])]
+
+    facts: dict[str, Any] = {}
+    missing: list[str] = []
+    for key in requested:
+        value = snapshot.get(key)
+        if key == "profile_image":
+            # Presence/absence is itself a known deterministic fact.
+            facts[key] = bool(value)
+        elif value in (None, "", []):
+            missing.append(key)
+        else:
+            facts[key] = value
+    if missing:
+        return {
+            "matched": True, "resolved": False, "requested": requested,
+            "facts": facts, "missing": missing, "response": "",
+        }
+
+    labels = {
+        "name": "Name", "role": "Role", "location": "Location", "timezone": "Timezone",
+        "email": "Email", "interests": "Interests", "response_style": "Response style",
+        "research_depth": "Research depth", "profile_image": "Profile image",
+    }
+    if len(facts) == 1:
+        key, value = next(iter(facts.items()))
+        if key == "name":
+            response = f"Your name is {value}."
+        elif key == "location":
+            response = f"Your saved location is {value}."
+        elif key == "timezone":
+            response = f"Your saved timezone is {value}."
+        elif key == "role":
+            response = f"Your saved role is {value}."
+        elif key == "email":
+            response = f"Your saved email is {value}."
+        elif key == "interests":
+            response = "Your saved interests are " + ", ".join(map(str, value)) + "."
+        elif key == "response_style":
+            response = f"Your saved response style is {value}."
+        elif key == "research_depth":
+            response = f"Your saved research depth is {value}."
+        else:
+            response = "You have a profile image configured." if value else "You do not have a profile image configured."
+    else:
+        rows: list[str] = []
+        for key, value in facts.items():
+            if key == "interests":
+                rendered = ", ".join(map(str, value))
+            elif key == "profile_image":
+                rendered = "configured" if value else "not configured"
+            else:
+                rendered = str(value)
+            rows.append(f"- {labels[key]}: {rendered}")
+        response = "Here is your saved profile:\n" + "\n".join(rows)
+
+    return {
+        "matched": True, "resolved": True, "requested": requested,
+        "facts": facts, "missing": [], "response": response,
+    }
 
 
 def get_user_research_style() -> dict[str, Any]:

@@ -626,3 +626,45 @@ def test_active_chat_can_be_reopened_while_turn_is_streaming():
     assert current_chat < busy_guard
     assert "showPanel('chat');" in impl
 
+
+
+def test_jobs_panel_surfaces_compute_progress_and_cancel_controls():
+    root = Path(__file__).resolve().parents[1]
+    js = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
+    css = (root / "webui" / "static" / "style.css").read_text(encoding="utf-8")
+    server = (root / "webui" / "server.py").read_text(encoding="utf-8")
+
+    assert "jobProgress" in js
+    assert "yield_count" in js and "tape_cells" in js
+    assert "/api/jobs/${encodeURIComponent(jobId)}/cancel" in js
+    assert "stop-circle-outline" in js
+    assert "if(panel&&!panel.classList.contains('hidden'))loadJobs()" in js
+    assert ".job-progress" in css
+    assert '@app.post("/api/jobs/{job_id}/cancel")' in server
+
+
+def test_list_jobs_exposes_bounded_compute_progress_not_full_tape(tmp_path, monkeypatch):
+    from tools import runtime
+
+    db = str(tmp_path / "agent.db")
+    monkeypatch.setenv("AGENT_DB_PATH", db)
+    runtime.DB_PATH = db
+    runtime.init_runtime_db()
+    job_id = runtime.create_job("durable_compute", "demo", {"program": {}})
+    runtime.claim_next_job("worker", ["durable_compute"])
+    state = {
+        "status": "yielded",
+        "machine_state": "q1",
+        "steps": 12,
+        "yield_count": 3,
+        "checkpoint_generation": 3,
+        "head": 4,
+        "tape_cells": 99,
+        "tape": {str(i): "1" for i in range(99)},
+    }
+    assert runtime.checkpoint_and_defer_job(job_id, state, step=3, delay_seconds=0)
+    row = runtime.list_jobs(limit=5)[0]
+    assert row["progress"]["steps"] == 12
+    assert row["progress"]["yield_count"] == 3
+    assert row["progress"]["tape_cells"] == 99
+    assert "state" not in row and "tape" not in row

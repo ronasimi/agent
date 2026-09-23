@@ -1,6 +1,6 @@
 # Tool, Primitive, and Recipe Soak Testing
 
-> **Current-state note (2026-09-23):** The builtin manifest currently contains 232 tools. This is the current soak-test operator guide; dated audit/review files retain their historical counts.
+> **Current-state note (2026-09-23):** The builtin manifest currently contains 235 tools. This is the current soak-test operator guide; dated audit/review files retain their historical counts.
 
 `scripts/soak_test_tools.py` exercises the live tool registry and compatibility recipe catalog across five deterministic passes by default. It is intended to catch intermittent provider failures, schema drift, hangs, slow primitives, missing host dependencies, recipe regressions, and state contamination between passes.
 
@@ -24,7 +24,7 @@ The default five pass profiles are `baseline`, `alternate`, `minimal`, `unicode`
 
 `--duration` is now optional and defaults to `0` (disabled). `--passes` defaults to `5`. A positive duration can still be supplied as a hard outer deadline, and `--passes 0 --duration 8h` remains available for duration-only stress testing. Per-call child timeouts still prevent one hanging tool from wedging the run.
 
-The default `isolated` mutation mode invokes every read-only tool and every recipe. Mutating primitives that can be safely redirected to the audit database/profile or to disposable workspace fixtures are also invoked. Workspace-bounded deletion (`remove_path`) is tested only against a per-pass disposable directory. System/external-state mutators such as package installation, real reminders/desktop notifications, the legacy live work queue, and generated production tools are schema/argument contract-tested but are not executed.
+The default `isolated` mutation mode invokes every read-only tool and every recipe. Mutating primitives that can be safely redirected to the audit database/profile or to disposable workspace fixtures are also invoked. Durable-compute start/status/cancel probes use isolated fixture jobs and never touch the production job database. Workspace-bounded deletion (`remove_path`) is tested only against a per-pass disposable directory. System/external-state mutators such as package installation, real reminders/desktop notifications, the legacy live work queue, and generated production tools are schema/argument contract-tested but are not executed.
 
 Use `--mutating-mode all` only inside a disposable test environment. It permits calls that may install packages, schedule OS timers, modify the live queue, generate tools, or trigger other persistent side effects.
 

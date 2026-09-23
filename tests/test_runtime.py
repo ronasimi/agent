@@ -1,12 +1,5 @@
-import sys
 import tempfile
-import types
 from pathlib import Path
-
-REPO = Path(__file__).resolve().parents[1]
-PKG = types.ModuleType("tools")
-PKG.__path__ = [str(REPO / "tools")]
-sys.modules.setdefault("tools", PKG)
 
 
 def test_runtime_job_lifecycle(monkeypatch):
@@ -83,3 +76,36 @@ def test_optimization_candidate_audit_lifecycle(monkeypatch):
         candidate = runtime.get_optimization_candidate(candidate_id)
         assert candidate["status"] == "approved"
         assert candidate["baseline"] == {"passed": True}
+
+
+def test_checkpoint_and_defer_is_atomic_and_does_not_consume_retry(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        db = str(Path(td) / "agent.db")
+        monkeypatch.setenv("AGENT_DB_PATH", db)
+        from tools import runtime
+        runtime.DB_PATH = db
+        runtime.init_runtime_db()
+        job_id = runtime.create_job("durable_compute", "compute", {"program": {}})
+        runtime.claim_next_job("worker", ["durable_compute"])
+        state = {"checkpoint_version": 1, "checkpoint_generation": 1, "steps": 7}
+        assert runtime.checkpoint_and_defer_job(job_id, state, step=1, delay_seconds=0)
+        job = runtime.get_job(job_id)
+        assert job["status"] == "pending"
+        assert job["attempts"] == 0
+        assert job["state"] == state
+        assert runtime.load_checkpoint(job_id) == state
+
+
+def test_cancelled_job_cannot_be_resurrected_by_late_compute_checkpoint(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        db = str(Path(td) / "agent.db")
+        monkeypatch.setenv("AGENT_DB_PATH", db)
+        from tools import runtime
+        runtime.DB_PATH = db
+        runtime.init_runtime_db()
+        job_id = runtime.create_job("durable_compute", "race", {"program": {}})
+        runtime.claim_next_job("worker", ["durable_compute"])
+        assert runtime.cancel_job(job_id)
+        state = {"checkpoint_version": 1, "checkpoint_generation": 1, "steps": 100}
+        assert not runtime.checkpoint_and_defer_job(job_id, state, step=1, delay_seconds=0)
+        assert runtime.get_job(job_id)["status"] == "cancelled"
