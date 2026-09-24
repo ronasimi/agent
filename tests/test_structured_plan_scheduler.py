@@ -242,6 +242,69 @@ def test_working_state_preserves_full_explicit_safety_section(monkeypatch):
         assert state["constraints"][-1].startswith("Safety rule 20")
 
 
+def test_structured_plan_constraints_exclude_future_step_local_instructions(monkeypatch):
+    from tools import working_state
+
+    with tempfile.TemporaryDirectory() as td:
+        monkeypatch.setattr(working_state, "DB_PATH", str(Path(td) / "state.db"))
+        store = working_state.WorkingStateStore()
+        objective = """# Audit
+
+## Safety Rules
+1. Prefer read-only operations.
+2. Do not install packages.
+
+## 1. Runtime Identity
+Check hostname and time.
+
+## 2. Tool Selection
+Identify a primitive without executing it yet.
+
+## 3. Host Snapshot
+Collect a read-only host snapshot. Do not infer missing hardware details.
+"""
+        state = store.begin_turn(
+            turn_id=1,
+            objective=objective,
+            rolling_summary="",
+            recalled_context="",
+            recent_messages=[],
+            policy_note="",
+            tool_schemas=[],
+            execution_plan=["1. Runtime Identity", "2. Tool Selection", "3. Host Snapshot"],
+        )
+        constraints = "\n".join(state["constraints"])
+        assert "Prefer read-only operations" in constraints
+        assert "Do not install packages" in constraints
+        assert "without executing it yet" not in constraints
+        assert "Do not infer missing hardware details" not in constraints
+
+
+def test_scheduler_render_does_not_duplicate_durable_observations(monkeypatch):
+    from tools import working_state
+
+    with tempfile.TemporaryDirectory() as td:
+        monkeypatch.setattr(working_state, "DB_PATH", str(Path(td) / "state.db"))
+        store = working_state.WorkingStateStore(limits={"max_render_chars": 8000})
+        store.begin_turn(
+            turn_id=1,
+            objective="Run two checks",
+            rolling_summary="",
+            recalled_context="",
+            recent_messages=[],
+            policy_note="",
+            tool_schemas=[],
+            execution_plan=["FIRST", "SECOND"],
+        )
+        store.record_tool_result(
+            tool_name="hostname", arguments={}, status="ok", reason="ok",
+            result_text='{"host_hostname":"muninn"}', observation_id="obs123",
+        )
+        projected = json.loads(store.render())
+        assert projected["verified_observations"] == []
+        assert "hostname" in store.render_evidence()
+
+
 def test_scheduler_final_synthesis_keeps_all_large_plan_rows(monkeypatch):
     from tools import working_state
 
@@ -367,6 +430,8 @@ def test_turn_engine_never_sends_future_steps_to_main_model(monkeypatch, tmp_pat
     assert "FUTURE_BETA" in second
     assert "FUTURE_GAMMA" not in second
     assert "FUTURE_GAMMA" in third
+    assert "alpha complete" not in second
+    assert "beta complete" not in third
     assert second.count("[Harness scheduler] Active requirement ") == 1
     assert third.count("[Harness scheduler] Active requirement ") == 1
     assert "Active requirement 2/3: Handle FUTURE_BETA" not in third
@@ -569,3 +634,191 @@ Summarize all completed requirements.
     assert store.scheduler_complete()
     assert store.load()["status"] == "complete"
     assert messages[-1]["content"] == "all scheduled checks complete"
+
+
+def test_structured_plan_model_timeout_fails_one_step_and_continues(monkeypatch, tmp_path):
+    from al_agent import turn_engine as te
+    from tools import working_state
+
+    class MainClient:
+        def __init__(self):
+            self.calls = []
+
+        def chat(self, **kwargs):
+            self.calls.append(kwargs)
+            index = len(self.calls)
+            if index == 1:
+                return iter([{"done": True, "message": {"content": "first selection complete", "tool_calls": []}}])
+            if index in {2, 3}:
+                raise TimeoutError("timed out")
+            if index == 4:
+                return iter([{"done": True, "message": {"content": "third selection complete", "tool_calls": []}}])
+            return iter([{"done": True, "message": {"content": "final synthesis complete", "tool_calls": []}}])
+
+    db = str(tmp_path / "step-timeout.db")
+    monkeypatch.setattr(working_state, "DB_PATH", db)
+    store = working_state.WorkingStateStore(limits={"max_render_chars": 8000})
+    model = MainClient()
+
+    monkeypatch.setattr(te, "WORKING_STATE", store)
+    monkeypatch.setattr(te, "WORKING_STATE_ENABLED", True)
+    monkeypatch.setattr(te, "STRUCTURED_PLAN_ENABLED", True)
+    monkeypatch.setattr(te, "STRUCTURED_PLAN_MIN_CHARS", 10)
+    monkeypatch.setattr(te, "STRUCTURED_PLAN_MIN_COMMANDS", 2)
+    monkeypatch.setattr(te, "STRUCTURED_PLAN_MAX_TOOLS", 3)
+    monkeypatch.setattr(te, "GROUNDING_ENABLED", False)
+    monkeypatch.setattr(te, "RECIPES_ENABLED", False)
+    monkeypatch.setattr(te, "LOOP_VALIDATOR_ENABLED", False)
+    monkeypatch.setattr(te, "MODEL_TRACE_ENABLED", False)
+    monkeypatch.setattr(te, "MODEL_PREFLIGHT_RETRIES", 0)
+    monkeypatch.setattr(te, "MODEL_NO_PROGRESS_MAX_RETRIES", 2)
+    monkeypatch.setattr(te, "get_conversation_summary", lambda: "")
+    monkeypatch.setattr(te, "build_memory_context", lambda *_: "")
+    monkeypatch.setattr(te, "get_relevant_user_prompt_context", lambda *_: "")
+    monkeypatch.setattr(te, "get_user_location", lambda: "")
+    monkeypatch.setattr(te, "build_historical_recall_context", lambda *a, **k: "")
+    monkeypatch.setattr(te, "render_relevant_skill_index", lambda *a, **k: "")
+    monkeypatch.setattr(te, "render_failure_lessons", lambda *a, **k: "")
+    monkeypatch.setattr(te, "render_relevant_reflections", lambda *a, **k: "")
+    monkeypatch.setattr(te, "evict_report_model_for_interactive", lambda: None)
+    monkeypatch.setattr(te, "_prune_compacted_history", lambda _messages: None)
+    monkeypatch.setattr(te, "log_perf_stats", lambda *a, **k: None)
+
+    prompt = """# Timeout isolation regression
+Treat every numbered requirement below as independent.
+
+## 1. Tool Selection
+Identify the appropriate primitive for current time without executing it yet.
+
+## 2. Tool Selection
+Identify the appropriate primitive for CPU information without executing it yet.
+
+## 3. Tool Selection
+Identify the appropriate primitive for memory usage without executing it yet.
+
+# FINAL REPORT
+Summarize every requirement.
+"""
+    messages = [{"role": "system", "content": "system"}]
+    te.handle_user_turn(
+        messages,
+        prompt,
+        False,
+        runtime_overrides={
+            "OLLAMA": model,
+            "LOOP_VALIDATOR_CLIENT": model,
+            "record_monitor_state": lambda *a, **k: None,
+            "append_and_save": lambda rows, item: rows.append(item),
+            "acquire_turn_lock": lambda: object(),
+            "release_turn_lock": lambda _lock: None,
+            "acquire_inference_lock": lambda: object(),
+            "release_inference_lock": lambda _lock: None,
+            "queue_compaction_if_needed": lambda *a, **k: None,
+        },
+    )
+
+    scheduler = store.scheduler_snapshot()
+    assert [step["status"] for step in scheduler["steps"]] == ["PASS", "FAIL", "PASS"]
+    assert store.load()["status"] == "complete"
+    assert len(model.calls) == 5
+    assert messages[-1]["content"] == "final synthesis complete"
+
+
+def test_scheduler_step_boundary_drops_prior_tool_protocol(monkeypatch, tmp_path):
+    from al_agent import turn_engine as te
+    from tools import working_state
+
+    executed = []
+
+    def fake_execute(name, args):
+        executed.append((name, dict(args or {})))
+        if name == "hostname":
+            return json.dumps({"host_hostname": "muninn", "runtime_hostname": "muninn", "same_hostname": True})
+        raise AssertionError((name, args))
+
+    class MainClient:
+        def __init__(self):
+            self.calls = []
+
+        def chat(self, **kwargs):
+            self.calls.append(kwargs)
+            index = len(self.calls)
+            if index == 1:
+                return iter([{"done": True, "message": {"content": "", "tool_calls": [
+                    {"id": "first-host", "function": {"name": "hostname", "arguments": {}}}
+                ]}}])
+            if index == 2:
+                return iter([{"done": True, "message": {"content": "first hostname verified", "tool_calls": []}}])
+            if index == 3:
+                wire = json.dumps(kwargs.get("messages") or [], ensure_ascii=False)
+                assert "first-host" not in wire
+                assert "first hostname verified" not in wire
+                return iter([{"done": True, "message": {"content": "", "tool_calls": [
+                    {"id": "second-host", "function": {"name": "hostname", "arguments": {}}}
+                ]}}])
+            if index == 4:
+                return iter([{"done": True, "message": {"content": "second hostname verified", "tool_calls": []}}])
+            return iter([{"done": True, "message": {"content": "final", "tool_calls": []}}])
+
+    monkeypatch.setattr(working_state, "DB_PATH", str(tmp_path / "tail-reset.db"))
+    store = working_state.WorkingStateStore(limits={"max_render_chars": 8000})
+    model = MainClient()
+
+    monkeypatch.setattr(te, "WORKING_STATE", store)
+    monkeypatch.setattr(te, "WORKING_STATE_ENABLED", True)
+    monkeypatch.setattr(te, "STRUCTURED_PLAN_ENABLED", True)
+    monkeypatch.setattr(te, "STRUCTURED_PLAN_MIN_CHARS", 10)
+    monkeypatch.setattr(te, "STRUCTURED_PLAN_MIN_COMMANDS", 2)
+    monkeypatch.setattr(te, "STRUCTURED_PLAN_MAX_TOOLS", 3)
+    monkeypatch.setattr(te, "GROUNDING_ENABLED", False)
+    monkeypatch.setattr(te, "RECIPES_ENABLED", False)
+    monkeypatch.setattr(te, "LOOP_VALIDATOR_ENABLED", False)
+    monkeypatch.setattr(te, "MODEL_TRACE_ENABLED", False)
+    monkeypatch.setattr(te, "get_conversation_summary", lambda: "")
+    monkeypatch.setattr(te, "build_memory_context", lambda *_: "")
+    monkeypatch.setattr(te, "get_relevant_user_prompt_context", lambda *_: "")
+    monkeypatch.setattr(te, "get_user_location", lambda: "")
+    monkeypatch.setattr(te, "build_historical_recall_context", lambda *a, **k: "")
+    monkeypatch.setattr(te, "render_relevant_skill_index", lambda *a, **k: "")
+    monkeypatch.setattr(te, "render_failure_lessons", lambda *a, **k: "")
+    monkeypatch.setattr(te, "render_relevant_reflections", lambda *a, **k: "")
+    monkeypatch.setattr(te, "evict_report_model_for_interactive", lambda: None)
+    monkeypatch.setattr(te, "_prune_compacted_history", lambda _messages: None)
+    monkeypatch.setattr(te, "log_perf_stats", lambda *a, **k: None)
+    monkeypatch.setattr(te, "_execute_registered_tool", fake_execute)
+
+    prompt = """# Tail isolation
+Treat every numbered requirement below as independent.
+This regression intentionally contains two independent scheduler requirements so the structured-plan path is exercised.
+The purpose is to verify that completed tool protocol from one atomic step is not replayed into the next atomic step.
+
+## 1. Hostname
+Check hostname using the hostname primitive.
+
+## 2. Hostname Cross-check
+Cross-check hostname using the hostname primitive.
+
+# FINAL REPORT
+Summarize both checks.
+"""
+    messages = [{"role": "system", "content": "system"}]
+    te.handle_user_turn(
+        messages,
+        prompt,
+        False,
+        runtime_overrides={
+            "OLLAMA": model,
+            "LOOP_VALIDATOR_CLIENT": model,
+            "record_monitor_state": lambda *a, **k: None,
+            "append_and_save": lambda rows, item: rows.append(item),
+            "acquire_turn_lock": lambda: object(),
+            "release_turn_lock": lambda _lock: None,
+            "acquire_inference_lock": lambda: object(),
+            "release_inference_lock": lambda _lock: None,
+            "queue_compaction_if_needed": lambda *a, **k: None,
+        },
+    )
+
+    assert [name for name, _ in executed] == ["hostname", "hostname"]
+    assert store.scheduler_complete()
+    assert messages[-1]["content"] == "final"

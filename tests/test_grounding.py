@@ -315,6 +315,9 @@ def test_structured_fact_tools_do_not_ground_arbitrary_nonempty_text():
     assert classify_fact_types("repo_status", "working tree clean") == set()
 
     assert "host_state" in classify_fact_types("host_snapshot", '{"cpu_count":8}')
+    assert "host_state" not in classify_fact_types("filesystem_snapshot", '{"filesystems":[]}')
+    assert "host_state" not in classify_fact_types("process_snapshot", '{"processes":[]}')
+    assert "host_state" not in classify_fact_types("pressure_snapshot", '{"cpu":[]}')
     assert "network_state" in classify_fact_types("neighbor_snapshot", "[]")
     assert "repository_state" in classify_fact_types("repo_status", '{"git_repo":false}')
 

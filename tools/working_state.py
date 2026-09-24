@@ -296,6 +296,26 @@ def _extract_constraints(user_text: str, policy_note: str, limit: int = 32) -> l
     return items[:limit]
 
 
+def _structured_plan_global_constraint_text(user_text: str) -> str:
+    """Return only the plan preamble/global-constraint portion of a suite.
+
+    Structured plans persist each numbered requirement separately.  Re-running
+    the generic constraint extractor over the entire original suite used to
+    promote step-local prose such as "Do not infer missing hardware details" or
+    "without executing it yet" into global model-facing constraints.  Besides
+    leaking future requirements, those strings accumulated prompt cost on every
+    scheduler step.  Global policy lives before the first numbered requirement,
+    so keep only that preamble here.
+    """
+    text = str(user_text or "")
+    match = re.search(r"(?m)^\s*#{1,6}\s+\d+\.\s+", text)
+    if match:
+        return text[: match.start()]
+    # Fallback for explicit numbered suites without Markdown headings.
+    match = re.search(r"(?m)^\s*\d+\.\s+[A-Z][^\n]{0,120}$", text)
+    return text[: match.start()] if match else text
+
+
 def _tool_capabilities(tool_schemas: list[dict[str, Any]], max_items: int = 28) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for schema in tool_schemas[: max(1, int(max_items))]:
@@ -473,7 +493,8 @@ class WorkingStateStore:
             state["validator_history"] = list(previous.get("validator_history") or [])[-self.limits["validator_items"]:]
             carried_constraints = list(previous.get("constraints") or [])[-4:]
 
-        current_constraints = _extract_constraints(objective, policy_note)
+        constraint_source = _structured_plan_global_constraint_text(objective) if execution_plan else objective
+        current_constraints = _extract_constraints(constraint_source, policy_note)
         constraints: list[str] = []
         for item in [*carried_constraints, *current_constraints]:
             if item and item not in constraints:
@@ -951,7 +972,12 @@ class WorkingStateStore:
                 list(state.get("requirements", []) or []), self.limits["requirement_items"], evidence_preview_chars=0,
             ),
             "tool_capabilities": list(state.get("tool_capabilities", []) or []) if include_tool_capabilities else [],
-            "verified_observations": [
+            # In scheduler mode the observation excerpts are already rendered in
+            # the separately bounded evidence block.  Duplicating every prior
+            # observation here made the mutable system prefix grow across steps,
+            # increasing local-model prefill until it crossed the transport
+            # timeout.  Ordinary single-task turns retain the historical view.
+            "verified_observations": [] if scheduler_enabled else [
                 {key: value for key, value in item.items() if key not in {"evidence_preview", "grounding_proof"}}
                 for item in list(state.get("verified_observations", []) or [])
                 if isinstance(item, dict)

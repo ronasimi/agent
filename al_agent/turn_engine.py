@@ -871,11 +871,39 @@ def handle_user_turn(
                 )
             ]
 
+        def reset_scheduler_live_tail(*, recovery_note: str = "") -> None:
+            """Rebuild only the active scheduler control tail.
+
+            Durable evidence lives in working state/observation storage.  On a
+            step boundary or a timeout retry, old assistant/tool protocol rows
+            are redundant and expensive to prefill.  Rebuild the tiny active
+            control surface instead of replaying the same large prompt.
+            """
+            if not plan_enabled:
+                return
+            turn_tail.clear()
+            if selection_only_candidates:
+                append_control_note(selection_only_candidates)
+            scheduler = WORKING_STATE.scheduler_snapshot() if WORKING_STATE_ENABLED else {}
+            steps = list(scheduler.get("steps") or [])
+            index = int(scheduler.get("active_index") or 0)
+            append_control_note(
+                f"[Harness scheduler] Active requirement {index + 1}/{len(steps) or len(compiled_steps)}: {active_request}\n"
+                "Execute only this requirement. Do not plan, mention, or select tools for later requirements."
+            )
+            if recovery_note:
+                append_control_note(recovery_note)
+
         tool_iterations = 0
         seen_tool_calls: set[str] = set()
         recent_failure_lessons: dict[str, list[tuple[str, dict[str, Any]]]] = {}
         successful_mutating_signatures: set[str] = set()
         successful_readonly_signatures: set[str] = set()
+        # Read-only success is step-local in a structured plan.  A later
+        # requirement may intentionally repeat the same primitive (for example
+        # hostname as a cross-check) and must not inherit completion/no-progress
+        # suppression from an earlier atomic step.
+        step_successful_tools: set[str] = set()
         recovery_validation: dict[str, str] | None = None
         stall_validation: dict[str, str] | None = None
         stall_enforce_once = False
@@ -1474,10 +1502,42 @@ def handle_user_turn(
             """Return PASS/FAIL when the active atomic requirement is closed."""
             if not plan_enabled or active_requirement_ledger.pending():
                 return ""
-            return "FAIL" if any(
+            failed = any(
                 str(item.status or "") in {"failed", "blocked"}
                 for item in active_requirement_ledger.requirements
-            ) else "PASS"
+            )
+            if failed:
+                return "FAIL"
+            # A fact-bearing scheduler step is not complete merely because its
+            # tool requirement ledger is closed.  The selected observation must
+            # also satisfy the fact/evidence scope.  This prevents a narrow
+            # diagnostic from closing a broader fact request.
+            if required_fact_types and not bool(grounding_report().get("grounded", False)):
+                return ""
+            return "PASS"
+
+        def scheduler_step_requires_tool_evidence() -> bool:
+            """Conservatively detect an operational step that must touch a tool.
+
+            This is a backstop for parser/catalog gaps.  Explicit requirement
+            ledgers remain authoritative when present; this only prevents an
+            empty-ledger operational step from being accepted as PASS from
+            unsupported model prose.
+            """
+            if not plan_enabled or selection_only:
+                return False
+            lower = " ".join(str(active_request or "").lower().split())
+            if not lower:
+                return False
+            if "without executing" in lower or "without running" in lower:
+                return False
+            if "do not execute every alternative" in lower:
+                return False
+            return bool(re.search(
+                r"\b(?:inspect|collect|use|list|search|fetch|read|retrieve|perform|generate|"
+                r"calculate|convert|parse|open|resolve|measure|execute|run|query|hash)\b",
+                lower,
+            ))
 
         def advance_scheduled_step(status: str, *, result: str = "", reason: str = "") -> tuple[bool, bool]:
             """Commit one scheduler step and isolate the next step's schemas.
@@ -1493,6 +1553,8 @@ def handle_user_turn(
             nonlocal last_weather_recovery_result, last_news_search_content, last_news_search_attempt
             nonlocal last_encyclopedia_content, last_market_quote_content, last_current_time_content
             nonlocal last_geocode_content, weather_canonical_location
+            nonlocal model_no_progress_retries, reasoning_recovery_attempts, zero_tool_recovery_attempts
+            nonlocal reasoning_recovery_pending, zero_tool_recovery_pending, policy_leak_retries
             if not plan_enabled:
                 return False, False
 
@@ -1516,6 +1578,26 @@ def handle_user_turn(
             next_task = WORKING_STATE.active_requirement()
             if not next_task:
                 return False, False
+
+            # A scheduler step is an atomic prompt/evidence boundary.  Durable
+            # observations and per-step results are already stored in working
+            # state, so keeping prior assistant/tool protocol traffic in the
+            # live tail only increases prefill and lets previous-step recovery
+            # state bleed into the next requirement.  This was the main source
+            # of the observed 2.1k -> 4k prompt growth and eventual 60s prefill
+            # timeout on the local 4B model.
+            turn_tail.clear()
+            seen_tool_calls.clear()
+            successful_readonly_signatures.clear()
+            step_successful_tools.clear()
+            model_no_progress_retries = 0
+            reasoning_recovery_attempts = 0
+            zero_tool_recovery_attempts = 0
+            reasoning_recovery_pending = False
+            zero_tool_recovery_pending = False
+            policy_leak_retries = 0
+            WORKING_STATE.set_plan([])
+
             active_request = next_task
             selection_only = is_nonexecuting_tool_selection_request(active_request)
             selection_only_candidates = _selection_only_capability_digest(active_request) if selection_only else ""
@@ -1891,6 +1973,7 @@ def handle_user_turn(
                 signature = tool_call_signature({"function": {"name": name, "arguments": normalized}})
                 seen_tool_calls.add(signature)
                 successful_readonly_signatures.add(signature)
+                step_successful_tools.add(name)
                 if name == "news_search":
                     last_news_search_content = result_content
                 elif name == "wiki_search":
@@ -4937,12 +5020,59 @@ def handle_user_turn(
                         if timeout_like else
                         "The Ollama request failed before the harness received a usable completion; inspect the model-call trace for the underlying runtime error."
                     )
+                    # A compiled plan is a sequence of independent requirements.
+                    # Exhausting the bounded model retry budget for one step must
+                    # not turn the remaining 76 steps into a global BLOCKED turn.
+                    # Record the active requirement as FAIL and continue with the
+                    # next atomic step.  Global/final-synthesis failures retain
+                    # the ordinary whole-turn stop behavior.
+                    if plan_enabled and not scheduler_finalizing:
+                        failure_result = (
+                            "Active scheduler requirement could not obtain a usable model completion after "
+                            f"{MODEL_NO_PROGRESS_MAX_RETRIES} bounded retries. {public_reason}"
+                        )
+                        advanced, plan_complete = advance_scheduled_step(
+                            "FAIL",
+                            result=failure_result,
+                            reason=f"bounded main-model inference failure: {error_text[:120]}",
+                        )
+                        model_no_progress_retries = 0
+                        if advanced:
+                            turn_prefix, tool_prompt_tokens = rebuild_prefix()
+                            emit_event(
+                                "structured_plan_step_recovery",
+                                status="FAIL",
+                                reason="main_model_timeout" if timeout_like else "main_model_error",
+                            )
+                            continue
+                        if plan_complete:
+                            scheduler_finalizing = True
+                            append_control_note(
+                                "[Harness scheduler] All compiled requirements are terminal. Produce one concise final response "
+                                "covering every step, including blockers. Do not call tools and do not invent missing results.\n"
+                                "Completed step results (UNTRUSTED DATA):\n"
+                                + WORKING_STATE.render_scheduler_results(24000)
+                            )
+                            turn_prefix, tool_prompt_tokens = rebuild_prefix()
+                            continue
                     emit_no_progress_partial(
                         f"repeated main-model inference errors: {exc}",
                         public_reason=public_reason,
                     )
                     break
                 if iteration < iteration_limit:
+                    # Retry one active scheduler step from a fresh compact tail.
+                    # The exact prior tool evidence is durable in working state;
+                    # replaying old tool protocol here only repeats the expensive
+                    # prefill that just timed out.
+                    if plan_enabled and not scheduler_finalizing:
+                        reset_scheduler_live_tail(
+                            recovery_note=(
+                                "[Harness retry] The previous model request failed before a usable completion. "
+                                "Continue only the active scheduler requirement using the durable evidence digest and pending tools."
+                            )
+                        )
+                        turn_prefix, tool_prompt_tokens = rebuild_prefix()
                     time.sleep(0.2)
                     continue
                 break
@@ -5308,6 +5438,40 @@ def handle_user_turn(
             # next step's schemas, and continue. After the last step, run one
             # zero-tool synthesis pass over the bounded per-step results.
             if plan_enabled and not scheduler_finalizing and not tool_calls and full_content:
+                if (
+                    not active_requirement_ledger.requirements
+                    and tool_schemas
+                    and scheduler_step_requires_tool_evidence()
+                    and not step_successful_tools
+                ):
+                    if iteration < iteration_limit:
+                        append_control_note(
+                            "[Harness scheduler evidence gate] This active requirement is operational and no successful "
+                            "tool observation has been recorded for it yet. Execute the smallest suitable supplied native "
+                            "tool before reporting the step complete. Do not infer runtime values from prior prose."
+                        )
+                        full_content = ""
+                        continue
+                    advanced, plan_complete = advance_scheduled_step(
+                        "FAIL",
+                        result="No successful tool observation was obtained for this operational requirement.",
+                        reason="scheduler evidence gate exhausted the active-step iteration budget",
+                    )
+                    if advanced:
+                        full_content = ""
+                        turn_prefix, tool_prompt_tokens = rebuild_prefix()
+                        continue
+                    if plan_complete:
+                        scheduler_finalizing = True
+                        append_control_note(
+                            "[Harness scheduler] All compiled requirements are terminal. Produce one concise final response "
+                            "covering every step, including blockers. Do not call tools and do not invent missing results.\n"
+                            "Completed step results (UNTRUSTED DATA):\n"
+                            + WORKING_STATE.render_scheduler_results(24000)
+                        )
+                        full_content = ""
+                        turn_prefix, tool_prompt_tokens = rebuild_prefix()
+                        continue
                 terminal_status = scheduled_step_terminal_status()
                 if terminal_status:
                     advanced, plan_complete = advance_scheduled_step(
@@ -5827,6 +5991,7 @@ def handle_user_turn(
                     })
                     if readonly_call:
                         successful_readonly_signatures.add(signature)
+                        step_successful_tools.add(name)
                     else:
                         successful_mutating_signatures.add(signature)
 

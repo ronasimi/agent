@@ -91,7 +91,26 @@ class Requirement:
 _RULES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     ("weather_forecast", "weather_forecast", "current weather/forecast", (r"\b(?:weather|forecast|current conditions?)\b", r"\b(?:temperature|precipitation|rain|snow|humidity|wind speed)\b.*\b(?:today|tomorrow|current|now|tonight|week|days?|hours?)\b")),
     ("current_time", "current_time", "current clock time/date", (r"\bwhat time is it\b", r"\bcurrent time\b", r"\bcurrent date\b", r"\bwhat(?:'s| is) (?:today(?:'s)? date|the date)\b", r"\bwhat day is it\b", r"\b(?:local|utc) time\b", r"\bwhat timezone\b", r"\bcurrent timezone\b")),
-    ("host_health", "host_snapshot", "host CPU/memory/disk/temperature state", (r"\bhost (?:health|cpu|memory|disk|temperature|state)", r"\bcpu,? memory,? disk", r"\b(?:host|system|cpu|gpu) temperature\b", r"\btemperature sensors?\b")),
+    # Broad host-state requests must have a broad host observation.  The
+    # scheduler stress suite often phrases this as "Host Snapshot" rather than
+    # "host state"; missing that phrase allowed a narrower filesystem tool to
+    # become the only explicit requirement and the model could then fabricate
+    # CPU/load/memory/kernel fields in prose.
+    ("host_health", "host_snapshot", "host CPU/memory/disk/temperature state", (r"\bhost (?:health|cpu|memory|disk|temperature|state|snapshot)", r"\bcpu,? memory,? disk", r"\b(?:host|system|cpu|gpu) temperature\b", r"\btemperature sensors?\b")),
+    # Runtime-identity fields are independent completion checks.  Keeping them
+    # explicit prevents a single hostname/time observation from closing a step
+    # that also requested OS/kernel/architecture/uptime.
+    ("runtime_environment", "environment_summary", "operating-system/kernel/architecture identity", (
+        r"\boperating system\b", r"\bkernel version\b",
+    )),
+    ("uptime", "uptime", "host uptime", (r"\buptime\b",)),
+    ("hostname", "hostname", "host hostname", (r"\bhostname\b",)),
+    ("cpu_info", "cpu_info", "CPU identity/topology", (
+        r"\bcpu information\b", r"\bdedicated cpu tool\b", r"\blogical cpu count\b", r"\bphysical cores?\b",
+    )),
+    ("memory_info", "memory_info", "system memory/swap counters", (
+        r"\bmemory usage\b", r"\bdedicated memory primitive\b", r"\btotal memory\b.{0,120}\bavailable memory\b",
+    )),
     ("pressure", "pressure_snapshot", "CPU/memory/I/O pressure", (r"\bpressure (?:state|snapshot)?\b", r"\b(?:cpu|memory|i/o|io) pressure\b")),
     ("processes", "process_snapshot", "top resource-consuming processes", (r"\btop .*process", r"\bresource[- ]consuming process", r"\bprocess snapshot\b")),
     ("filesystem", "filesystem_snapshot", "filesystem capacity/inode state", (r"\bfilesystem", r"\binode", r"\bdisk capacity\b")),
@@ -123,7 +142,10 @@ _RULES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
         r"\bread\s+(?:the\s+)?(?:file\s+)?(?:/|\./|\.\./)[^\s,;]+[^\n]{0,140}\b(?:summari[sz]e|inspect|show|report|if it exists)\b",
     )),
     ("path", "network_path", "network path/hop diagnosis", (r"\bnetwork path\b", r"\btraceroute\b", r"\bmtr\b", r"\broute tracing\b")),
-    ("tool_health", "tool_health", "registered tool/dependency health", (r"\btool/?dependency health\b", r"\btool health\b", r"\bcurrent tool.*health\b")),
+    ("tool_health", "tool_health", "registered tool/dependency health", (
+        r"\btool/?dependency health\b", r"\btool health\b", r"\bcurrent tool.*health\b",
+        r"\btool registry\b", r"\bregistered tools?\b", r"\bhealthy tools?\b.{0,100}\bunavailable tools?\b",
+    )),
     ("dependency_audit", "dependency_audit", "runtime dependency audit", (r"\bdependency health\b", r"\bdependency audit\b", r"\btool/?dependency health\b")),
     ("news_search", "news_search", "current news headline discovery", (r"\b(?:latest|recent|current|today(?:'s)?)\b.{0,48}\b(?:news|headlines?|stories?)\b", r"\b(?:news|headlines?)\b.{0,48}\b(?:latest|recent|current|today)\b", r"\b(?:latest|top|local)\s+(?:news|headlines?)\b", r"^\s*(?:news|headlines?)\b")),
     ("market_quote", "market_quote", "current market/commodity quote", (r"\b(?:current|latest|live|today(?:'s)?|right now)\b.{0,64}\b(?:price|prices|quote|quotes|trading at)\b", r"\b(?:price|prices|quote|quotes)\b.{0,64}\b(?:wti|brent|crude oil|gold|silver|natural gas|copper)\b")),
@@ -166,7 +188,7 @@ _EXPLICIT_TOOL_NAMES = {
     "dns_diagnose", "network_path", "endpoint_probe", "http_probe", "tool_health",
     "dependency_audit", "news_search", "market_quote", "web_search", "browse_url", "take_web_screenshot", "geocode_location", "weather_forecast",
     "repo_status", "repo_checks", "page_metadata", "page_links", "extract_document", "read_file",
-    "current_time", "hostname", "environment_summary", "local_subnets", "scan_subnet",
+    "current_time", "hostname", "environment_summary", "uptime", "cpu_info", "memory_info", "local_subnets", "scan_subnet",
     "gmail_search_messages", "gmail_read_message", "google_calendar_list_events",
     "google_calendar_get_event", "google_calendar_list_calendars", "google_drive_list_files",
 }

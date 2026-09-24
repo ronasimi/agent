@@ -461,7 +461,12 @@ def classify_fact_types(tool_name: str, content: str) -> set[str]:
         str(payload.get(key) or "").strip() for key in ("utc", "local", "timezone")
     ):
         result.add("current_time")
-    if name in {"host_snapshot", "pressure_snapshot", "process_snapshot", "filesystem_snapshot", "service_health"} and isinstance(payload, dict):
+    # ``host_state`` is intentionally a broad fact contract (CPU, memory, load,
+    # uptime, disk/kernel/host identity).  Narrow diagnostics such as a
+    # filesystem-only or process-only snapshot must not satisfy it by name alone.
+    # The previous grouping let ``filesystem_snapshot`` close a Host Snapshot
+    # requirement even though no CPU/load/memory/kernel evidence existed.
+    if name == "host_snapshot" and isinstance(payload, dict):
         result.add("host_state")
     network_dict_tools = {"network_snapshot", "connection_snapshot", "local_subnets", "scan_subnet", "dns_diagnose", "network_path", "endpoint_probe", "http_probe"}
     network_list_tools = {"neighbor_snapshot", "network_reachability"}
@@ -1140,7 +1145,7 @@ def validate_fact_grounding(
                 missing.append("encyclopedic")
 
     generic_sources = {
-        "host_state": {"host_snapshot", "pressure_snapshot", "process_snapshot", "filesystem_snapshot", "service_health"},
+        "host_state": {"host_snapshot"},
         "network_state": {"network_snapshot", "neighbor_snapshot", "connection_snapshot", "local_subnets", "scan_subnet", "network_reachability", "dns_diagnose", "network_path", "endpoint_probe", "http_probe"},
         "repository_state": {"repo_status", "repo_diff", "repo_checks", "git_status", "git_diff"},
     }

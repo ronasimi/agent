@@ -238,6 +238,38 @@ def test_effective_request_uses_fact_specific_source_for_compound_prompt():
     assert "brent" not in effective.lower()
 
 
+def test_scheduler_runtime_and_registry_steps_compile_explicit_requirements():
+    from tools.task_requirements import derive_requirements
+
+    runtime = (
+        "1. Runtime Identity: Determine using runtime/system tools: hostname, operating system, "
+        "kernel version, architecture, uptime, current local time, configured timezone. "
+        "Verify each value from tool output."
+    )
+    tools = {item.tool for item in derive_requirements(runtime)}
+    assert {"hostname", "environment_summary", "uptime", "current_time"}.issubset(tools)
+
+    registry = (
+        "2. Tool Registry: Inspect the available tool registry. Report total registered tools, "
+        "healthy tools, degraded tools, unavailable tools, and missing dependencies."
+    )
+    assert [item.tool for item in derive_requirements(registry)] == ["tool_health"]
+
+    host = (
+        "4. Host Snapshot: Collect a read-only host snapshot. Report CPU, load average, memory, "
+        "uptime, filesystem usage, kernel, and hostname."
+    )
+    host_tools = {item.tool for item in derive_requirements(host)}
+    assert "host_snapshot" in host_tools
+    assert "filesystem_snapshot" in host_tools
+    assert "hostname" in host_tools
+
+    cpu = "5. CPU: Use the dedicated CPU tool. Report model, architecture, logical CPU count, and physical cores."
+    memory = "6. Memory: Use the dedicated memory primitive. Report total memory, available memory, used memory, and swap."
+    assert "cpu_info" in {item.tool for item in derive_requirements(cpu)}
+    assert "memory_info" in {item.tool for item in derive_requirements(memory)}
+
+
 def test_sectioned_capability_stress_prompt_compiles_all_24_requirements():
     from tools.task_requirements import derive_requirements, detect_fact_frame_types
 
