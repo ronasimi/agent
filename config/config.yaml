@@ -93,6 +93,17 @@ agent:
   # Stop repeated empty/invalid/error model responses before they consume the
   # global model-call safety budget. This is a no-progress guard, not a higher budget.
   model_no_progress_max_retries: 2
+  # Qwen3.8-Distill is a reasoning model. On some Ollama/model combinations a
+  # request can finish with message.thinking populated while content/tool_calls
+  # remain empty. Retry that specific condition once with a short-reasoning mode
+  # and a larger output allowance instead of consuming the generic no-progress
+  # budget. Hidden reasoning is never surfaced as the answer.
+  reasoning_recovery:
+    enabled: true
+    max_attempts: 1
+    think_mode: "low"
+    tool_num_predict: 1024
+    final_num_predict: 2048
   max_validator_calls_per_turn: 2
   max_recovery_attempts_per_requirement: 2
   tool_turn_num_predict: 384

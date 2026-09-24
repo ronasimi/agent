@@ -18,7 +18,7 @@ def test_stream_updates_are_frame_batched_and_finalized_as_markdown() -> None:
     assert "shell.answer.textContent=assistantStreamBuffer;" in APP_JS
     assert "function finalizeAssistantStream(content='')" in APP_JS
     assert "shell.answer.innerHTML=renderMarkdown(parsed.text);" in APP_JS
-    assert "else if(e.type==='assistant_final'){finalizeThinkingStream();finalizeAssistantStream(e.content||'');" in APP_JS
+    assert "else if(e.type==='assistant_final'){finalizeThinkingStream({label:'done'});finalizeAssistantStream(e.content||'');" in APP_JS
 
 
 def test_turn_end_flushes_pending_stream_before_clearing_state() -> None:
@@ -34,24 +34,36 @@ def test_thinking_stream_is_separate_frame_batched_and_flushed() -> None:
     assert "function finalizeThinkingStream" in APP_JS
     assert "else if(e.type==='thinking_delta')appendThinking(e.content||'');" in APP_JS
     finish = APP_JS.index("function finishTurn(){")
-    think_flush = APP_JS.index("finalizeThinkingStream();", finish)
+    think_flush = APP_JS.index("finalizeThinkingStream({collapse:true,label:'done'});", finish)
     answer_flush = APP_JS.index("finalizeAssistantStream();", finish)
     assert think_flush < answer_flush
 
 
-def test_thinking_container_is_lazy_and_disabled_turns_ignore_reasoning_deltas() -> None:
+def test_thinking_container_is_lazy_composer_scoped_and_disabled_turns_ignore_reasoning_deltas() -> None:
     start = APP_JS.index("function ensureAssistantComposite(){")
     end = APP_JS.index("function paintAssistantStream(){", start)
     composite = APP_JS[start:end]
     assert "createElement('details')" not in composite
+    assert "assistant-thinking" not in composite
 
     thinking_start = APP_JS.index("function ensureThinkingStream(){")
     thinking_end = APP_JS.index("function paintThinkingStream(){", thinking_start)
     thinking = APP_JS[thinking_start:thinking_end]
     assert "if(!activeThinkingEnabled)return null;" in thinking
+    assert "$('#thinkingStreamHost')" in thinking
     assert "createElement('details')" in thinking
+    assert "composer-thinking" in thinking
+    assert "assistantNode" not in thinking
 
     append_start = APP_JS.index("function appendThinking(content){")
     append_end = APP_JS.index("function finalizeThinkingStream", append_start)
     append = APP_JS[append_start:append_end]
     assert "if(!activeThinkingEnabled)return;" in append
+
+
+def test_reasoning_paints_do_not_schedule_transcript_scroll_work() -> None:
+    start = APP_JS.index("function ensureThinkingStream(){")
+    end = APP_JS.index("function appendThinking(content){", start)
+    implementation = APP_JS[start:end]
+    assert "scrollBottom" not in implementation
+    assert "pre.scrollTop=pre.scrollHeight" in implementation

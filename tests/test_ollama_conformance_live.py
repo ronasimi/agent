@@ -39,3 +39,36 @@ def test_live_ollama_supports_harness_chat_metrics_and_tools():
     assert _field(response, "prompt_eval_count", 0) is not None
     assert _field(response, "eval_count", 0) is not None
     assert _field(response, "message") is not None
+
+
+def test_live_ollama_reasoning_recovery_mode_reaches_visible_content():
+    """Catch reasoning-only completions that look successful at the API layer.
+
+    The configured Qwen3.8-Distill roles may reason before answering.  The
+    harness has a bounded recovery for that case, but the recovery mode itself
+    must be capable of reaching ``message.content`` on the target Ollama build.
+    """
+    from ollama import Client
+    from tools.config import load_config
+
+    cfg = load_config()["agent"]
+    recovery = dict(cfg.get("reasoning_recovery") or {})
+    client = Client(host=cfg.get("host", "http://127.0.0.1:11434"))
+    response = client.chat(
+        model=cfg["model"],
+        messages=[{"role": "user", "content": "Reply with exactly: OK"}],
+        options={
+            **(cfg.get("main_options") or {}),
+            "num_predict": int(recovery.get("final_num_predict", 2048)),
+        },
+        keep_alive=-1,
+        think=recovery.get("think_mode", "low"),
+        stream=False,
+    )
+    message = _field(response, "message", {})
+    content = str(_field(message, "content", "") or "").strip()
+    thinking = str(_field(message, "thinking", "") or "").strip()
+    assert content, (
+        "Configured reasoning-recovery mode still returned no visible content "
+        f"(thinking_chars={len(thinking)}, done_reason={_field(response, 'done_reason', 'unknown')!r})."
+    )

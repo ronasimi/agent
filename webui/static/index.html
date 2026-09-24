@@ -32,18 +32,9 @@
         <input id="conversationSearchInput" type="search" placeholder="Search chats" autocomplete="off" aria-label="Search conversations" />
         <button id="conversationSearchClose" type="button" aria-label="Close conversation search"><span class="mdi mdi-close mdi-ui" data-fallback="×" aria-hidden="true"></span></button>
       </div>
-      <button id="profileSetup" class="sidebar-action">
-        <span class="side-icon mdi mdi-account-circle-outline mdi-ui" data-fallback="◎" aria-hidden="true"></span><span>Profile setup</span>
-      </button>
-      <button id="connectionsSetup" class="sidebar-action">
-        <span class="side-icon mdi mdi-link-variant mdi-ui" data-fallback="⌁" aria-hidden="true"></span><span>Connections</span>
-      </button>
-
       <nav class="nav" aria-label="Agent views">
-        <button class="nav-item" data-panel="state"><span class="side-icon mdi mdi-view-dashboard-outline mdi-ui" data-fallback="◈" aria-hidden="true"></span><span>Working state</span></button>
         <button class="nav-item" data-panel="jobs"><span class="side-icon mdi mdi-briefcase-outline mdi-ui" data-fallback="◷" aria-hidden="true"></span><span>Jobs</span></button>
         <button class="nav-item" data-panel="reminders"><span class="side-icon mdi mdi-bell-outline mdi-ui" data-fallback="◷" aria-hidden="true"></span><span>Reminders</span></button>
-        <button class="nav-item" data-panel="benchmarks"><span class="side-icon mdi mdi-chart-box-outline mdi-ui" data-fallback="▥" aria-hidden="true"></span><span>UI benchmarks</span></button>
       </nav>
 
       <div class="sidebar-section-title">Recents</div>
@@ -74,6 +65,15 @@
           <button id="workspaceToggle" class="top-action" title="Toggle files in workspace" aria-expanded="false" aria-controls="workspaceDrawer">
             <span class="mdi mdi-folder-outline mdi-ui" data-fallback="⇧" aria-hidden="true"></span><span class="top-action-label">Files in workspace</span>
           </button>
+          <div class="utility-menu-wrap">
+            <button id="utilityMenuToggle" class="ghost-icon" type="button" title="Tools and settings" aria-label="Tools and settings" aria-expanded="false" aria-controls="utilityMenu"><span class="mdi mdi-wrench-outline mdi-ui" data-fallback="🔧" aria-hidden="true"></span></button>
+            <div id="utilityMenu" class="utility-menu hidden" role="menu" aria-label="Tools and settings">
+              <button id="profileSetup" type="button" role="menuitem"><span class="mdi mdi-account-circle-outline mdi-ui" aria-hidden="true"></span><span>Profile Setup</span></button>
+              <button id="connectionsSetup" type="button" role="menuitem"><span class="mdi mdi-link-variant mdi-ui" aria-hidden="true"></span><span>Connections</span></button>
+              <button type="button" role="menuitem" data-utility-panel="state"><span class="mdi mdi-view-dashboard-outline mdi-ui" aria-hidden="true"></span><span>Working State</span></button>
+              <button type="button" role="menuitem" data-utility-panel="benchmarks"><span class="mdi mdi-chart-box-outline mdi-ui" aria-hidden="true"></span><span>UI Benchmarks</span></button>
+            </div>
+          </div>
           <button id="refresh" class="ghost-icon" title="Refresh" aria-label="Refresh"><span class="mdi mdi-refresh mdi-ui" data-fallback="↻" aria-hidden="true"></span></button>
           <button id="copyChat" class="ghost-icon" title="Copy entire chat history" aria-label="Copy entire chat history"><span class="mdi mdi-content-copy mdi-ui" data-fallback="⧉" aria-hidden="true"></span></button>
         </div>
@@ -84,6 +84,7 @@
         <button id="scrollLatest" class="scroll-latest hidden" type="button" title="Scroll to latest" aria-label="Scroll to latest"><span class="mdi mdi-arrow-down mdi-ui" data-fallback="↓" aria-hidden="true"></span></button>
         <div class="composer-wrap">
           <div class="composer-inner">
+            <div id="thinkingStreamHost" class="thinking-stream-host" aria-live="polite" aria-atomic="false"></div>
             <div id="attachments" class="attachments"></div>
             <div id="slashMenu" class="slash-menu hidden" role="listbox" aria-label="Slash commands"></div>
             <form id="composer" class="composer" aria-label="Chat composer">
@@ -101,7 +102,7 @@
       </section>
 
       <section id="statePanel" class="panel data-panel hidden">
-        <div class="data-wrap"><h2>Working state</h2><pre id="stateView"></pre></div>
+        <div class="data-wrap"><h2>Working State</h2><pre id="stateView"></pre></div>
       </section>
       <section id="jobsPanel" class="panel data-panel hidden">
         <div class="data-wrap"><h2>Jobs</h2><div id="jobsView"></div></div>
@@ -110,7 +111,7 @@
         <div class="data-wrap"><h2>Reminders</h2><div id="remindersView"></div></div>
       </section>
       <section id="benchmarksPanel" class="panel data-panel hidden">
-        <div class="data-wrap"><h2>UI benchmarks</h2><div id="benchmarksView"></div></div>
+        <div class="data-wrap"><h2>UI Benchmarks</h2><div id="benchmarksView"></div></div>
       </section>
     </main>
 

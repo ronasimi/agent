@@ -102,6 +102,8 @@ def handle_user_turn(
     validator_calls = 0
     auxiliary_fast_calls = 0
     model_no_progress_retries = 0
+    reasoning_recovery_attempts = 0
+    reasoning_recovery_pending = False
     inference_lock = None
     model_lock_requested_at: float | None = None
     model_lock_acquired_at: float | None = None
@@ -3888,7 +3890,7 @@ def handle_user_turn(
                 budget_exhausted=True, blocked=bool(unresolved or pending_truncated_observations),
             )
 
-        def emit_no_progress_partial(reason: str) -> None:
+        def emit_no_progress_partial(reason: str, *, public_reason: str = "") -> None:
             """Stop a repeated model no-progress path before the global call budget.
 
             This path deliberately does not ask either model for another rewrite.
@@ -3904,6 +3906,8 @@ def handle_user_turn(
                     f"{MODEL_NO_PROGRESS_MAX_RETRIES} bounded no-progress retries. "
                     "The turn was stopped before the global model-call budget was exhausted."
                 )
+                if public_reason:
+                    content += " " + str(public_reason).strip()
             _append_and_save_fn(messages, {"role": "assistant", "content": content})
             if WORKING_STATE_ENABLED:
                 WORKING_STATE.complete_turn(blocked=True)
@@ -4090,6 +4094,8 @@ def handle_user_turn(
             content_stream_allowed = facts_grounded_for_stream and not tool_schemas
             thinking_started = False
             current_model_request: dict[str, Any] = {}
+            reasoning_recovery_for_call = bool(reasoning_recovery_pending)
+            reasoning_recovery_pending = False
 
             try:
                 if has_images(active) and VISION_MODEL != MODEL and VISION_SIDECAR_WHEN_DISTINCT:
@@ -4125,18 +4131,31 @@ def handle_user_turn(
                     model_calls += 1
                     call_options = dict(vision_route.options or {})
                     if tool_schemas:
-                        call_options["num_predict"] = min(
+                        normal_predict = min(
                             int(call_options.get("num_predict") or TOOL_TURN_NUM_PREDICT), TOOL_TURN_NUM_PREDICT
+                        )
+                        call_options["num_predict"] = (
+                            max(normal_predict, REASONING_RECOVERY_TOOL_NUM_PREDICT)
+                            if reasoning_recovery_for_call else normal_predict
                         )
                         call_options["temperature"] = TOOL_TURN_TEMPERATURE
                     else:
-                        call_options["num_predict"] = min(
+                        normal_predict = min(
                             int(call_options.get("num_predict") or FINAL_NUM_PREDICT), FINAL_NUM_PREDICT
                         )
+                        call_options["num_predict"] = (
+                            max(normal_predict, REASONING_RECOVERY_FINAL_NUM_PREDICT)
+                            if reasoning_recovery_for_call else normal_predict
+                        )
                     # The frontend Think checkbox is the authoritative per-turn
-                    # switch. If enabled, ask Ollama for reasoning on every model
-                    # call in the turn, including tool-selection/recovery calls.
-                    effective_thinking = bool(thinking_enabled)
+                    # switch during normal operation. A reasoning-only recovery
+                    # may temporarily request the configured short-reasoning mode
+                    # when Think is off; this is strictly to make the model reach
+                    # user-visible content/tool output and never exposes its hidden
+                    # reasoning text.
+                    effective_thinking: Any = bool(thinking_enabled)
+                    if reasoning_recovery_for_call and not thinking_enabled:
+                        effective_thinking = REASONING_RECOVERY_THINK_MODE
                     wire_messages = ollama_wire_messages(vision_route.messages)
                     wire_tools = wire_tool_schemas()
                     current_model_request = {
@@ -4148,6 +4167,7 @@ def handle_user_turn(
                         "role": generation_role,
                         "purpose": "tool_selection" if wire_tools else "final_answer",
                         "thinking": effective_thinking,
+                        "reasoning_recovery": reasoning_recovery_for_call,
                     }
                     return _ollama_client.chat(
                         model=vision_route.model,
@@ -4306,6 +4326,74 @@ def handle_user_turn(
                 answer_first_visible_at = answer_first_visible_at or time.monotonic()
                 emit_event("assistant_final", content=safe, finalization=True, blocked=True)
                 break
+
+            # A reasoning model may complete successfully at the transport/API
+            # layer while producing only hidden reasoning and never transitioning
+            # to user-visible content or a native tool call. This is materially
+            # different from an actually empty completion. Do not expose or feed
+            # the reasoning text back to the model; use it only as a signal for a
+            # single bounded conclusion retry with a larger output allowance.
+            thinking_only = (
+                not str(full_content or "").strip()
+                and not raw_tool_calls
+                and bool(str(capture.thinking or "").strip())
+            )
+            if thinking_only:
+                model_no_progress_retries += 1
+                done_reason = str(perf_stats.get("done_reason") or perf_stats.get("done_reason_text") or "unknown")
+                eval_count = int(perf_stats.get("eval_count") or 0)
+                requested_predict = int((current_model_request.get("options") or {}).get("num_predict") or 0)
+                tracker.record_model_failure(
+                    "thinking_only_response",
+                    f"reasoning emitted without visible content/tool call; done_reason={done_reason}; "
+                    f"eval_count={eval_count}; num_predict={requested_predict}",
+                )
+                emit_event(
+                    "model_no_progress",
+                    kind="thinking_only_response",
+                    done_reason=done_reason,
+                    eval_count=eval_count,
+                    num_predict=requested_predict,
+                    retry=model_no_progress_retries,
+                    retry_limit=MODEL_NO_PROGRESS_MAX_RETRIES,
+                    recovery_call=reasoning_recovery_for_call,
+                )
+                if model_no_progress_retries >= MODEL_NO_PROGRESS_MAX_RETRIES:
+                    emit_no_progress_partial(
+                        "repeated thinking-only model completions with no user-visible content or tool call",
+                        public_reason=(
+                            "The model repeatedly returned internal reasoning without transitioning to a "
+                            "user-visible answer or tool call."
+                        ),
+                    )
+                    break
+                if (
+                    REASONING_RECOVERY_ENABLED
+                    and reasoning_recovery_attempts < REASONING_RECOVERY_MAX_ATTEMPTS
+                ):
+                    reasoning_recovery_attempts += 1
+                    reasoning_recovery_pending = True
+                    append_control_note(
+                        "[Harness reasoning recovery] The previous completion ended during internal reasoning and "
+                        "produced no user-visible answer or tool call. Conclude immediately. Keep any internal "
+                        "reasoning brief. If a tool is needed, issue exactly one valid supplied tool call now; "
+                        "otherwise provide the final answer now."
+                    )
+                    emit_event(
+                        "reasoning_recovery",
+                        attempt=reasoning_recovery_attempts,
+                        max_attempts=REASONING_RECOVERY_MAX_ATTEMPTS,
+                        think_mode=(True if thinking_enabled else REASONING_RECOVERY_THINK_MODE),
+                        tool_num_predict=REASONING_RECOVERY_TOOL_NUM_PREDICT,
+                        final_num_predict=REASONING_RECOVERY_FINAL_NUM_PREDICT,
+                    )
+                else:
+                    append_control_note(
+                        "[Harness correction] Produce a user-visible final answer or one explicit valid tool call now. "
+                        "Do not spend the response budget only on internal reasoning."
+                    )
+                continue
+            reasoning_recovery_attempts = 0
 
             supplied_tool_names = {str(schema.get("function", {}).get("name") or "") for schema in tool_schemas}
             parsed_calls, parse_errors = _parse_tool_calls(raw_tool_calls, supplied_tool_names)

@@ -52,6 +52,7 @@ def test_webui_uses_pictogrammers_mdi_icons_with_resilient_fallback():
         "mdi-square-edit-outline",
         "mdi-magnify",
         "mdi-account-circle-outline",
+        "mdi-wrench-outline",
         "mdi-bell-outline",
         "mdi-folder-outline",
         "mdi-content-copy",
@@ -566,7 +567,61 @@ def test_webui_health_failure_isolated_from_chat_bootstrap():
     assert "async function loadHealth()" in js
     assert "Health load failed" in js
     assert "Promise.allSettled([loadTheme(),loadHealth(),loadSlashCommands(),loadJobs(),loadReminders(),loadWorkspace('')])" in js
-    assert "Promise.allSettled([loadHistory(),loadState()])" in js
+    assert "Promise.allSettled([loadHistory()])" in js
+
+
+def test_advanced_views_are_hidden_behind_wrench_menu():
+    root = Path(__file__).resolve().parents[1]
+    html = (root / "webui" / "static" / "index.html").read_text(encoding="utf-8")
+    js = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="utilityMenuToggle"' in html
+    assert 'mdi-wrench-outline' in html
+    utility_start = html.index('id="utilityMenu"')
+    utility_end = html.index('</div>', utility_start)
+    utility = html[utility_start:utility_end]
+    for label in ("Profile Setup", "Connections", "Working State", "UI Benchmarks"):
+        assert label in utility
+    sidebar_nav = html[html.index('<nav class="nav"'):html.index('</nav>')]
+    assert "Working State" not in sidebar_nav
+    assert "UI Benchmarks" not in sidebar_nav
+    assert "Jobs" in sidebar_nav and "Reminders" in sidebar_nav
+    assert "toggleUtilityMenu" in js and "closeUtilityMenu" in js
+
+
+def test_thinking_stream_has_dedicated_composer_host():
+    root = Path(__file__).resolve().parents[1]
+    html = (root / "webui" / "static" / "index.html").read_text(encoding="utf-8")
+    js = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
+    css = (root / "webui" / "static" / "style.css").read_text(encoding="utf-8")
+
+    host = html.index('id="thinkingStreamHost"')
+    composer = html.index('id="composer"')
+    assert host < composer
+    assert "composer-thinking" in js
+    assert ".composer-thinking" in css
+    assert ".assistant-thinking" not in css
+
+
+def test_turn_ack_and_workspace_scans_do_not_block_event_loop():
+    root = Path(__file__).resolve().parents[1]
+    chat = (root / "webui" / "chat.py").read_text(encoding="utf-8")
+    accepted = chat.index('await websocket.send_json({"type": "accepted"')
+    initial_scan = chat.index('artifact_snapshot = await asyncio.to_thread(_workspace_file_snapshot)')
+    task_start = chat.index('task = asyncio.create_task(asyncio.to_thread(work))')
+    final_scan = chat.index('for event in await asyncio.to_thread(collect_new_artifacts)')
+    assert accepted < initial_scan < task_start
+    assert final_scan > task_start
+
+
+def test_hidden_diagnostic_panels_are_not_refreshed_after_every_turn():
+    root = Path(__file__).resolve().parents[1]
+    js = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
+    start = js.index("else if(e.type==='history_refresh')")
+    end = js.index("else if(e.type==='error')", start)
+    refresh = js[start:end]
+    assert "if(!$('#statePanel').classList.contains('hidden'))loadState();" in refresh
+    assert "if(!$('#jobsPanel').classList.contains('hidden'))loadJobs();" in refresh
 
 
 def test_webui_forwards_thinking_only_when_turn_opted_in():

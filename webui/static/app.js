@@ -135,18 +135,14 @@ function ensureAssistantComposite(){
   assistantNode.classList.add('assistant-composite');
   let answer=assistantNode.querySelector('.assistant-answer');
   if(!answer){
-    // Do not synthesize a reasoning container for ordinary non-thinking turns.
-    // The inline Thinking block is created lazily only after an actual
-    // thinking_delta arrives for a turn that explicitly enabled thinking.
-    const existingThinking=assistantNode.querySelector('.assistant-thinking');
-    const existingText=existingThinking?'':assistantNode.textContent;
-    if(!existingThinking)assistantNode.innerHTML='';
+    const existingText=assistantNode.textContent;
+    assistantNode.innerHTML='';
     answer=document.createElement('div');
     answer.className='assistant-answer';
     if(existingText)answer.textContent=existingText;
     assistantNode.appendChild(answer);
   }
-  return {thinking:assistantNode.querySelector('.assistant-thinking'),answer};
+  return {answer};
 }
 function paintAssistantStream(){
   assistantRenderFrame=0;if(!assistantNode)return;
@@ -167,24 +163,22 @@ function scheduleAssistantPaint(){
 }
 function ensureThinkingStream(){
   if(!activeThinkingEnabled)return null;
-  const shell=ensureAssistantComposite();
-  let thinking=shell.thinking;
+  const host=$('#thinkingStreamHost');if(!host)return null;
+  let thinking=thinkingNode||host.querySelector('.composer-thinking');
   if(!thinking){
     thinking=document.createElement('details');
-    thinking.className='assistant-thinking';
+    thinking.className='composer-thinking';
     thinking.open=true;
     thinking.innerHTML=`<summary><span class="thinking-chevron">${mdiIcon('chevron-right','›')}</span><span>Thinking</span><span class="thinking-live">live</span></summary><pre></pre>`;
-    assistantNode.insertBefore(thinking,shell.answer);
+    host.replaceChildren(thinking);
   }
-  thinkingNode=thinking;
-  if(!thinkingStreamBuffer)thinkingNode.open=true;
-  scrollBottom();
+  thinkingNode=thinking;thinkingNode.open=true;
+  const live=thinkingNode.querySelector('.thinking-live');if(live)live.textContent='live';
   return thinkingNode;
 }
 function paintThinkingStream(){
   thinkingRenderFrame=0;if(!thinkingNode)return;
-  const pre=thinkingNode.querySelector('pre');if(pre)pre.textContent=thinkingStreamBuffer;
-  scrollBottom();
+  const pre=thinkingNode.querySelector('pre');if(pre){pre.textContent=thinkingStreamBuffer;pre.scrollTop=pre.scrollHeight;}
 }
 function appendThinking(content){
   if(!activeThinkingEnabled)return;
@@ -192,23 +186,20 @@ function appendThinking(content){
   thinkingStreamBuffer+=String(content||'');
   if(!thinkingRenderFrame)thinkingRenderFrame=requestAnimationFrame(paintThinkingStream);
 }
-function finalizeThinkingStream({collapse=false}={}){
+function finalizeThinkingStream({collapse=false,label='done'}={}){
   if(thinkingRenderFrame){cancelAnimationFrame(thinkingRenderFrame);thinkingRenderFrame=0;}
   if(!thinkingNode)return;
   const pre=thinkingNode.querySelector('pre');if(pre)pre.textContent=thinkingStreamBuffer;
-  const live=thinkingNode.querySelector('.thinking-live');if(live)live.textContent='done';
+  const live=thinkingNode.querySelector('.thinking-live');if(live)live.textContent=label;
   if(collapse)thinkingNode.open=false;
-  thinkingNode=null;thinkingStreamBuffer='';
 }
 function resetThinkingStream(){
   if(thinkingRenderFrame){cancelAnimationFrame(thinkingRenderFrame);thinkingRenderFrame=0;}
-  const node=thinkingNode || assistantNode?.querySelector('.assistant-thinking');
-  if(node)node.remove();
+  $('#thinkingStreamHost')?.replaceChildren();
   thinkingNode=null;thinkingStreamBuffer='';
-  if(assistantNode&&!assistantStreamBuffer){assistantNode.closest('.message')?.remove();assistantNode=null;}
 }
 function appendAssistant(content){
-  finalizeThinkingStream();
+  finalizeThinkingStream({label:'answering'});
   ensureAssistantComposite();
   assistantStreamBuffer+=String(content||'');
   scheduleAssistantPaint();
@@ -223,8 +214,8 @@ function finalizeAssistantStream(content=''){
   }
   if(assistantRenderFrame){cancelAnimationFrame(assistantRenderFrame);assistantRenderFrame=0;}
   if(canonical)assistantStreamBuffer=canonical;
-  // If this assistant bubble contains only inline reasoning for a tool turn,
-  // leave it intact rather than replacing it with an empty answer shell.
+  // Tool-only phases can leave an empty assistant shell; do not synthesize
+  // visible answer content until the model actually emits it.
   if(!assistantStreamBuffer){
     assistantNode.classList.remove('streaming');
     return assistantNode;
@@ -434,7 +425,7 @@ async function loadConversations(){
   });
   renderConversationList();updateConversationHeading();return conversationRows;
 }
-async function loadHistory(conversationId=activeConversationId){const cid=String(conversationId||'');const rows=await api(`/api/history?${conversationQuery(cid)}`);if(cid!==activeConversationId)return false;messagesEl.innerHTML='';artifactCards.clear();recipeCards.clear();activeUserMessageEl=null;assistantNode=null;assistantStreamBuffer='';thinkingNode=null;thinkingStreamBuffer='';if(assistantRenderFrame){cancelAnimationFrame(assistantRenderFrame);assistantRenderFrame=0;}if(thinkingRenderFrame){cancelAnimationFrame(thinkingRenderFrame);thinkingRenderFrame=0;}resetActivityGroup();for(const m of rows){if(m.role==='user'||m.role==='assistant')addMessage(m.role,m.content,{media:m.media||[]});else if(m.role==='tool'){addTool(m.name||'tool','history',m.content);addMedia(m.media||[]);}}restoreRecipeSuggestions(cid);renderEmptyChat();scrollBottom(true);return true;}
+async function loadHistory(conversationId=activeConversationId){const cid=String(conversationId||'');const rows=await api(`/api/history?${conversationQuery(cid)}`);if(cid!==activeConversationId)return false;messagesEl.innerHTML='';artifactCards.clear();recipeCards.clear();activeUserMessageEl=null;assistantNode=null;assistantStreamBuffer='';resetThinkingStream();if(assistantRenderFrame){cancelAnimationFrame(assistantRenderFrame);assistantRenderFrame=0;}if(thinkingRenderFrame){cancelAnimationFrame(thinkingRenderFrame);thinkingRenderFrame=0;}resetActivityGroup();for(const m of rows){if(m.role==='user'||m.role==='assistant')addMessage(m.role,m.content,{media:m.media||[]});else if(m.role==='tool'){addTool(m.name||'tool','history',m.content);addMedia(m.media||[]);}}restoreRecipeSuggestions(cid);renderEmptyChat();scrollBottom(true);return true;}
 async function loadState(conversationId=activeConversationId){const cid=String(conversationId||'');const state=await api(`/api/state?${conversationQuery(cid)}`);if(cid!==activeConversationId)return false;$('#stateView').textContent=JSON.stringify(state,null,2);return true;}
 async function cancelJob(jobId){await api(`/api/jobs/${encodeURIComponent(jobId)}/cancel`,{method:'POST'});await loadJobs();}
 function jobProgress(j){if(j.job_type!=='durable_compute'||!j.progress)return '';const p=j.progress;const recovery=Number(p.recovery_failures||0);const maxRecovery=Number(p.max_recovery_failures||0);const recoveryText=recovery?`<span>${mdiIcon('restore-alert','↺')} ${recovery}/${maxRecovery||'∞'} recoveries</span>`:'';return `<div class="job-progress"><span>${mdiIcon('counter','↻')} ${Number(p.steps||0).toLocaleString()} steps</span><span>${mdiIcon('content-save-check-outline','◇')} ${Number(p.yield_count||0).toLocaleString()} yields</span><span>${mdiIcon('database-outline','▦')} ${Number(p.tape_cells||0).toLocaleString()} cells</span>${recoveryText}<span>${mdiIcon('state-machine','◎')} ${esc(p.machine_state||p.machine_status||'not started')}</span></div>`;}
@@ -505,7 +496,9 @@ function restoreSidebarState(){
   toggleWorkspace(readUiState(UI_STATE_KEYS.right,false),{persist:false});
 }
 
-function showPanel(name){document.querySelectorAll('.panel').forEach(x=>x.classList.add('hidden'));$(`#${name}Panel`).classList.remove('hidden');document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.panel===name));document.querySelectorAll('.recent-item').forEach(b=>b.classList.toggle('active',name==='chat'&&b.dataset.conversationId===activeConversationId));$('#panelTitle').textContent={chat:displayConversationTitle(currentConversation()),state:'Working state',jobs:'Jobs',reminders:'Reminders',benchmarks:'UI benchmarks'}[name]||'Al Agent';if(name==='chat')updateConversationHeading();if(name==='state')loadState();if(name==='jobs')loadJobs();if(name==='reminders')loadReminders();if(name==='benchmarks')loadBenchmarks();}
+function showPanel(name){document.querySelectorAll('.panel').forEach(x=>x.classList.add('hidden'));$(`#${name}Panel`).classList.remove('hidden');document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.panel===name));document.querySelectorAll('.recent-item').forEach(b=>b.classList.toggle('active',name==='chat'&&b.dataset.conversationId===activeConversationId));$('#panelTitle').textContent={chat:displayConversationTitle(currentConversation()),state:'Working State',jobs:'Jobs',reminders:'Reminders',benchmarks:'UI Benchmarks'}[name]||'Al Agent';if(name==='chat')updateConversationHeading();if(name==='state')loadState();if(name==='jobs')loadJobs();if(name==='reminders')loadReminders();if(name==='benchmarks')loadBenchmarks();}
+function closeUtilityMenu(){const menu=$('#utilityMenu'),toggle=$('#utilityMenuToggle');menu?.classList.add('hidden');toggle?.setAttribute('aria-expanded','false');}
+function toggleUtilityMenu(force){const menu=$('#utilityMenu'),toggle=$('#utilityMenuToggle');if(!menu||!toggle)return;const open=typeof force==='boolean'?force:menu.classList.contains('hidden');menu.classList.toggle('hidden',!open);toggle.setAttribute('aria-expanded',String(open));}
 function connect(){
   socket=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws/chat`);
   socket.onopen=()=>{};
@@ -537,17 +530,17 @@ function connect(){
     else if(e.type==='recipe_suggestion'){finalizeThinkingStream();finalizeAssistantStream();assistantNode=null;assistantStreamBuffer='';addRecipeSuggestion(e);}
     else if(e.type==='requirements')setStatus('Completing requested checks…','busy');
     else if(e.type==='media_attached')setStatus('Inspecting media…','busy');
-    else if(e.type==='assistant_final'){finalizeThinkingStream();finalizeAssistantStream(e.content||'');setStatus('Ready');}
+    else if(e.type==='assistant_final'){finalizeThinkingStream({label:'done'});finalizeAssistantStream(e.content||'');setStatus('Ready');}
     else if(e.type==='turn_cancelled'){setStatus('Cancelled');finishTurn();}
     else if(e.type==='turn_end')finishTurn();
-    else if(e.type==='history_refresh'){loadState();loadConversations();loadJobs();if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}
+    else if(e.type==='history_refresh'){loadConversations();if(!$('#statePanel').classList.contains('hidden'))loadState();if(!$('#jobsPanel').classList.contains('hidden'))loadJobs();if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}
     else if(e.type==='error'){addMessage('assistant',`Error: ${e.message}`);setStatus('Error','error');finishTurn();}
   };
 }
 function finishTurn(){
-  finalizeThinkingStream();
+  finalizeThinkingStream({collapse:true,label:'done'});
   finalizeAssistantStream();
-  stopTurnTimer();clearTurnStatus();activeTurn=null;activeThinkingEnabled=false;assistantNode=null;assistantStreamBuffer='';thinkingNode=null;thinkingStreamBuffer='';activeUserMessageEl=null;$('#send').classList.remove('hidden');$('#stop').classList.add('hidden');
+  stopTurnTimer();clearTurnStatus();activeTurn=null;activeThinkingEnabled=false;assistantNode=null;assistantStreamBuffer='';activeUserMessageEl=null;$('#send').classList.remove('hidden');$('#stop').classList.add('hidden');
   if(pendingRecipeSubmission){const queued=pendingRecipeSubmission;pendingRecipeSubmission=null;queueMicrotask(()=>submitRecipeDecision(queued.record,queued.decision));}
 }
 
@@ -577,7 +570,7 @@ function renderAttachments(){$('#attachments').innerHTML=attachments.map((a,i)=>
 function submitChatMessage(text,mediaItems=[],{recordHistory=true,clearComposer=true,deferUntilIdle=false}={}){
   const content=String(text||'').trim();const items=Array.from(mediaItems||[]).filter(item=>item&&item.path);
   if((!content&&!items.length)||activeTurn||socket?.readyState!==WebSocket.OPEN)return false;
-  closeSlashMenu();if(recordHistory&&content)commandHistory.push(content);
+  closeSlashMenu();if(recordHistory&&content)commandHistory.push(content);resetThinkingStream();
   const bubble=addMessage('user',content,{forceScroll:true,media:items});activeUserMessageEl=bubble.closest('.message');setStatus('Sending…','busy');
   const thinkingEnabled=Boolean($('#thinking').checked);activeThinkingEnabled=thinkingEnabled;
   const turn_id=crypto.randomUUID();socket.send(JSON.stringify({type:'message',turn_id,conversation_id:activeConversationId,content,attachments:items.map(item=>item.path),thinking:thinkingEnabled,defer_until_idle:Boolean(deferUntilIdle)}));
@@ -615,6 +608,8 @@ async function copyEntireChat(){
 }
 $('#copyChat').addEventListener('click',copyEntireChat);
 document.querySelectorAll('[data-panel]').forEach(btn=>btn.onclick=()=>{showPanel(btn.dataset.panel);if(window.matchMedia('(max-width: 760px)').matches)toggleLeftSidebar(false);});
+document.querySelectorAll('[data-utility-panel]').forEach(btn=>btn.onclick=()=>{closeUtilityMenu();showPanel(btn.dataset.utilityPanel);});
+$('#utilityMenuToggle').addEventListener('click',e=>{e.stopPropagation();toggleUtilityMenu();});
 $('#workspaceToggle').onclick=()=>toggleWorkspace();$('#workspaceClose').onclick=()=>toggleWorkspace(false);$('#workspaceRefresh').onclick=()=>loadWorkspace(workspacePath);$('#workspaceBack').onclick=()=>loadWorkspace($('#workspaceBack').dataset.parent||'');$('#workspaceFilter').oninput=renderWorkspace;
 $('#collapseSidebar').onclick=()=>toggleLeftSidebar(false);$('#sidebarExpand').onclick=()=>toggleLeftSidebar(true);$('#mobileSidebar').onclick=()=>toggleLeftSidebar();
 $('#searchChat').onclick=()=>{$('#conversationSearch').classList.remove('hidden');$('#conversationSearchInput').focus();};
@@ -633,7 +628,7 @@ promptEl.addEventListener('keydown',e=>{
   if(e.ctrlKey&&!e.altKey&&!e.metaKey&&(e.key==='n'||e.key==='N')){if(navigateCommandHistory(1))e.preventDefault();return;}
   if(e.key==='Escape'&&commandHistory.isBrowsing()){const draft=commandHistory.restoreDraft();setPromptValue(draft??'');resetHistoryNavigation();e.preventDefault();}
 });
-document.addEventListener('pointerdown',e=>{if(!$('#composer').contains(e.target)&&!slashMenuEl()?.contains(e.target))closeSlashMenu();if(!e.target.closest('.recent-conversation'))closeConversationMenus();});
+document.addEventListener('pointerdown',e=>{if(!$('#composer').contains(e.target)&&!slashMenuEl()?.contains(e.target))closeSlashMenu();if(!e.target.closest('.recent-conversation'))closeConversationMenus();if(!e.target.closest('.utility-menu-wrap'))closeUtilityMenu();});
 
 let onboardingRequired=false,onboardingReset=false,oobeStep='profile',googleConnection=null;
 const OOBE_COPY={
@@ -684,8 +679,8 @@ async function checkOnboarding(){
 function closeOnboarding(){if(onboardingRequired)return;$('#onboardingDialog').close();clearGoogleOAuthQuery();}
 $('#onboardingDialog').addEventListener('cancel',e=>{if(onboardingRequired)e.preventDefault();});
 $('#oobeClose').addEventListener('click',closeOnboarding);
-$('#profileSetup').addEventListener('click',()=>openOnboarding({reset:true,step:'profile'}));
-$('#connectionsSetup').addEventListener('click',()=>openOnboarding({step:'google'}));
+$('#profileSetup').addEventListener('click',()=>{closeUtilityMenu();void openOnboarding({reset:true,step:'profile'});});
+$('#connectionsSetup').addEventListener('click',()=>{closeUtilityMenu();void openOnboarding({step:'google'});});
 $('#oobeGoogleBack').addEventListener('click',()=>showOnboardingStep('profile'));
 $('#oobeGoogleContinue').addEventListener('click',()=>{showOnboardingStep('finish');const target=$('#oobeFinishStatus');target.textContent=googleConnection?.connected?`Connected to ${googleConnection.email||'Google Workspace'} with read-only access.`:'Google Workspace was skipped. Connect it later from Connections.';});
 $('#oobeFinish').addEventListener('click',closeOnboarding);
@@ -705,7 +700,7 @@ $('#onboardingForm').addEventListener('submit',async e=>{
 });
 
 restoreSidebarState();
-document.addEventListener('keydown',(e)=>{if(e.key!=='Escape')return;if(!$('#conversationSearch').classList.contains('hidden')){$('#conversationSearchClose').click();return;}if(appShell.classList.contains('workspace-open')){toggleWorkspace(false);return;}if(appShell.classList.contains('mobile-sidebar-open'))toggleLeftSidebar(false);});
+document.addEventListener('keydown',(e)=>{if(e.key!=='Escape')return;if(!$('#utilityMenu').classList.contains('hidden')){closeUtilityMenu();return;}if(!$('#conversationSearch').classList.contains('hidden')){$('#conversationSearchClose').click();return;}if(appShell.classList.contains('workspace-open')){toggleWorkspace(false);return;}if(appShell.classList.contains('mobile-sidebar-open'))toggleLeftSidebar(false);});
 window.addEventListener('resize',()=>{
   if(window.matchMedia('(max-width: 760px)').matches){
     $('#sidebarExpand').classList.add('hidden');
@@ -734,7 +729,7 @@ async function bootstrapWebUi(){
     console.error('Conversation index load failed',err);
     if(!activeConversationId)setActiveConversation('default');
   }
-  await Promise.allSettled([loadHistory(),loadState()]);
+  await Promise.allSettled([loadHistory()]);
   showPanel('chat');
   connect();
   await checkOnboarding();

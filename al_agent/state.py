@@ -66,6 +66,23 @@ MAX_RECOVERY_ATTEMPTS_PER_REQUIREMENT = max(1, int(AGENT_CFG.get("max_recovery_a
 TOOL_TURN_NUM_PREDICT = max(64, int(AGENT_CFG.get("tool_turn_num_predict", 384)))
 FINAL_NUM_PREDICT = max(128, int(AGENT_CFG.get("final_num_predict", 1024)))
 TOOL_TURN_TEMPERATURE = max(0.0, float(AGENT_CFG.get("tool_turn_temperature", 0.2)))
+# Reasoning-distilled GGUFs can occasionally finish an Ollama request with
+# ``message.thinking`` populated but no user-visible content or tool call. Keep
+# a separate, bounded recovery budget for that condition so it is not mistaken
+# for a generic empty response. The hidden reasoning text is never promoted to
+# visible output or injected back into the prompt.
+REASONING_RECOVERY_CFG = dict(AGENT_CFG.get("reasoning_recovery") or {})
+REASONING_RECOVERY_ENABLED = bool(REASONING_RECOVERY_CFG.get("enabled", True))
+REASONING_RECOVERY_MAX_ATTEMPTS = max(0, int(REASONING_RECOVERY_CFG.get("max_attempts", 1)))
+REASONING_RECOVERY_THINK_MODE = REASONING_RECOVERY_CFG.get("think_mode", "low")
+REASONING_RECOVERY_TOOL_NUM_PREDICT = max(
+    TOOL_TURN_NUM_PREDICT,
+    int(REASONING_RECOVERY_CFG.get("tool_num_predict", 1024)),
+)
+REASONING_RECOVERY_FINAL_NUM_PREDICT = max(
+    FINAL_NUM_PREDICT,
+    int(REASONING_RECOVERY_CFG.get("final_num_predict", 2048)),
+)
 SEMANTIC_MEMORY = bool(AGENT_CFG.get("semantic_memory_enabled", False))
 THINKING_DEFAULT = bool(AGENT_CFG.get("thinking_default", False))
 # Per-token reasoning traces are useful for terminal debugging but expensive in

@@ -67,13 +67,19 @@ async def _run_turn(websocket: WebSocket, payload: dict[str, Any]) -> None:
 
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-    artifact_snapshot = _workspace_file_snapshot()
     emitted_artifacts: set[str] = set()
 
-    def queue_new_artifacts() -> None:
+    # Acknowledge the turn before any filesystem scan or model work. This keeps
+    # the composer/Stop control responsive even when the workspace contains many
+    # files or the local model is queued behind another inference request.
+    await websocket.send_json({"type": "accepted", "turn_id": turn_id, "conversation_id": conversation_id, "content": text})
+    artifact_snapshot = await asyncio.to_thread(_workspace_file_snapshot)
+
+    def collect_new_artifacts() -> list[dict[str, Any]]:
         nonlocal artifact_snapshot
+        events: list[dict[str, Any]] = []
         if len(emitted_artifacts) >= ARTIFACT_MAX_PER_TURN:
-            return
+            return events
         current = _workspace_file_snapshot()
         remaining = ARTIFACT_MAX_PER_TURN - len(emitted_artifacts)
         for artifact in _new_artifacts(artifact_snapshot, current, limit=remaining):
@@ -81,11 +87,18 @@ async def _run_turn(websocket: WebSocket, payload: dict[str, Any]) -> None:
             if not relative or relative in emitted_artifacts:
                 continue
             emitted_artifacts.add(relative)
-            loop.call_soon_threadsafe(
-                queue.put_nowait,
-                {"type": "artifact_created", "timestamp": agent_runtime.utc_now(), "turn_id": turn_id, "artifact": artifact},
-            )
+            events.append({
+                "type": "artifact_created",
+                "timestamp": agent_runtime.utc_now(),
+                "turn_id": turn_id,
+                "artifact": artifact,
+            })
         artifact_snapshot = current
+        return events
+
+    def queue_new_artifacts() -> None:
+        for event in collect_new_artifacts():
+            loop.call_soon_threadsafe(queue.put_nowait, event)
 
     def sink(event: dict[str, Any]) -> None:
         event = {**event, "turn_id": turn_id}
@@ -106,8 +119,14 @@ async def _run_turn(websocket: WebSocket, payload: dict[str, Any]) -> None:
             else:  # compatibility for embedders/tests with the legacy callback shape
                 handler(messages, text, thinking)
 
+    if cancel_event.is_set():
+        await websocket.send_json({"type": "turn_cancelled", "turn_id": turn_id})
+        await websocket.send_json({"type": "turn_end", "turn_id": turn_id})
+        with RUNS_LOCK:
+            RUNS.pop(turn_id, None)
+        return
+
     task = asyncio.create_task(asyncio.to_thread(work))
-    await websocket.send_json({"type": "accepted", "turn_id": turn_id, "conversation_id": conversation_id, "content": text})
     try:
         while True:
             if task.done() and queue.empty():
@@ -120,7 +139,11 @@ async def _run_turn(websocket: WebSocket, payload: dict[str, Any]) -> None:
         exc = task.exception() if task.done() else None
         if exc:
             await websocket.send_json({"type": "error", "turn_id": turn_id, "message": str(exc)})
-        queue_new_artifacts()
+        # The final scan can touch many directory entries; keep it off the
+        # event loop just like inference. No frontend navigation/input work waits
+        # on this scan.
+        for event in await asyncio.to_thread(collect_new_artifacts):
+            queue.put_nowait(event)
         while not queue.empty():
             await websocket.send_json(queue.get_nowait())
         await websocket.send_json({"type": "history_refresh", "turn_id": turn_id})
