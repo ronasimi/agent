@@ -836,6 +836,17 @@ class WorkingStateStore:
 
     def complete_turn(self, *, blocked: bool = False) -> None:
         state = _load(self._cid())
+        # A structured scheduler is the authoritative completion contract for a
+        # compiled multi-step turn.  Deterministic fast paths and generic final
+        # answer helpers may close an atomic subtask, but they must never mark
+        # the whole turn complete while scheduled requirements remain pending.
+        # ``blocked=True`` is still allowed to terminate the turn explicitly for
+        # hard runtime/safety failures.
+        if not blocked and not self.scheduler_complete(state=state):
+            state["status"] = "active"
+            state["current_plan"] = []
+            _save(state, self._cid())
+            return
         state["status"] = "blocked" if blocked else "complete"
         state["current_plan"] = []
         _save(state, self._cid())

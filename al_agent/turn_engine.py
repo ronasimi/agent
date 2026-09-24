@@ -3534,17 +3534,26 @@ def handle_user_turn(
             nonlocal answer_first_visible_at
             if not content:
                 return False
+            # Deterministic fast paths are whole-turn shortcuts.  A structured
+            # plan has its own sequential completion contract, so even a fully
+            # grounded active step must flow through the scheduler advancement
+            # path instead of returning from handle_user_turn().  This prevents
+            # pre-grounding (for example current_time) from ending a 77-step turn
+            # before another active-step tool such as hostname is executed.
+            if plan_enabled:
+                return False
             if require_grounded and not grounding_report().get("grounded", False):
                 return False
+            completion_ledger = active_requirement_ledger if plan_enabled else requirement_ledger
             # Fact grounding alone is not completion for compound requests. HTTP,
             # filesystem, and other explicit checks remain first-class requirements.
-            if require_requirements_closed and requirement_ledger.pending():
+            if require_requirements_closed and completion_ledger.pending():
                 return False
             # Fact-only renderers must not silently omit independent operational
             # requirements (HTTP probes, file reads, etc.) from a compound task.
             has_operational_requirements = any(
                 not str((item.scope or {}).get("fact_type") or "")
-                for item in requirement_ledger.requirements
+                for item in completion_ledger.requirements
             )
             if (
                 require_requirements_closed

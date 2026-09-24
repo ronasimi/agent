@@ -20,3 +20,19 @@ This allowed surrounding prompt/control text to contaminate tool selection, requ
 
 - Focused routing/grounding/protocol/scheduler tests: 81 passed.
 - Full offline suite: 655 passed, 8 live tests deselected.
+
+## Scheduler deterministic-finalization regression
+
+The initial isolation fix exposed a separate completion bug: in structured-plan mode the global requirement ledger is intentionally empty, but the deterministic fact fast path still used that global ledger as its whole-turn completion predicate. A pre-grounded fact such as `current_time` could therefore emit a final answer and call `complete_turn()` while the active scheduler step still had another requirement such as `hostname` pending.
+
+The correction adds two independent guards:
+
+- Whole-turn deterministic fast paths are disabled while a structured scheduler is active; scheduled steps must flow through the normal active-step completion/advance path.
+- `WorkingStateStore.complete_turn(blocked=False)` refuses to mark a turn complete until every scheduler step is terminal. Explicit blocked/error termination remains allowed.
+
+Regression coverage reproduces a two-step plan whose first step needs both `current_time` and `hostname`: time is pre-grounded, hostname is still executed exactly once, the scheduler advances, and the final synthesis is emitted only after all steps complete.
+
+Updated validation after this correction:
+
+- Focused scheduler/grounding/completion suite: 69 passed.
+- Full offline suite: 658 passed, 8 live tests deselected.

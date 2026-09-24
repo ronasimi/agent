@@ -421,3 +421,151 @@ def test_selection_only_capability_digest_uses_metadata_not_executable_calls():
     ):
         assert name in digest
     assert "DO NOT execute these tools" in digest
+
+
+def test_working_state_cannot_complete_with_pending_scheduler_steps(monkeypatch):
+    from tools import working_state
+
+    with tempfile.TemporaryDirectory() as td:
+        monkeypatch.setattr(working_state, "DB_PATH", str(Path(td) / "state.db"))
+        store = working_state.WorkingStateStore()
+        store.begin_turn(
+            turn_id=1,
+            objective="Run two steps",
+            rolling_summary="",
+            recalled_context="",
+            recent_messages=[],
+            policy_note="",
+            tool_schemas=[],
+            execution_plan=["FIRST", "SECOND"],
+        )
+
+        store.complete_turn(blocked=False)
+        assert store.load()["status"] == "active"
+
+        store.mark_active_requirement("PASS", result="first done")
+        store.complete_turn(blocked=False)
+        assert store.load()["status"] == "active"
+
+        store.mark_active_requirement("PASS", result="second done")
+        store.complete_turn(blocked=False)
+        assert store.load()["status"] == "complete"
+
+
+def test_structured_plan_pregrounding_does_not_end_turn_after_current_time(monkeypatch, tmp_path):
+    """Regression for a plan ending after its first deterministic grounding call.
+
+    Step 1 needs both current_time and hostname.  current_time is pre-grounded by
+    the harness before the first main-model request; that must not trigger the
+    whole-turn deterministic fast path while hostname and later scheduler steps
+    remain unresolved.
+    """
+    from al_agent import turn_engine as te
+    from tools import working_state
+
+    calls = []
+
+    def fake_execute(name, args):
+        calls.append((name, dict(args or {})))
+        if name == "current_time":
+            return json.dumps({
+                "utc": "2026-09-24T14:03:35+00:00",
+                "local": "2026-09-24T10:03:35-04:00",
+                "date": "2026-09-24",
+                "time": "10:03:35",
+                "day_of_week": "Thursday",
+                "timezone": "America/Toronto",
+                "timezone_abbreviation": "EDT",
+                "utc_offset": "-0400",
+                "unix_timestamp": 1790258615,
+                "host_timezone": "Canada/Eastern",
+                "system_local": "2026-09-24T10:03:35-04:00",
+            })
+        if name == "hostname":
+            return json.dumps({"host_hostname": "muninn", "runtime_hostname": "muninn", "same_hostname": True})
+        raise AssertionError((name, args))
+
+    class MainClient:
+        def __init__(self):
+            self.calls = []
+
+        def chat(self, **kwargs):
+            self.calls.append(kwargs)
+            index = len(self.calls)
+            if index == 1:
+                names = _tool_names(kwargs.get("tools") or [])
+                assert "hostname" in names
+                return iter([{"done": True, "message": {"content": "", "tool_calls": [
+                    {"id": "h1", "function": {"name": "hostname", "arguments": {}}}
+                ]}}])
+            if index == 2:
+                return iter([{"done": True, "message": {"content": "runtime identity verified", "tool_calls": []}}])
+            if index == 3:
+                assert kwargs.get("tools") == []
+                return iter([{"done": True, "message": {"content": "hostname is the appropriate primitive", "tool_calls": []}}])
+            return iter([{"done": True, "message": {"content": "all scheduled checks complete", "tool_calls": []}}])
+
+    db = str(tmp_path / "onecall-regression.db")
+    monkeypatch.setattr(working_state, "DB_PATH", db)
+    store = working_state.WorkingStateStore(limits={"max_render_chars": 8000})
+    model = MainClient()
+
+    monkeypatch.setattr(te, "WORKING_STATE", store)
+    monkeypatch.setattr(te, "WORKING_STATE_ENABLED", True)
+    monkeypatch.setattr(te, "STRUCTURED_PLAN_ENABLED", True)
+    monkeypatch.setattr(te, "STRUCTURED_PLAN_MIN_CHARS", 10)
+    monkeypatch.setattr(te, "STRUCTURED_PLAN_MIN_COMMANDS", 2)
+    monkeypatch.setattr(te, "STRUCTURED_PLAN_MAX_TOOLS", 3)
+    monkeypatch.setattr(te, "GROUNDING_ENABLED", True)
+    monkeypatch.setattr(te, "RECIPES_ENABLED", False)
+    monkeypatch.setattr(te, "LOOP_VALIDATOR_ENABLED", False)
+    monkeypatch.setattr(te, "MODEL_TRACE_ENABLED", False)
+    monkeypatch.setattr(te, "get_conversation_summary", lambda: "")
+    monkeypatch.setattr(te, "build_memory_context", lambda *_: "")
+    monkeypatch.setattr(te, "get_relevant_user_prompt_context", lambda *_: "")
+    monkeypatch.setattr(te, "get_user_location", lambda: "")
+    monkeypatch.setattr(te, "build_historical_recall_context", lambda *a, **k: "")
+    monkeypatch.setattr(te, "render_relevant_skill_index", lambda *a, **k: "")
+    monkeypatch.setattr(te, "render_failure_lessons", lambda *a, **k: "")
+    monkeypatch.setattr(te, "render_relevant_reflections", lambda *a, **k: "")
+    monkeypatch.setattr(te, "evict_report_model_for_interactive", lambda: None)
+    monkeypatch.setattr(te, "_prune_compacted_history", lambda _messages: None)
+    monkeypatch.setattr(te, "log_perf_stats", lambda *a, **k: None)
+    monkeypatch.setattr(te, "_execute_registered_tool", fake_execute)
+
+    prompt = """# Scheduler regression
+Treat every numbered requirement below as independent.
+
+## 1. Runtime Identity
+Determine using runtime/system tools: hostname and current local time. Verify each value from tool output.
+
+## 2. Tool Selection
+Identify the appropriate primitive for hostname without executing it.
+
+# FINAL REPORT
+Summarize all completed requirements.
+"""
+    messages = [{"role": "system", "content": "system"}]
+    te.handle_user_turn(
+        messages,
+        prompt,
+        False,
+        runtime_overrides={
+            "OLLAMA": model,
+            "LOOP_VALIDATOR_CLIENT": model,
+            "record_monitor_state": lambda *a, **k: None,
+            "append_and_save": lambda rows, item: rows.append(item),
+            "acquire_turn_lock": lambda: object(),
+            "release_turn_lock": lambda _lock: None,
+            "acquire_inference_lock": lambda: object(),
+            "release_inference_lock": lambda _lock: None,
+            "queue_compaction_if_needed": lambda *a, **k: None,
+        },
+    )
+
+    assert [name for name, _ in calls].count("current_time") >= 1
+    assert [name for name, _ in calls].count("hostname") == 1
+    assert len(model.calls) >= 4
+    assert store.scheduler_complete()
+    assert store.load()["status"] == "complete"
+    assert messages[-1]["content"] == "all scheduled checks complete"
