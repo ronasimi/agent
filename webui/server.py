@@ -5,6 +5,7 @@ streaming, and history serialization live in focused sibling modules.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import mimetypes
@@ -53,17 +54,20 @@ from .config import (
     PREVIEW_TEXT_BYTES,
     STATIC,
     XRESOURCES_PATH,
+    SOURCE_ROOT as _DEFAULT_SOURCE_ROOT,
 )
 from .config import (
     WORKSPACE as _DEFAULT_WORKSPACE,
 )
 from .history import _history, _history_export
+from .diagnostics import generate_bug_report
 from .theme import DEFAULT_THEME as DEFAULT_THEME
 from .theme import read_xresources_theme
 
 # Mutable compatibility alias: tests/integrations historically monkeypatch
 # ``webui.server.WORKSPACE``.  Wrappers synchronize it into workspace_ops.
 WORKSPACE = _DEFAULT_WORKSPACE
+SOURCE_ROOT = _DEFAULT_SOURCE_ROOT
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
@@ -433,6 +437,17 @@ def forget(conversation_id: str = "default") -> dict[str, Any]:
 def state(conversation_id: str = "default") -> dict[str, Any]:
     cid = ensure_conversation(conversation_id)
     return WorkingStateStore(limits=agent_runtime.WORKING_STATE_CFG, conversation_id=cid).load()
+
+
+@app.post("/api/bug-report/generate")
+async def bug_report_generate(conversation_id: str = "default") -> dict[str, Any]:
+    """Generate a bounded, redacted LLM troubleshooting report in the repository root.
+
+    Collection runs off the FastAPI event loop so reading SQLite, model traces,
+    repository metadata, and tool health cannot stall chat streaming.
+    """
+    cid = ensure_conversation(conversation_id)
+    return await asyncio.to_thread(generate_bug_report, Path(SOURCE_ROOT).resolve(), cid)
 
 
 @app.get("/api/jobs")

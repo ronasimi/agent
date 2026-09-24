@@ -18,6 +18,7 @@ def _history(limit: int = 200, conversation_id: str | None = None) -> list[dict[
             "id": item.get("_db_id"),
             "role": item.get("role"),
             "content": item.get("content", ""),
+            "created_at": item.get("_created_at", ""),
         }
         if item.get("name"):
             entry["name"] = item["name"]
@@ -47,5 +48,7 @@ def _history_export(limit: int = 0, conversation_id: str | None = None) -> str:
         if tool_calls:
             rendered = json.dumps(tool_calls, ensure_ascii=False, indent=2)
             content = (content + "\n\n" if content else "") + "Tool calls:\n" + rendered
-        parts.append(f"{label}:\n{content}".rstrip())
+        stamp = str(item.get("_created_at") or "").strip()
+        header = f"{label} [{stamp}]" if stamp else label
+        parts.append(f"{header}:\n{content}".rstrip())
     return "\n\n".join(parts).strip() + ("\n" if parts else "")

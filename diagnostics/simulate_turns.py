@@ -17,9 +17,9 @@ Two things are reported:
   time-to-first-token for every iteration after the first.
 
 Usage:
-    python scripts/simulate_turns.py            # trace + prefix analysis
-    python scripts/simulate_turns.py --prefix   # prefix analysis only
-    python scripts/simulate_turns.py --prompts  # include rendered prompts
+    python diagnostics/simulate_turns.py            # trace + prefix analysis
+    python diagnostics/simulate_turns.py --prefix   # prefix analysis only
+    python diagnostics/simulate_turns.py --prompts  # include rendered prompts
 """
 from __future__ import annotations
 

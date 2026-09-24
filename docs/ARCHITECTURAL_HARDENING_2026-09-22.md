@@ -27,7 +27,7 @@ This follow-up verifies and implements the externally supplied audit findings ag
 
 - Targeted architectural/grounding/stress tests: **82 passed**.
 - Complete deterministic suite: **420 passed, 1 skipped**.
-- `scripts/check_architecture.py`: passed.
+- `diagnostics/check_architecture.py`: passed.
 - builtin tool manifest: current at **223 tools**.
 - Python compilation: passed.
 - Ruff was not available in the validation environment, so no Ruff result is claimed.

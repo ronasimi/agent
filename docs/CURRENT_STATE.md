@@ -143,6 +143,17 @@ agent:
 
 This auxiliary naming pass is bounded independently and is not a reason to raise the foreground hard model-call budget.
 
+## Four-tier context storage
+
+The interactive runtime now separates context by access pattern instead of treating every saved message as prompt text:
+
+1. **Hot turn/task state:** the current turn lives in process memory; active working state is kept in a bounded process-local cache with SQLite/WAL write-through durability. Working-state schema/migration checks run once per database path rather than on every connection.
+2. **Conversation continuity:** raw timestamped chat rows and rolling summaries remain in SQLite/WAL. Recent-history and summary reads use bounded process-local caches. Compaction is checked after every turn but runs only after the configured token threshold; it advances a watermark and never deletes the raw transcript.
+3. **Historical recall:** `chat_history_fts` plus timestamp indexes support cross-conversation lexical/date retrieval without an embedding or model call. Requests such as “what did we discuss yesterday?” are date-resolved in the configured timezone and injected as bounded timestamped evidence.
+4. **Durable memory:** explicit stable facts live separately in the `memory` table and use `memory_fts` for fast lexical retrieval. Semantic/vector memory remains opt-in.
+
+Exact post-compaction model requests, including effective system messages, continue to be recorded in `memory/model_calls.jsonl` when tracing is enabled. See `CONTEXT_TIERS_2026-09-23.md`.
+
 ## Memory
 
 Normal durable memory and semantic memory are separate:
@@ -157,7 +168,9 @@ Normal durable memory and semantic memory are separate:
 
 ## Web UI and artifacts
 
-The Web UI is the only supported user interface. It provides persistent conversations, workspace browsing, jobs/reminders, inline media/doc previews, email cards, slash commands, tool status, and recipe-save decisions.
+The Web UI is the only supported user interface. It provides persistent conversations, workspace browsing, jobs/reminders, inline media/doc previews, email cards, slash commands, tool status, recipe-save decisions, and optional live reasoning when Think is enabled. The old Working State panel is no longer exposed in the UI; working state remains an internal harness mechanism.
+
+The wrench menu includes **Generate Bug Report**. Generation runs off the FastAPI event loop and writes a timestamped Markdown report to the repository root. The report includes a triage summary, bounded runtime/config state, timestamped recent conversation history, rolling summary, active working state, recent model-call wire traces and effective system prompts, tool/dependency health, browser benchmark state, storage health, Git state/diff data, a compact repository map, and runtime versions. Known credential/token fields are redacted.
 
 Artifact rendering is presentation-only and remains separate from tool/storage semantics. Internal/transient stress fixtures such as `generalized_recipe_test/targets.txt` are deliberately excluded from automatic inline artifact cards and deterministic fallback file summaries. The file remains available to workspace tools, evidence accounting, and cleanup while it exists.
 
@@ -181,9 +194,9 @@ Drive metadata access also requires the Google Drive API to be enabled in the OA
 
 For this repository state:
 
-- full deterministic/offline test suite: **560 passed, 1 skipped**;
+- broad offline regression suite in the build sandbox: **612 passed, 2 skipped** (the sandbox lacked the real Ollama/DDGS packages, so import-only test shims were used; live Ollama conformance remains deployment-host testing);
 - Python byte-compilation: pass;
 - Web UI JavaScript `node --check`: pass;
-- generated builtin manifest: current at **235 tools**.
+- architecture check: pass.
 
-Live model latency/quality remains deployment-specific; use `scripts/benchmark_model_roles.py` on the actual Ollama host for TTFT, validator latency, report throughput, residency, and optional embedding measurements. Use `scripts/benchmark_durable_compute.py` for model-independent transition/checkpoint throughput.
+Live model latency/quality remains deployment-specific; use `diagnostics/benchmarks/benchmark_model_roles.py` on the actual Ollama host for TTFT, validator latency, report throughput, residency, and optional embedding measurements. Use `diagnostics/benchmarks/benchmark_durable_compute.py` for model-independent transition/checkpoint throughput.

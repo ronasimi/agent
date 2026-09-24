@@ -70,7 +70,7 @@ TOOL_BUNDLES = (
      ('calculate', 'convert_units', 'hash_text', 'base64_encode', 'base64_decode', 'compare_values', 'compare_json', 'compare_text', 'run_pipeline')),
     ({'host', 'command', 'shell', 'cpu', 'disk', 'system', 'log', 'process', 'gpu', 'ram'},
      ('host_snapshot', 'process_snapshot', 'pressure_snapshot', 'filesystem_snapshot', 'service_health', 'kernel_info', 'cpu_info', 'os_release', 'memory_info', 'load_average', 'uptime', 'mounts', 'block_devices', 'temperature_sensors', 'list_processes', 'process_info', 'process_tree', 'read_host_file', 'read_host_journal', 'tail_host_log', 'read_observation')),
-    ({'dns', 'mdns', 'network', 'wifi', 'lan', 'route', 'port', 'subnet', 'hosts'},
+    ({'dns', 'mdns', 'network', 'wifi', 'lan', 'route', 'router', 'port', 'subnet', 'hosts'},
      ('local_subnets', 'scan_subnet', 'network_snapshot', 'neighbor_snapshot', 'connection_snapshot', 'dns_diagnose', 'network_path', 'endpoint_probe', 'http_probe', 'map_network', 'scan_mdns', 'resolve_host', 'route_lookup', 'tcp_connect', 'tls_handshake', 'ping_host', 'http_request', 'interface_list', 'interface_info', 'neighbor_list', 'socket_list')),
     ({'internet', 'online', 'external'},
      ('network_reachability', 'dns_diagnose', 'http_probe')),

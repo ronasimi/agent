@@ -2,7 +2,7 @@
 
 > **Current-state note (2026-09-23):** The builtin manifest currently contains 235 tools. This is the current soak-test operator guide; dated audit/review files retain their historical counts.
 
-`scripts/soak_test_tools.py` exercises the live tool registry and compatibility recipe catalog across five deterministic passes by default. It is intended to catch intermittent provider failures, schema drift, hangs, slow primitives, missing host dependencies, recipe regressions, and state contamination between passes.
+`diagnostics/soak/soak_test_tools.py` exercises the live tool registry and compatibility recipe catalog across five deterministic passes by default. It is intended to catch intermittent provider failures, schema drift, hangs, slow primitives, missing host dependencies, recipe regressions, and state contamination between passes.
 
 ## Run it in the worker container
 
@@ -10,14 +10,14 @@ The harness primitives intentionally use the production container namespace (`/a
 
 ```bash
 docker compose up -d --build
-./scripts/run_soak_test.sh
+./diagnostics/soak/run_soak_test.sh
 ```
 
 That runs **5 complete passes** with two workers and `--mutating-mode isolated`. You can invoke the Python runner directly if preferred:
 
 ```bash
 docker compose exec -w /app worker \
-  python scripts/soak_test_tools.py --workers 2 --mutating-mode isolated
+  python diagnostics/soak/soak_test_tools.py --workers 2 --mutating-mode isolated
 ```
 
 The default five pass profiles are `baseline`, `alternate`, `minimal`, `unicode`, and `boundary`. Each pass gets a fresh fixture directory, fresh job/task/observation/work IDs, and a disposable same-UID process for the process-inspection primitives. Valid probe values rotate across passes, including both TCP and TLS recipe branches. This catches state leakage without making failures non-reproducible.
@@ -31,10 +31,10 @@ Use `--mutating-mode all` only inside a disposable test environment. It permits 
 ## Focused runs
 
 ```bash
-./scripts/run_soak_test.sh --passes 1
-./scripts/run_soak_test.sh --passes 3 --only 'news_search|web_search|browse_url'
-./scripts/run_soak_test.sh --passes 2 --only 'compat.*'
-./scripts/run_soak_test.sh --passes 0 --duration 8h --exclude 'gmail_*' --exclude 'google_calendar_*'
+./diagnostics/soak/run_soak_test.sh --passes 1
+./diagnostics/soak/run_soak_test.sh --passes 3 --only 'news_search|web_search|browse_url'
+./diagnostics/soak/run_soak_test.sh --passes 2 --only 'compat.*'
+./diagnostics/soak/run_soak_test.sh --passes 0 --duration 8h --exclude 'gmail_*' --exclude 'google_calendar_*'
 ```
 
 ## Resuming
@@ -42,7 +42,7 @@ Use `--mutating-mode all` only inside a disposable test environment. It permits 
 Every result is flushed to `results.jsonl` immediately. To continue an interrupted report directory:
 
 ```bash
-./scripts/run_soak_test.sh \
+./diagnostics/soak/run_soak_test.sh \
   --resume \
   --output-dir /app/workspace/tool_soak_reports/20260921-120000
 ```

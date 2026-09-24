@@ -4,7 +4,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-from scripts import soak_test_tools as soak
+from diagnostics.soak import soak_test_tools as soak
 
 
 def test_parse_duration_units():

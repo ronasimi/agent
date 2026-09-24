@@ -20,3 +20,6 @@ venv/
 *.swo
 
 /workspace/self_optimization/validation/outbox/
+
+# On-demand local troubleshooting reports
+al-agent-bug-report-*.md

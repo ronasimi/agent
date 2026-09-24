@@ -41,7 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 VENV_PYTHON = ROOT / ".venv" / "bin" / "python"
 REQUIREMENTS_PATH = ROOT / "requirements.txt"
 if str(ROOT) not in sys.path:
@@ -98,7 +98,7 @@ def _dependency_preflight_message(missing: list[str]) -> str:
         f"Missing Python package(s): {listed}\n\n"
         "Bootstrap the repo-local environment once:\n"
         f"  {bootstrap}\n\n"
-        "Then rerun the same command. scripts/soak_test_tools.py will automatically "
+        "Then rerun the same command. diagnostics/soak/soak_test_tools.py will automatically "
         f"re-exec with {VENV_PYTHON} when it exists."
     )
 
@@ -121,9 +121,9 @@ def _runtime_context_preflight() -> tuple[bool, str]:
         "Tool soak runtime probes must run inside the Compose worker container so /app, "
         "/app/workspace, /app/memory, /host, and the production PID namespace match the harness.\n"
         "Start the stack and run:\n"
-        "  ./scripts/run_soak_test.sh\n"
+        "  ./diagnostics/soak/run_soak_test.sh\n"
         "or:\n"
-        "  docker compose exec -w /app worker python scripts/soak_test_tools.py --workers 2 --mutating-mode isolated"
+        "  docker compose exec -w /app worker python diagnostics/soak/soak_test_tools.py --workers 2 --mutating-mode isolated"
     )
 
 # Mutators that can be pointed at the audit DB/profile or confined to an audit

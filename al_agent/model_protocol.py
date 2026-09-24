@@ -372,7 +372,7 @@ def warm_model(
     tool-capable chat template may serialize dynamic tool schemas before normal
     messages; in that case a system-only request is not the common byte prefix
     of a real turn and may provide little or no KV-cache reuse. Measure
-    ``prompt_eval_cached_count`` with ``scripts/benchmark_warmup.py`` before
+    ``prompt_eval_cached_count`` with ``diagnostics/benchmarks/benchmark_warmup.py`` before
     enabling it.
 
     ``options`` must match interactive turns, especially ``num_ctx``, otherwise

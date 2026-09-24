@@ -1,756 +1,178 @@
 <p align="center">
-  <img src="webui/static/assets/agent-logo.png" alt="Al Agent logo" width="360">
+  <img src="webui/static/assets/agent-logo.png" alt="Al Agent logo" width="300">
 </p>
 
 # Al Agent
 
-**Al Agent** is a local, Ollama-powered assistant harness designed for long-running work without making interactive chat feel sluggish. Its sole user interface is a localhost-first Web UI backed by typed tools, reusable recipes, durable memory, background research, system/network diagnostics, and reminders.
+Al Agent is a local-first AI assistant for Ollama. It combines a browser chat interface with tools, persistent conversations, memory, reminders, research, browser automation, and background jobs while keeping the main model small and responsive.
 
-The default configuration uses three generative Ollama roles. An embedding model is configured but optional because semantic memory is disabled by default:
+## Features
 
-- **Main model:** `agent-main:4b` → `hf.co/empero-ai/Qwen3.8-4B-Distill-GGUF:Q4_K_M`
-- **Vision role:** `agent-main:4b` by default, reusing the warm main runner; may be pointed at a dedicated multimodal model later
-- **Fast model:** `agent-main:2b` → `hf.co/empero-ai/Qwen3.8-2B-Distill-GGUF:Q8_0`
-- **Report model:** `agent-report:9b` → `qwen3.5:9b`
-- **Embedding model (optional):** `nomic-embed-text`
-- **Context:** 16K for main and fast roles; 8K for the report role
+- Browser-based chat UI with streaming responses
+- Optional live **Thinking** stream above the composer
+- Persistent conversations and timestamp-aware historical recall
+- Four-tier context and memory system optimized for small local models
+- Tool calling, reusable recipes, grounding, and bounded recovery
+- Browser/UI automation with state tracking and verification
+- Background jobs, reminders, research, and report generation
+- Workspace file browser with uploads, previews, downloads, and inline media
+- Optional read-only Gmail, Calendar, and Google Drive connections
+- One-click **Generate Bug Report** for LLM-assisted troubleshooting
+- Local SQLite/WAL storage and encrypted credential storage
 
-The main model handles conversation and interactive reasoning. The 2B fast model handles bounded validation/recovery, research support, source distillation, and advisory semantic naming for automatically generalized recipe parameters. The 9B model is loaded only for long-form report synthesis. `nomic-embed-text` is used only by semantic-memory embedding calls when `semantic_memory_enabled: true` (or when the explicit semantic-memory tools/embedding benchmark are invoked); recipe search, skills, tool discovery, and normal routing do not use it. See `CURRENT_STATE.md` for the canonical current-state summary.
-
-## Quick start
-
-### 1. Requirements
+## Prerequisites
 
 You need:
 
-- Docker with the Compose plugin
-- a running Ollama server reachable from the host network
-- the models configured in `config/config.yaml`
+- Linux
+- Docker with the Docker Compose plugin
+- Ollama running on the host
+- Git for normal source-control workflows
+- Enough RAM/VRAM for the models configured in `config/config.yaml`
 
-Create the stable interactive role aliases. The helper pulls the configured Qwen3.8 main/fast sources and creates the aliases:
+The default setup expects Ollama at `http://127.0.0.1:11434`.
+
+## Quick start
+
+### 1. Clone the repository
+
+```bash
+git clone <repository-url>
+cd agent
+```
+
+### 2. Create the configured Ollama model aliases
 
 ```bash
 ./scripts/create_ollama_aliases.sh
 ```
 
-It creates:
+You can change model names and context sizes later in `config/config.yaml`.
 
-- `agent-main:4b` → `hf.co/empero-ai/Qwen3.8-4B-Distill-GGUF:Q4_K_M`
-- `agent-main:2b` → `hf.co/empero-ai/Qwen3.8-2B-Distill-GGUF:Q8_0`
-
-The report alias is separate and is needed only for the dedicated long-form research/report stage:
-
-```bash
-ollama pull qwen3.5:9b
-ollama cp qwen3.5:9b agent-report:9b
-```
-
-With the default `semantic_memory_enabled: false`, you do **not** need to pull `nomic-embed-text` for normal harness operation. Pull it only if you enable semantic memory or explicitly use semantic-memory embedding tools:
-
-```bash
-ollama pull nomic-embed-text
-```
-
-The harness passes explicit sampling/context settings per role, so behavior does not depend on alias-local Modelfile parameters.
-
-### 2. Start Al Agent
-
-From the repository root:
+### 3. Start Al Agent
 
 ```bash
 docker compose up -d --build
 ```
 
-The `storage-init` service creates and fixes ownership for persistent `workspace/` and `memory/` storage on first run, so a fresh clone can be started directly.
-
-Then open:
+Open:
 
 ```text
 http://127.0.0.1:8080
 ```
 
-To expose the UI on your LAN, set `WEBUI_HOST=0.0.0.0` deliberately. The default is localhost-only.
-The Web UI does not provide multi-user authentication, so do not bind it to an untrusted network.
-
-Stop and remove every harness container, including the Web UI, with:
+### 4. Stop Al Agent
 
 ```bash
 docker compose down
 ```
 
-## Web UI
+## First run
 
-The Web UI provides a ChatGPT-style local interface with:
+The Web UI guides you through basic profile setup. Google connections are optional and can be configured later from the wrench menu.
 
-- streaming responses and inline tool activity
-- responsive inline previews for user attachments and agent-created images, video, audio, PDFs, text, Markdown, and modern office documents
-- structured email cards for email drafts/previews with separate sender, recipient, subject, and body regions
-- persistent per-conversation thumbs-up/thumbs-down recipe decisions (green for save, red for decline)
-- an elapsed working status directly below the active user prompt
-- persistent command history with Up/Down navigation
-- slash-command autocomplete: type `/` to see every command, usage, and description
-- deterministic slash-command routing before the LLM (commands never become model prompts)
-- durable per-conversation history in the Recents sidebar, newest first with the current chat pinned on top
-- active-conversation restoration after browser refresh
-- a centered transcript with user bubbles, plain assistant responses, message copy actions, and a floating composer
-- non-destructive New Chat creation with isolated working state/observations
-- a complete-chat copy button
-- collapsible navigation and workspace sidebars
-- drag-and-drop attachments
-- inline previews for generated artifacts; internal transient fixtures such as `generalized_recipe_test/targets.txt` are intentionally suppressed from chat-inline rendering while remaining available to workspace tools
-- workspace upload/download controls
-- jobs, reminders, and working-state views
-- persistent branding and profile images
+The main interface provides:
 
-The full Al Agent image is used as the application logo. The yellow smiley face is used as the browser favicon.
+- **New Chat** and saved conversations in the left sidebar
+- **Jobs** and **Reminders** in the sidebar
+- a folder icon in the top bar for workspace files
+- a **Think** toggle in the composer
+- a wrench menu for **Profile Setup**, **Connections**, **Generate Bug Report**, and **UI Benchmarks**
 
-On first run, the Web UI opens a profile questionnaire for stable user context (name, role, timezone, optional location/email/interests, response style, research depth, and optional profile image). **Profile setup** in the sidebar can rerun it and replace questionnaire-owned context; `/profile` opens the same editor. Explicit read-only questions about those saved fields (for example, “what is my name?”, “what is my saved location?”, or “what is my timezone?”) are resolved directly from the profile store before recipe/tool selection or model inference. The same resolver covers role, email, interests, response style, research depth, and profile-image presence. If a specifically requested field is not configured, the request falls through to normal memory/model handling rather than fabricating a value.
+## Thinking mode
 
-Each browser thread has its own conversation ID, chat rows, rolling summary, tool observations, compaction watermark, and working state. Creating a new chat no longer deletes the previous thread.
+Thinking is off by default for faster everyday responses. When enabled, model reasoning is streamed live in a separate bubble above the chat input and the final answer remains in the conversation normally.
 
-### Google Workspace (read-only)
+## Files and persistent data
 
-Open **Connections** in the sidebar to connect Gmail, Google Calendar, and Google Drive metadata. The integration requests exactly these three read-only OAuth scopes:
+The repository uses two runtime data directories:
 
 ```text
-https://www.googleapis.com/auth/gmail.readonly
-https://www.googleapis.com/auth/calendar.readonly
-https://www.googleapis.com/auth/drive.metadata.readonly
+workspace/   user files, generated artifacts, downloads, research output
+memory/      SQLite state, conversations, context, profile data, traces
 ```
 
-The registered tools are:
+Both are ignored by Git.
 
-| Service | Tool | Capability |
-| --- | --- | --- |
-| Gmail | `gmail_search_messages` | Search/list message metadata and bounded snippets |
-| Gmail | `gmail_read_message` | Read one bounded text body; attachments are not downloaded |
-| Calendar | `google_calendar_list_calendars` | List visible calendars |
-| Calendar | `google_calendar_list_events` | List events in a bounded time range |
-| Calendar | `google_calendar_get_event` | Read one event and bounded attendee/details data |
-| Drive | `google_drive_list_files` | List bounded file metadata ordered by modification time; file contents are not opened |
+The folder icon in the Web UI opens the workspace drawer.
 
-None of these tools can send or modify email, add labels, create or edit events, invite attendees, modify Drive files, or delete Google data. Google-derived text is marked as untrusted external content in every tool response so instructions inside a message or event are treated as data, not agent commands.
+## Generate a bug report
 
-#### Google Cloud setup
+For troubleshooting:
 
-1. Create or select a Google Cloud project.
-2. Enable the **Gmail API**, **Google Calendar API**, and **Google Drive API**. The OAuth scope alone does not enable an API; if Drive reports `drive_api_disabled`, enable **Google Drive API** for the same Google Cloud project that owns the OAuth client, then retry.
-3. Configure the OAuth consent screen. For an External app in testing, add the connecting Google account as a test user.
-4. Create an **OAuth client ID** with application type **Web application**.
-5. Add the redirect URI shown in the Connections screen. With the default configuration it is:
-
-   ```text
-   http://127.0.0.1:8080/api/integrations/google/callback
-   ```
-
-6. Download the OAuth client JSON, select it in Connections, and choose **Connect Google**.
-
-Google's setup references are the [Gmail Python quickstart](https://developers.google.com/workspace/gmail/api/quickstart/python), [Calendar Python quickstart](https://developers.google.com/workspace/calendar/api/quickstart/python), [Gmail scope catalog](https://developers.google.com/workspace/gmail/api/auth/scopes), and [Calendar authorization guide](https://developers.google.com/workspace/calendar/api/auth). The Gmail read-only scope is classified by Google as a Restricted scope. A local app used only by its owner/test users can remain in OAuth testing, but publishing the integration broadly can trigger Google's verification and restricted-scope security-assessment requirements.
-
-OAuth uses a one-time, ten-minute state value and PKCE. The uploaded client secret, refresh token, and access token never enter browser status responses or model tool output. They are authenticated-encrypted in the shared `/app/credentials/vault.db` credential volume; the default encryption key is created at `/app/credentials/master.key`. The Docker volume has the explicit name `al-agent-credentials`, so it survives container recreation and source-checkout replacement. On the first startup after this migration, `storage-init` copies an existing legacy `memory/credentials` vault into the persistent volume when the new volume is empty. The directory is mode `0700` and the key/database are mode `0600`.
-
-A connection created before a new read-only capability was added remains usable for the scopes it already has. Connections reports the missing permission and offers **Update Google access**; only the capability that needs the new scope is blocked until the user grants it. Access tokens are refreshed from the persisted refresh token after process/container restarts.
-
-For key separation, supply a Fernet key through `AGENT_CREDENTIAL_KEY` or place it in a mode-`0600` file and set `AGENT_CREDENTIAL_KEY_FILE`. Set `GOOGLE_OAUTH_REDIRECT_URI` when using an HTTPS reverse proxy or a non-default loopback port, and register the identical value in Google Cloud. Plain HTTP redirect URIs are accepted only for `localhost`, `127.0.0.1`, or `::1`.
-
-Disconnecting revokes and removes the stored user token. **Remove setup** also deletes the encrypted OAuth client configuration. The vault API is provider/account/kind namespaced so future integrations can use the same storage boundary without defining ad-hoc secret files.
-
-The vault protects copied disks, archives, and accidental database disclosure. It does not protect credentials from the same OS account (or root) while the harness is running; use an external key file and normal host hardening when that is in scope. Gmail/event content is fetched only when a tool is called and is not copied into the credential vault, but requested content can be recorded in local conversation/tool history.
-
-### User profile picture
-
-The footer avatar is loaded from durable memory at:
+1. Reproduce the problem.
+2. Open the wrench menu.
+3. Select **Generate Bug Report**.
+4. Look in the repository root for a file named like:
 
 ```text
-/app/memory/profile/user_picture.png
+al-agent-bug-report-20260924-012530Z.md
 ```
 
-The Web UI and background worker share the `memory/` volume, so changing the profile image survives restarts and rebuilds.
+The report is designed to be supplied to an LLM together with the matching codebase. It includes bounded runtime state, recent timestamped conversation history, active working state, effective system prompts, recent model-call traces, failures, tool health, storage information, Git state/diff information, runtime versions, and a compact repository map.
 
-When you explicitly identify an attached image as a picture of yourself, the agent is instructed to ask whether you want to use it as the Web UI profile image. If you approve, the agent uses the typed `set_profile_image` tool to validate the workspace image, normalize it to PNG, and copy it into durable profile storage. The Web UI refreshes the avatar after a successful tool call.
+Known credential/token fields are redacted, but the report can contain conversation text and system prompts. Review it before sharing outside your trusted environment.
 
-Model-facing tools refer to that durable file as `profile-image://current` rather
-than exposing `/app/memory` as a general media root. `profile_image_info` and
-`set_profile_image` attach the image directly for vision and render it through
-the Web UI's dedicated profile-image endpoint. Generic file tools remain
-restricted to `/app/workspace`.
-
-Visual producer tools (`image_resize`, `image_crop`, `image_convert`, and
-`render_document_page`) also attach their generated workspace image directly.
-The model does not need to guess or repeat a path through `attach_media`.
-
-For compatibility with older conversations, the Web UI can migrate a previously remembered `user_photo`/`user_picture` by finding the corresponding attached workspace image in chat history. It does **not** use face recognition to decide that a person in an image is you.
-
-## How the harness is organized
-
-Al Agent follows a small-tools/recipes approach rather than giving the model a few giant monolithic tools.
-
-```text
-User request
-    │
-    ├─ recipe preflight
-    ├─ relevant memory/context retrieval
-    ├─ small tool-schema selection
-    ▼
-Main model ──────── typed primitive tools
-    │                    │
-    │                    ├─ files/text/JSON
-    │                    ├─ host/process/storage
-    │                    ├─ network/DNS/LAN
-    │                    ├─ web/document research
-    │                    ├─ reminders/jobs
-    │                    └─ profile/media operations
-    │
-    ├─ working-state ledger
-    └─ fast-model validator on repeated failure/stall
-```
-
-Successful multi-tool workflows can be saved as recipes so the model can reuse a known deterministic sequence instead of rediscovering it on every run.
-
-## Tool behavior
-
-The harness does **not** inject all tools into every model request. It selects a small relevant subset based on the current request, recent conversational context, explicit completion requirements, and recipe matches. This reduces prompt prefill and improves tool choice on smaller local models.
-
-Live-fact routing is separated from implementation intent before schemas reach the model. For example, “weather in London” can expose weather tools, while “refactor the weather validator” cannot accidentally become a forecast request. The same distinction applies to time, news, host, network, and repository prompts. Deictic follow-ups such as “latest local headlines” may inherit the prior news location, while a new topical request such as “latest AI news” starts a new frame.
-
-Examples of available tool families include:
-
-- **Time/system:** `current_time`, `environment_summary`, `host_snapshot`
-- **Files/text:** `read_file`, `read_text`, `read_lines`, `text_search`, `json_query`, `write_file`, `path_stat`, workspace-bounded `remove_path`
-- **Network:** `local_subnets`, `scan_subnet`, `dns_diagnose`, `network_path`, `http_probe`
-- **Web:** `web_search`, `browse_url`, `extract_document`, `page_diff`
-- **Weather:** `geocode_location`, `weather_forecast` (structured first; verified web fallback)
-- **News:** `news_search` (location-aware query, filtering, and grounding)
-- **Git/repository:** `repo_status`, `repo_diff`, `repo_checks`, `get_repo_map`
-- **Research:** `enqueue_research`, `get_research_status`
-- **Automation:** `schedule_reminder`, `list_reminders`, durable jobs
-- **Media/profile:** `image_info`, `attach_media`, `set_profile_image`, `profile_image_info`
-- **Google Workspace:** `gmail_search_messages`, `gmail_read_message`, `google_calendar_list_events`, `google_calendar_get_event`, `google_calendar_list_calendars`, `google_drive_list_files`
-- **Recipes:** `search_recipes`, `list_recipes`, `load_recipe`, `save_recipe`, `run_recipe`, `run_pipeline`
-- **Skills:** `search_skills`, `load_skill` (metadata-first, full instructions loaded lazily)
-- **Capability discovery:** `tool_search` for a capability not initially exposed; `tool_health` for registry/dependency diagnostics
-
-Generic shell and Python execution exist as fallback capabilities, but structured tools are preferred and are only exposed when relevant or explicitly requested.
-
-## Recipes
-
-Recipes are durable reusable workflows built from primitives. The harness performs a local recipe preflight before planning a task. Recipe lookup is SQLite FTS5/token-overlap based; it does not require the embedding model.
-
-When a successful workflow with at least two meaningful stages does not match an existing recipe, the agent can ask whether you want to save it. A built-in workflow such as the structured weather path is not suggested as a duplicate recipe. Recipes are stored separately from model prompts and remain subject to current tool policy and user constraints. Explicit `save recipe` wording is used for recipe persistence so a request such as “save it as report.md” remains an artifact-save request.
-
-Before proposing a saved recipe, the harness automatically generalizes successful read-only tool traces. Repeated/task-defining constants become shared parameters, and derived strings such as `https://example.com` become templates tied to the same `hostname` parameter instead of separate captured defaults. Operational controls (timeouts, limits, booleans, offsets, and ordinary fixed ports) remain constants unless the request explicitly makes them variable. The resident fast model may suggest semantic parameter names for ambiguous literals, but those hints are advisory: deterministic code requires every value to exist in the successful trace, rejects secret-like values, and verifies the final pipeline before it can be saved.
-
-Large tool results use durable observation handles. Genuine harness `middle truncated` markers are recovered deterministically with `read_observation`, including an authoritative final settlement after the last deterministic tool call that can create a new archived observation. Preview-only `[clipped]` text is never treated as a truncation signal, and a failed archive recovery becomes a terminal unresolved evidence gap rather than reopening the main-model recovery loop. Repeated empty, invalid-tool, or inference-error model responses are separately capped by `model_no_progress_max_retries` (default 2), so they stop before consuming the global six-call safety budget.
-
-Typical examples:
-
-```text
-weather lookup       geocode_location -> weather_forecast  (web_search -> browse_url fallback)
-host health check    host_snapshot -> pressure_snapshot -> filesystem_snapshot
-LAN discovery        local_subnets -> scan_subnet
-repository review    get_repo_map -> repo_status -> repo_checks
-```
-
-## Progressive skills and lifecycle hooks
-
-Skills are Markdown guidance stored in `workspace/skills/`. The harness scans only a small cached metadata prefix (name, description, tags) for relevance. When a skill matches the current request, the model receives only that compact index plus the `load_skill` schema; instructions are read in bounded chunks only if the model explicitly loads the skill. Recipes remain executable workflows, while skills are advisory procedure/domain guidance.
-
-Custom extension modules in `workspace/custom_tools/` may also register `@agent_hook("before_tool")` and `@agent_hook("after_tool")` callbacks. Hooks run through the same canonical executor used by chat, recipes, and pipelines. Hook failures are isolated; a hook that exceeds the small foreground time budget is disabled so it cannot repeatedly stall the agent. A `before_tool` hook may return `{"deny": "reason"}` to block a call.
-
-## Research jobs
-
-Long research tasks are moved out of the foreground conversation so the main loop remains responsive.
-
-```text
-/research <topic>
-```
-
-The worker checkpoints the research lifecycle:
-
-```text
-plan
-  -> search/fetch/distill
-  -> evaluate coverage
-  -> fill evidence gaps
-  -> build source-verbatim claim ledger
-  -> plan report with dedicated report_model
-  -> collect media
-  -> write sections
-  -> factuality gate + bounded repair
-  -> write/audit front matter
-  -> assemble Markdown/PDF + audit sidecars
-```
-
-Completed reports are written under:
-
-```text
-workspace/research/
-```
-
-Research jobs can survive process restarts because state and checkpoints are stored in SQLite.
-
-### Dedicated report model and factuality gate
-
-`/research` now separates source collection from long-form synthesis. Search planning,
-source distillation, and gap detection continue to use the small fast model, while the
-report stage uses the configurable `agent.report_model` (default:
-`agent-report:9b`). Before any prose is drafted, the report
-model builds a per-source claim ledger. Every retained claim must include a support
-excerpt that the harness verifies occurs in the fetched raw source text.
-
-Sections are written only from that verified ledger. Each generated section and the
-front matter then pass a structured factuality gate that checks for unsupported facts,
-citation mismatches, overstated causality, unattributed analysis, invented specifics,
-and source-scope errors. Failed passages receive bounded repair passes; sections that
-still fail degrade to a deterministic ledger-only form instead of shipping unsupported
-prose. When enabled, audit sidecars are written next to the report as
-`*.claims.json` and `*.factuality.json`.
-
-The worker also swaps Ollama residency around synthesis: it unloads the interactive
-and fast models before loading the report model, keeps the larger writer resident only
-for the report stage, then unloads it and restores the main model. Only that main-model
-restore occurs inside the shared inference lock. The fast model is prewarmed afterward
-on a deduplicated maintenance thread during an idle window, so foreground work never
-queues behind the optional preload. The report model has a finite keep-alive TTL as a
-crash-safety backstop. If a user turn arrives, the report worker yields and the
-interactive path evicts any lingering report model before loading main. This behavior
-is controlled by `agent.report_model`, `agent.report_options`, and
-`agent.report_restore_models_after_stage`.
-
-## Durable deterministic computation
-
-The foreground LLM/tool loop remains deliberately bounded for responsiveness and recovery safety. For deterministic workloads that may need more work than one turn or subprocess timeout can provide, the harness exposes a checkpointed `durable_compute` worker. Each claim executes a finite transition quantum, hydrates only the tape range reachable in that slice, and atomically commits lightweight continuation metadata plus changed sparse tape cells before yielding back to the queue; there is no mandatory total transition or yield count. A program ends on `HALT`, explicit cancellation, failure, or an optional resource policy supplied when the job is created.
-
-Model-facing tools are `start_computation`, `get_computation_status`, and `cancel_computation`. Starts are idempotency-protected and may seed the machine from inline text, an arbitrary sparse initial-tape map, or a SHA-256-pinned workspace text/JSON file without putting the file contents in model context. Status returns bounded progress/tape windows, and the Jobs view shows machine state, transitions, yields, tape-cell count, infrastructure-recovery count, and cancellation for active jobs. Transition targets are validated statically before queueing. The deterministic machine format, recovery semantics, safety model, input formats, and examples are documented in [`DURABLE_COMPUTE.md`](DURABLE_COMPUTE.md).
-
-Generic `execute_shell` and `execute_python` calls remain bounded to **120 seconds**; durable computation does not weaken those subprocess safeguards or the recipe/foreground iteration limits.
-
-## Reminders and scheduled work
-
-The harness supports durable reminders and background jobs. The Web UI exposes them in dedicated views.
-
-Type `/` in the Web UI to open the searchable slash-command menu.
-
-Useful slash commands include:
-
-```text
-/jobs                  list durable jobs
-/job <id>              inspect a job
-/cancel-job <id>       cancel a job
-/research <topic>      queue research
-/optimize <objective>  queue an isolated optimization candidate
-/optimizations         list optimization candidates
-```
-
-Model-facing reminder tools use the host's user-level systemd environment rather than generating ad-hoc unit files directly. If that backend is unavailable, the tool removes any partial unit files, reports a terminal `tool_unavailable` result, and is not retried with degraded or missing arguments during the same turn.
-
-## Conversation memory and context
-
-Al Agent separates several kinds of state:
-
-- `memory/knowledge.db` — durable ordinary memories, semantic-memory rows, conversation rows, job state, and observations
-- `memory/recipes.db` — durable recipe definitions/candidates and the local FTS recipe index
-- rolling conversation summary — older conversation context after compaction
-- working state — current objective, requirements, evidence, failures, and validator decisions; up to 96 requirements are persisted while only 24 are rendered into the model-facing requirement window. Direct requirement executions retain per-requirement tool provenance, a durable observation reference, and a bounded audit excerpt even after the shared verified-observation window rotates.
-- `workspace/` — files, uploads, generated artifacts, reports, and custom tools
-- `workspace/skills/` — optional Markdown skills; metadata is matched cheaply and full instructions are loaded only on demand
-
-Large tool outputs are stored as durable observations. In addition, any tool result used to close an explicit direct requirement is archived even when the result is small, so a PASS does not lose its underlying evidence merely because it falls below the normal large-result archive threshold. Each requirement stores its own bounded evidence excerpt and `evidence_ref`; the excerpt remains in persisted working state for auditability but is omitted from the model-facing requirement JSON to avoid prompt growth. During a long tool loop the newest results remain raw, the next few older transactions are microcompacted into retrievable observation handles, and still older transactions are dropped from the live prompt before normal context fitting. Background rolling-summary jobs also microcompact old tool bodies before inference. Exact archived content remains retrievable with `read_observation`.
-
-### Why old chats do not continuously grow the prompt
-
-Conversation compaction runs in the background after a turn rather than before the next response. A durable watermark prevents already summarized history from being pulled back into the raw model context.
-
-The Web UI's **copy entire chat** function is different: it can export the complete stored conversation, including rows that have already been compacted out of model context.
-
-## Model protocol reliability
-
-The Ollama boundary is deliberately isolated from the semantic/tool loop. Streamed `tool_calls` are accumulated across chunks, tool results use Ollama-native `tool_name`, and local bookkeeping fields are stripped before messages are sent on the wire. A transient model transport failure may be retried only **before** the first streamed chunk; after any output or tool call arrives, the request is never replayed because doing so could duplicate output or side effects. These settings live under `agent.model_transport`.
-
-See `HARNESS_BEST_PRACTICES_REVIEW.md` for the 2026 small-local-model architecture review and comparison with smolagents, LangGraph/Deep Agents, PocketFlow, Ollama, and llama.cpp patterns.
-
-### Optional semantic memory / `nomic-embed-text`
-
-`semantic_memory_enabled` defaults to `false`. In that state, normal turn memory retrieval uses the deterministic lexical `search_memory()` path and the harness does not need `nomic-embed-text` installed. When semantic memory is enabled, `get_relevant_memories()` uses `search_semantic_memory()`, which embeds the query with the configured `embed_model`; explicit `remember_semantic()` also requires the embedding model. Semantic search falls back to lexical memory search if embedding generation is unavailable.
-
-The embedding model is **not** used for recipe search, skills, `tool_search`, observations, requirement routing, or ordinary conversation. `scripts/benchmark_model_roles.py` benchmarks embedding latency only when semantic memory is enabled.
-
-## Failure recovery and validator
-
-Repeated identical tool failures are tracked by the harness. After the configured threshold, the fast model acts as a bounded validator and returns a structured control decision such as:
-
-```text
-retry
-switch_tool
-finish
-blocked
-```
-
-The main model receives the structured diagnosis, not unrestricted hidden validator reasoning. Deterministic fallback behavior is used if the validator itself times out or emits malformed output.
-
-If normal correction still fails, the harness now has one final fall-through before it gives up: the fast validator may propose a small **ephemeral read-only recovery recipe** made from allowlisted typed primitives. The harness re-validates the recipe, rejects repeated calls and side-effecting tools, executes it at most once, and then finalizes from whatever evidence it obtained. The recipe is never silently persisted; if it succeeds and does not match an existing recipe, the normal opt-in save prompt is shown afterward.
-
-### Hard fact grounding
-
-Fact-retrieval turns have a deterministic finalization gate in addition to the model-based loop validator. The gate classifies the fact type requested by the user and checks harness-owned observation provenance/content before a factual answer can finalize. A successful unrelated observation does not satisfy the gate.
-
-Weather is deliberately strict: a current-turn answer requires a weather-bearing structured provider observation, a verified weather recipe, linked `web_search` + `browse_url` observations, or a sufficiently fresh carried weather observation. `current_time` never satisfies weather. Before the first answer generation, the harness executes the built-in `weather.current_forecast` recipe (`geocode_location` → `weather_forecast` → composed evidence) using the requested location or the explicitly stored OOBE location. If the structured provider fails, it falls back to `web_search` → `browse_url`. Pre-generation evidence acquisition is normal tool work and does not surface a `missing_evidence` validator warning; that warning is reserved for an actual recovery/finalization failure. Candidate factual prose is buffered until the grounding gate passes.
-
-The default stored-weather freshness window is 10,800 seconds (3 hours) and can be changed with `agent.grounding.weather_max_age_seconds`. The grounding registry also covers current time, host state, network state, repository state, and explicit web-fact retrieval, and is intended to be extended with additional fact types as typed tools are added.
-
-Location-scoped news uses the same principle. The task frame carries a canonical city/region, the search receives separate query and location fields, and the grounding gate only accepts observations that match that scope. Same-name-city noise and conflicting country domains are filtered before a local headline answer can finalize.
-
-See `PROMPT_ROUTING_AND_FALLTHROUGH_REVIEW.md` for the reviewed prompt pairs, corrected failure paths, and control-loop invariants.
-
-This is intended to prevent loops such as repeatedly calling the same failing web endpoint or repeatedly retrying a tool with unchanged bad arguments, while still allowing a materially different primitive composition as the final recovery attempt.
-
-## Local network diagnostics
-
-For LAN discovery, use the structured path:
-
-```text
-local_subnets -> scan_subnet
-```
-
-`scan_subnet` performs bounded read-only discovery and can report available information such as:
-
-- IP/hostname
-- reverse DNS
-- MAC/vendor when available
-- listening service/port information
-- bounded service/OS hints
-
-`network_reachability` is for external/public reachability checks and is intentionally not used as a LAN scanner.
+Bug-report files are ignored by Git.
 
 ## Configuration
 
-Most behavior is configured in `config/config.yaml`.
-
-Important defaults:
-
-```yaml
-agent:
-  model: "agent-main:4b"
-  fast_model: "agent-main:2b"
-  vision_model: "agent-main:4b"
-  report_model: "agent-report:9b"
-  embed_model: "nomic-embed-text"
-  semantic_memory_enabled: false
-
-  fast_model_keep_alive: -1
-  vision_model_keep_alive: -1
-  report_model_keep_alive: "10m"
-  report_restore_models_after_stage: true
-
-  max_iterations: 6
-  max_iterations_hard: 10
-  max_model_calls_per_turn: 6
-  model_no_progress_max_retries: 2
-  max_validator_calls_per_turn: 2
-  max_tools_per_turn: 12
-  requirement_tool_cap: 24
-
-  context:
-    num_ctx: 16384
-    reserve_tokens: 2048
-    compact_at_tokens: 9000
-    max_tool_output_chars: 4000
-    volatile_blocks_last: true
-
-  main_options:
-    num_ctx: 16384
-    temperature: 0.6
-
-  fast_options:
-    num_ctx: 16384
-    temperature: 0.1
-
-  report_options:
-    num_ctx: 8192
-    temperature: 0.6
-
-  warmup:
-    enabled: true
-    fast_model_prewarm: true
-    prime_system_prefix: false
-
-  working_state:
-    minimize_schema_churn: true
-
-  grounding:
-    max_candidate_discards: 3
-
-  recipes:
-    validator_fallback_enabled: true
-    validator_fallback_max_stages: 4
-    validator_fallback_max_tools: 12
-    fast_parameter_inference: true
-    fast_parameter_min_stages: 2
-    fast_parameter_max_calls_per_turn: 1
-```
-
-`vision_model` defaults to the same alias as `model`. In that configuration image-bearing turns remain single-pass and reuse the already-resident main Ollama runner with the same context size. If `vision_model` is changed to a distinct model, the harness automatically performs a no-tools vision sidecar pass, converts the pixels into a bounded visual observation, and returns text-only context to the main agent.
-
-`fast_model_keep_alive: -1` pins the 2B fast runner after its first load. Main and fast both use the configured 16K context, so their runner identity remains stable across their normal paths. With `OLLAMA_MAX_LOADED_MODELS=2`, the 4B main and 2B fast roles can normally coexist. Startup warms main first and then schedules fast prewarming; report teardown restores main synchronously and schedules fast only after foreground inference is available again.
-
-### Ollama server settings
-
-`ollama.env.example` contains suggested server-side settings:
+The main configuration file is:
 
 ```text
-OLLAMA_MAX_LOADED_MODELS=2
-OLLAMA_MAX_QUEUE=8
-OLLAMA_NUM_PARALLEL=1
-OLLAMA_FLASH_ATTENTION=1
-OLLAMA_KV_CACHE_TYPE=q8_0
+config/config.yaml
 ```
 
-Apply these to the Ollama server/container, not to the agent container itself.
+Common settings include:
 
-On a machine that cannot keep both models resident comfortably, use one loaded model and set the fast-model keep-alive to `0`.
+- Ollama model roles and context sizes
+- thinking and generation limits
+- memory/context compaction
+- tools and recipes
+- browser automation budgets
+- background jobs and reminders
+- research/report settings
 
-## Performance design
+Deployment-specific settings can also be supplied through environment variables in `docker-compose.yml` and `ollama.env.example`.
 
-The harness is optimized around local-model constraints:
+## Optional Google connections
 
-- stable system/prompt prefixes for better Ollama prefix-cache reuse
-- small per-turn tool schema sets
-- foreground-priority inference locking
-- background compaction instead of pre-response compaction
-- bounded tool observations
-- whole-turn context trimming
-- fast-model offload for validation and research support
-- removal of completed requirement schemas during long checklist tasks
-
-Performance telemetry separates user-visible and backend costs: queue wait, turn preparation, model load, prompt evaluation, model TTFT, first visible answer, cache-hit percentage, generation counts, and total turn time. The latest measurements are also persisted in monitor state as `agent.last_model_stats` and `agent.last_turn_metrics`.
-
-### Time to first token
-
-On a local server the dominant term in TTFT is prompt prefill, and Ollama/llama.cpp can only skip prefill for a prompt prefix that is **byte-identical** to the previous request. Chat templates render tool schemas and the system prompt at the very top of that prompt, so anything that changes early in the prompt costs a full re-prefill. The harness is built around that fact:
-
-- **Volatile blocks go last.** The harness working state and evidence digest are rewritten on every tool-loop iteration. They are emitted after the stable system prompt and conversation history (`context.volatile_blocks_last`), so a changed working state no longer invalidates the cached prefix. Set it to `false` for a chat template that requires every system message to precede the conversation.
-- **The tool set stays byte-stable.** Pruning satisfied requirement schemas, and reordering them pending-first, both invalidate the whole prefix. Under `working_state.minimize_schema_churn` they happen only during an iteration that must change the set anyway to expose a still-pending requirement. Repeats of a completed check are still suppressed deterministically, and the pending list is still carried by the working state.
-- **Warm-up loads weights; prefix priming is measurement-driven.** The Web UI starts a background warm-up (`warmup.enabled`) that loads the model using the same `main_options` as interactive turns. `warmup.prime_system_prefix` defaults to `false`: tool-capable chat templates may place dynamic schemas before messages, so a system-only prime is not guaranteed to be a reusable prefix. Use `scripts/benchmark_warmup.py` and `prompt_eval_cached_count` before enabling it.
-- **Background compaction does not evict the foreground model.** When `compaction_model` is empty the worker reuses the interactive model, and it now reuses the interactive `num_ctx` as well. Requesting the same model with a smaller context would unload and reload it, making the next user turn pay a full model load plus a full prefill.
-- **Harness control notes are de-duplicated.** Idempotent guidance ("the previous call was rejected", "the candidate answer was discarded") is appended once per turn instead of once per iteration, so the prompt stops growing when the loop is not making progress.
-- **Selection has a relevance floor.** A single incidental description-word match no longer fills the per-turn schema budget, so conversational turns send no tool schemas at all instead of a dozen irrelevant ones.
-- **The fallback finalizer streams.** The "safety limit reached" summary is streamed and emits deltas rather than blocking until the whole answer is generated.
-
-`scripts/simulate_turns.py` measures prompt-prefix behavior without a model server. On the target Ollama host, `scripts/benchmark_warmup.py` compares cold, weight-preloaded, and system-prefix-primed turns using the real harness options and reports load/prefill/cache metrics.
-
-## Self-optimization
-
-Self-optimization is a proposal pipeline, not live autonomous modification.
-
-A candidate is built in an isolated worktree, tested, benchmarked, and validated in the restricted `optimizer-validator` container. The model cannot approve or deploy its own patch.
-
-Typical flow:
-
-```text
-/optimize reduce prompt tokens without changing tool behavior
-/optimizations
-/approve-optimization <candidate-id> <full-sha256>
-```
-
-After approval, promotion is an explicit host-side action:
-
-```bash
-python scripts/promote_optimization.py \
-  --repo . \
-  --patch workspace/self_optimization/approved/<candidate-id>.patch \
-  --sha256 <full-sha256> \
-  --confirm APPLY_APPROVED_PATCH
-```
-
-Review and commit the resulting diff normally.
-
-## Repository layout
-
-```text
-worker.py                background worker
-al_agent/                Web runtime facade, turn engine, prompts, state, events
-webui/                   executable FastAPI application and browser UI
-tools/                   tool registry, primitives, diagnostics, recipes
-config/config.yaml       model and harness configuration
-scripts/                 initialization, benchmarks, optimization utilities
-tests/                   model-free/unit reliability tests
-workspace/               persistent working files and generated artifacts
-memory/                  persistent SQLite state and user profile assets
-```
-
-Some especially useful modules:
-
-- `al_agent/turn_engine.py` — foreground model/tool state machine
-- `al_agent/runtime.py` — stable Web UI runtime facade
-- `tools/catalog.py` — dynamic tool loading and schema selection
-- `tools/loop_validator.py` — fast-model recovery decisions
-- `tools/working_state.py` — durable objective/evidence/requirements state
-- `tools/recipe_store.py` — recipe storage plus FTS5/token-overlap lookup
-- `tools/recipe_learning.py` — deterministic workflow generalization and recipe-candidate abstraction
-- `al_agent/fast_tasks.py` — bounded advisory fast-model extraction/classification helpers
-- `tools/network_diagnostics.py` — host/network diagnosis
-- `tools/user_profile.py` — profile data and durable profile image handling
-- `tools/credential_store.py` — provider-neutral encrypted local credential vault
-- `tools/google_workspace_auth.py` — OAuth state, PKCE, refresh, and revocation
-- `tools/google_workspace.py` — read-only Gmail, Calendar, and Drive-metadata tools
-- `webui/server.py` — Web UI API
-- `webui/static/app.js` — browser interaction and streaming UI
-
-## Model roles and performance benchmarking
-
-The runtime deliberately keeps the model hierarchy small:
-
-- `agent-main:4b` handles interactive reasoning, coding, conversation, tool orchestration, and the vision role by default.
-- `vision_model` is an explicit multimodal role. When configured to a different model it is restricted to no-tools visual interpretation; the main model retains tool selection and final reasoning.
-- `agent-main:2b` handles tool-loop validation, recovery reasoning, research planning, source distillation, and other bounded auxiliary work.
-- `agent-report:9b` is admitted only for long-form research synthesis and factuality repair.
-- `nomic-embed-text` is optional and supplies vectors only for semantic-memory operations; normal memory is lexical by default and recipe retrieval is FTS5/token-overlap based.
-
-Deterministic fast paths remain preferred for exact requests such as current time, structured weather, and market quotes; those paths avoid an unnecessary model call entirely.
-
-For a fresh clone or extracted ZIP, bootstrap the repo-local Python environment once:
-
-```bash
-./scripts/bootstrap_venv.sh
-```
-
-The `.venv/` directory is intentionally not committed or packaged because Python virtual environments are platform-specific and may contain absolute interpreter paths. The bootstrap script recreates it from `requirements.txt`/`pyproject.toml`. Host-side scripts such as the model-role benchmark automatically re-exec under `.venv/bin/python` once it exists.
-
-Use the deployment-host benchmark to measure whether model-role changes actually improve the target machine:
-
-```bash
-python scripts/benchmark_model_roles.py --runs 20 --report-runs 1
-```
-
-It reports cold and warm 4B TTFT and 2B validator latency separately, includes every
-warm sample, records 9B throughput and residency snapshots, and issues a foreground
-main request while fast prewarming is in flight to expose server-level resource
-contention. Use `--skip-residency` when you do not want the benchmark to disturb
-current Ollama residency (`--skip-load-swap` remains a compatibility alias).
-
-Benchmark the deterministic durable-compute core and SQLite checkpoint path independently of Ollama:
-
-```bash
-python scripts/benchmark_durable_compute.py
-```
-
-The benchmark reports transition throughput at several quantum sizes plus lightweight checkpoint + sparse tape-delta persistence latency. It uses a temporary database and imposes no production-state side effects.
-
-## Testing
-
-Current repository baseline: **560 passed, 1 skipped**, with the generated builtin manifest current at **235 tools**. Historical engineering notes elsewhere in the repository retain the test/tool counts from the revisions they documented; `CURRENT_STATE.md` and this section describe the current tree.
-
-Run the unit suite with:
-
-```bash
-python -m pytest -q
-```
-
-Run architecture checks with:
-
-```bash
-python scripts/check_architecture.py
-```
-
-Run the fixed harness benchmark with:
-
-```bash
-python scripts/benchmark_harness.py
-```
-
-Benchmark live Ollama model roles on the deployment host with:
-
-```bash
-python scripts/benchmark_model_roles.py --runs 20 --report-runs 1
-```
-
-Simulate turns without an Ollama server. A scripted client replaces the model
-transport and can only call tools that were actually supplied in the request,
-so the traces exercise the turn state machine rather than its malformed-call
-path. The prefix report approximates how much of each request Ollama can serve
-from its KV cache:
-
-```bash
-python scripts/simulate_turns.py            # traces plus prefix reuse
-python scripts/simulate_turns.py --prefix   # prefix reuse only
-python scripts/simulate_turns.py --prompts  # include rendered prompts
-```
-
-It writes to a temporary database and never touches durable storage.
-
-The local test environment must have packages from `requirements.txt` installed. On a fresh checkout/ZIP, run `./scripts/bootstrap_venv.sh`; this creates `.venv/` and installs the project in editable mode with its declared dependencies. In particular, registry/Web UI imports require the Ollama Python package even when no live Ollama server is contacted.
+Open **Connections** from the wrench menu to configure read-only Google access. The harness supports Gmail search/read, Calendar read access, and Google Drive metadata/listing. It does not send email or modify Google data through these read-only integrations.
 
 ## Troubleshooting
 
-### `docker compose up` reports `getwd: no such file or directory`
-
-Your shell is currently inside a directory that was deleted or replaced. Change to a real path before running Compose:
+View container logs:
 
 ```bash
-cd /path/to/agent
-pwd
+docker compose logs -f webui worker
+```
+
+Rebuild after source changes:
+
+```bash
 docker compose up -d --build
 ```
 
-### Web UI is not running
+For harder problems, generate a bug report from the wrench menu and provide it with the repository to the diagnosing LLM.
 
-Start or recreate the Web UI with:
+Developer benchmarks and troubleshooting utilities live under `diagnostics/`. Setup and operational helper scripts remain under `scripts/`.
 
-```bash
-docker compose up -d --build webui
-```
+## Documentation
 
-Then inspect:
+Engineering documentation is under [`docs/`](docs/README.md).
 
-```bash
-docker compose logs -f webui
-```
+Useful starting points:
 
-### A tool exists but the model says it is unavailable
+- [Architecture](docs/ARCHITECTURE.md)
+- [Current state](docs/CURRENT_STATE.md)
+- [Context and memory tiers](docs/CONTEXT_TIERS_2026-09-23.md)
+- [Bug reports](docs/BUG_REPORTS.md)
 
-The harness intentionally exposes only a relevant subset of tool schemas each turn. Absence from the current schema set does not mean a capability is missing. Use `tool_search` to discover a capability that was not initially exposed; use `tool_health` to inspect registry/dependency health. `/reload` is for an actual registry reload, not routine discovery.
-
-### Profile image does not appear
-
-Check that the durable file exists:
-
-```bash
-ls -l memory/profile/user_picture.png
-```
-
-If you previously told the agent that an uploaded image was a photo of you, the Web UI will attempt a one-time migration from legacy `user_photo`/chat history when `/api/profile-image` is requested. The original upload must still exist in `workspace/` for migration to succeed.
-
-## Security notes
+## Security
 
 - The Web UI binds to `127.0.0.1` by default.
-- The Web UI has no built-in multi-user authentication and must not be exposed directly to an untrusted network.
-- Host filesystem mounts are read-only where possible.
-- Structured read-only tools are preferred over generic command execution.
-- Google Workspace requests only the Gmail, Calendar, and Drive-metadata read-only scopes; OAuth state is one-time, PKCE-protected, refresh tokens persist in a dedicated encrypted Docker volume, and previously granted read-only scopes remain usable during scope upgrades.
-- Message and event text is explicitly marked as untrusted tool data and remains subject to normal prompt-injection defenses.
-- Custom tools are statically validated before loading.
-- Self-optimization validation runs in a restricted container and cannot self-promote.
-- Profile images are only installed from files already inside the agent workspace and only after explicit user approval through the profile-image tool workflow.
+- The UI does not provide multi-user authentication.
+- Credentials are kept outside model context in the local credential store.
+- Google integrations are read-only.
+- Bug reports redact known secret fields but may contain chat content and prompts.
 
-## License
-
-Use the project under the terms of the repository's license, if present.
-
-### Tool / primitive / recipe soak test
-
-Use `scripts/soak_test_tools.py` to exercise the complete tool registry and compatibility recipes with per-call process isolation, timeout protection, latency/error metrics, periodic checkpoints, and a final Markdown/JSON/CSV report. Because harness primitives intentionally use the production `/app` namespace, run it in the worker container. The convenience wrapper performs the recommended **5 deterministic passes** with fresh per-pass fixtures/state:
-
-```bash
-docker compose up -d --build
-./scripts/run_soak_test.sh
-```
-
-See [`TOOL_SOAK_TESTING.md`](TOOL_SOAK_TESTING.md) for pass profiles, safety modes, resume support, report fields, duration-only stress mode, and focused-run examples.
-
-## Multi-fact requests and independent grounding
-
-Compound factual turns are represented as `fact_frames`, one independently scoped frame per requested fact type, while the older single `task_frame` remains as a compatibility projection. This prevents one domain from contaminating another—for example, `What are the current headlines and weather?` grounds weather for the configured location and separately searches generic current headlines instead of turning the news query into weather news.
-
-Grounding and recovery maintain independent status per fact. Once a fact such as weather is satisfied, it is not re-queried merely because another fact such as news still needs evidence. Tool pruning also uses all active fact frames, so secondary fact tools cannot be removed because the primary compatibility frame belongs to another domain.
-
-See `MULTI_FACT_GROUNDING_2026-09-22.md` for parsing, modifier inheritance, grounding-ledger behavior, and regression coverage.

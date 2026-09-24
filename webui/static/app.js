@@ -368,7 +368,7 @@ async function activateConversation(conversationId){
   setActiveConversation(target);
   // Load the clicked thread explicitly. Both loaders guard against a later
   // selection winning the race, so rapid sidebar clicks cannot render stale data.
-  await Promise.all([loadHistory(target),loadState(target)]);
+  await loadHistory(target);
   if(activeConversationId!==target)return false;
   showPanel('chat');
   await loadConversations();
@@ -392,7 +392,7 @@ async function deleteSavedConversation(row){
   recipeDecisionStore.removeConversation(row.id);
   if(deletingActive){
     await createFreshConversation();
-    await Promise.all([loadHistory(),loadState()]);
+    await loadHistory();
     showPanel('chat');
   }
   await loadConversations();
@@ -426,12 +426,20 @@ async function loadConversations(){
   renderConversationList();updateConversationHeading();return conversationRows;
 }
 async function loadHistory(conversationId=activeConversationId){const cid=String(conversationId||'');const rows=await api(`/api/history?${conversationQuery(cid)}`);if(cid!==activeConversationId)return false;messagesEl.innerHTML='';artifactCards.clear();recipeCards.clear();activeUserMessageEl=null;assistantNode=null;assistantStreamBuffer='';resetThinkingStream();if(assistantRenderFrame){cancelAnimationFrame(assistantRenderFrame);assistantRenderFrame=0;}if(thinkingRenderFrame){cancelAnimationFrame(thinkingRenderFrame);thinkingRenderFrame=0;}resetActivityGroup();for(const m of rows){if(m.role==='user'||m.role==='assistant')addMessage(m.role,m.content,{media:m.media||[]});else if(m.role==='tool'){addTool(m.name||'tool','history',m.content);addMedia(m.media||[]);}}restoreRecipeSuggestions(cid);renderEmptyChat();scrollBottom(true);return true;}
-async function loadState(conversationId=activeConversationId){const cid=String(conversationId||'');const state=await api(`/api/state?${conversationQuery(cid)}`);if(cid!==activeConversationId)return false;$('#stateView').textContent=JSON.stringify(state,null,2);return true;}
 async function cancelJob(jobId){await api(`/api/jobs/${encodeURIComponent(jobId)}/cancel`,{method:'POST'});await loadJobs();}
 function jobProgress(j){if(j.job_type!=='durable_compute'||!j.progress)return '';const p=j.progress;const recovery=Number(p.recovery_failures||0);const maxRecovery=Number(p.max_recovery_failures||0);const recoveryText=recovery?`<span>${mdiIcon('restore-alert','↺')} ${recovery}/${maxRecovery||'∞'} recoveries</span>`:'';return `<div class="job-progress"><span>${mdiIcon('counter','↻')} ${Number(p.steps||0).toLocaleString()} steps</span><span>${mdiIcon('content-save-check-outline','◇')} ${Number(p.yield_count||0).toLocaleString()} yields</span><span>${mdiIcon('database-outline','▦')} ${Number(p.tape_cells||0).toLocaleString()} cells</span>${recoveryText}<span>${mdiIcon('state-machine','◎')} ${esc(p.machine_state||p.machine_status||'not started')}</span></div>`;}
 async function loadJobs(){const rows=await api('/api/jobs');const host=$('#jobsView');host.innerHTML=rows.length?rows.map(j=>`<div class="data-card job-card" data-job-id="${esc(j.id)}"><div class="job-card-head"><strong>${esc(j.title)}</strong>${['pending','running'].includes(j.status)?`<button class="job-cancel" type="button" title="Cancel job">${mdiIcon('stop-circle-outline','■')}<span>Cancel</span></button>`:''}</div><div class="muted">${esc(j.job_type)} · ${esc(j.status)} · ${esc(j.id).slice(0,8)}</div>${jobProgress(j)}${j.error?`<pre>${esc(j.error)}</pre>`:''}</div>`).join(''):'<div class="muted">No jobs.</div>';host.querySelectorAll('.job-cancel').forEach(btn=>{btn.onclick=async()=>{const card=btn.closest('[data-job-id]');if(!card)return;btn.disabled=true;try{await cancelJob(card.dataset.jobId);}catch(err){btn.disabled=false;window.alert(err.message||String(err));}};});}
 async function loadReminders(){const rows=await api('/api/reminders');$('#remindersView').innerHTML=rows.length?rows.map(r=>`<div class="data-card"><strong>${esc(r.title)}</strong><div class="muted">${esc(r.when_iso)} · ${esc(r.repeat_mode)} · ${esc(r.status)}</div><div>${esc(r.message||'')}</div></div>`).join(''):'<div class="muted">No reminders.</div>';}
 function benchmarkValue(value,suffix=''){return value==null?'—':`${typeof value==='number'?value.toLocaleString(undefined,{maximumFractionDigits:2}):esc(value)}${suffix}`;}
+async function generateBugReport(){
+  const button=$('#bugReportGenerate');if(!button)return;button.disabled=true;closeUtilityMenu();setStatus('Generating bug report…','busy');
+  try{
+    const data=await api(`/api/bug-report/generate?${conversationQuery(activeConversationId)}`,{method:'POST'});
+    setStatus(`Bug report created: ${data.filename||'report created'}`,'ok');
+  }catch(err){
+    console.error('Bug report generation failed',err);setStatus(`Bug report failed: ${err.message||err}`,'error');window.alert(err.message||String(err));
+  }finally{button.disabled=false;}
+}
 async function loadBenchmarks(){
   const data=await api('/api/browser-benchmarks?limit=100');const host=$('#benchmarksView');const cur=data.current||{},prev=data.previous||{},live=data.live_ui||{},gym=data.browsergym||{};
   const success=cur.success_rate==null?'—':`${(Number(cur.success_rate)*100).toFixed(1)}%`;const prevSuccess=prev.success_rate==null?'—':`${(Number(prev.success_rate)*100).toFixed(1)}%`;
@@ -496,7 +504,7 @@ function restoreSidebarState(){
   toggleWorkspace(readUiState(UI_STATE_KEYS.right,false),{persist:false});
 }
 
-function showPanel(name){document.querySelectorAll('.panel').forEach(x=>x.classList.add('hidden'));$(`#${name}Panel`).classList.remove('hidden');document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.panel===name));document.querySelectorAll('.recent-item').forEach(b=>b.classList.toggle('active',name==='chat'&&b.dataset.conversationId===activeConversationId));$('#panelTitle').textContent={chat:displayConversationTitle(currentConversation()),state:'Working State',jobs:'Jobs',reminders:'Reminders',benchmarks:'UI Benchmarks'}[name]||'Al Agent';if(name==='chat')updateConversationHeading();if(name==='state')loadState();if(name==='jobs')loadJobs();if(name==='reminders')loadReminders();if(name==='benchmarks')loadBenchmarks();}
+function showPanel(name){document.querySelectorAll('.panel').forEach(x=>x.classList.add('hidden'));const panel=$(`#${name}Panel`);if(!panel)return;panel.classList.remove('hidden');document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.panel===name));document.querySelectorAll('.recent-item').forEach(b=>b.classList.toggle('active',name==='chat'&&b.dataset.conversationId===activeConversationId));$('#panelTitle').textContent={chat:displayConversationTitle(currentConversation()),jobs:'Jobs',reminders:'Reminders',benchmarks:'UI Benchmarks'}[name]||'Al Agent';if(name==='chat')updateConversationHeading();if(name==='jobs')loadJobs();if(name==='reminders')loadReminders();if(name==='benchmarks')loadBenchmarks();}
 function closeUtilityMenu(){const menu=$('#utilityMenu'),toggle=$('#utilityMenuToggle');menu?.classList.add('hidden');toggle?.setAttribute('aria-expanded','false');}
 function toggleUtilityMenu(force){const menu=$('#utilityMenu'),toggle=$('#utilityMenuToggle');if(!menu||!toggle)return;const open=typeof force==='boolean'?force:menu.classList.contains('hidden');menu.classList.toggle('hidden',!open);toggle.setAttribute('aria-expanded',String(open));}
 function connect(){
@@ -533,7 +541,7 @@ function connect(){
     else if(e.type==='assistant_final'){finalizeThinkingStream({label:'done'});finalizeAssistantStream(e.content||'');setStatus('Ready');}
     else if(e.type==='turn_cancelled'){setStatus('Cancelled');finishTurn();}
     else if(e.type==='turn_end')finishTurn();
-    else if(e.type==='history_refresh'){loadConversations();if(!$('#statePanel').classList.contains('hidden'))loadState();if(!$('#jobsPanel').classList.contains('hidden'))loadJobs();if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}
+    else if(e.type==='history_refresh'){loadConversations();if(!$('#jobsPanel').classList.contains('hidden'))loadJobs();if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}
     else if(e.type==='error'){addMessage('assistant',`Error: ${e.message}`);setStatus('Error','error');finishTurn();}
   };
 }
@@ -594,8 +602,8 @@ window.addEventListener('dragover',(ev)=>{if(fileDrag(ev))ev.preventDefault();})
 window.addEventListener('drop',(ev)=>{if(fileDrag(ev))ev.preventDefault();});
 messagesEl.addEventListener('scroll',updateScrollFollow,{passive:true});
 $('#scrollLatest').addEventListener('click',()=>scrollBottom(true));
-$('#newChat').addEventListener('click',async()=>{if(activeTurn)return;await createFreshConversation();await Promise.all([loadConversations(),loadHistory(),loadState()]);showPanel('chat');promptEl.focus();});
-$('#refresh').addEventListener('click',()=>Promise.all([loadHistory(),loadState(),loadJobs(),loadReminders(),loadWorkspace(workspacePath)]));
+$('#newChat').addEventListener('click',async()=>{if(activeTurn)return;await createFreshConversation();await Promise.all([loadConversations(),loadHistory()]);showPanel('chat');promptEl.focus();});
+$('#refresh').addEventListener('click',()=>Promise.all([loadHistory(),loadJobs(),loadReminders(),loadWorkspace(workspacePath)]));
 async function copyEntireChat(){
   const button=$('#copyChat');const original=button.innerHTML;
   try{
@@ -609,6 +617,7 @@ async function copyEntireChat(){
 $('#copyChat').addEventListener('click',copyEntireChat);
 document.querySelectorAll('[data-panel]').forEach(btn=>btn.onclick=()=>{showPanel(btn.dataset.panel);if(window.matchMedia('(max-width: 760px)').matches)toggleLeftSidebar(false);});
 document.querySelectorAll('[data-utility-panel]').forEach(btn=>btn.onclick=()=>{closeUtilityMenu();showPanel(btn.dataset.utilityPanel);});
+$('#bugReportGenerate').addEventListener('click',()=>{void generateBugReport();});
 $('#utilityMenuToggle').addEventListener('click',e=>{e.stopPropagation();toggleUtilityMenu();});
 $('#workspaceToggle').onclick=()=>toggleWorkspace();$('#workspaceClose').onclick=()=>toggleWorkspace(false);$('#workspaceRefresh').onclick=()=>loadWorkspace(workspacePath);$('#workspaceBack').onclick=()=>loadWorkspace($('#workspaceBack').dataset.parent||'');$('#workspaceFilter').oninput=renderWorkspace;
 $('#collapseSidebar').onclick=()=>toggleLeftSidebar(false);$('#sidebarExpand').onclick=()=>toggleLeftSidebar(true);$('#mobileSidebar').onclick=()=>toggleLeftSidebar();

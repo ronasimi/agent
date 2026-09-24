@@ -10,7 +10,7 @@ if ! docker compose ps --services --status running | grep -Fxq "$service"; then
 fi
 
 exec docker compose exec -w /app "$service" \
-  python scripts/soak_test_tools.py \
+  python diagnostics/soak/soak_test_tools.py \
   --workers 2 \
   --mutating-mode isolated \
   "$@"

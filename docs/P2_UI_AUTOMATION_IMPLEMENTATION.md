@@ -6,8 +6,8 @@ This release implements the remaining P2 items from the UI/task-understanding an
 
 - Added `tools/browser_benchmark.py` with an optional `BrowserGymRunner` and compact `BrowserGymAdapter`.
 - The normal agent runtime does not import BrowserGym or Gymnasium at startup.
-- `requirements-benchmark.txt` keeps benchmark dependencies separate from the low-spec production image.
-- Added `scripts/benchmark_browsergym.py` and a dependency probe mode.
+- `diagnostics/requirements-benchmark.txt` keeps benchmark dependencies separate from the low-spec production image.
+- Added `diagnostics/benchmarks/benchmark_browsergym.py` and a dependency probe mode.
 - The adapter preserves BrowserGym's structured accessibility/DOM observations and translates the harness's compact browser actions into high-level action strings.
 
 ## 30. Navigation/action safety boundaries
@@ -132,7 +132,7 @@ Benchmark results persist in SQLite. The new `/api/browser-benchmarks` endpoint 
 - optional BrowserGym availability;
 - recent benchmark runs/errors.
 
-The Web UI exposes these under **UI benchmarks**. `scripts/browser_regression_dashboard.py` provides the same data as JSON for CLI/CI use.
+The Web UI exposes these under **UI benchmarks**. `diagnostics/browser_regression_dashboard.py` provides the same data as JSON for CLI/CI use.
 
 ## Additional P2 hardening
 

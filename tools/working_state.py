@@ -7,10 +7,13 @@ validator decisions.  Only harness code commits updates.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
 import sqlite3
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,6 +21,38 @@ from .runtime import DB_PATH, DB_TIMEOUT, utc_now
 from .conversation_context import DEFAULT_CONVERSATION_ID, get_active_conversation_id, normalize_conversation_id
 
 _STATE_ID = 1
+# Tier-1 working state is read constantly during a tool loop. Keep the active
+# JSON object in process RAM and write through to SQLite/WAL for crash recovery.
+_STATE_CACHE_LOCK = threading.RLock()
+_STATE_CACHE: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()
+_STATE_CACHE_MAX = 64
+_STATE_SCHEMA_LOCK = threading.RLock()
+_INITIALIZED_STATE_DBS: set[str] = set()
+
+def _state_cache_key(conversation_id: str) -> tuple[str, str]:
+    return (str(DB_PATH), str(conversation_id))
+
+def _cache_state(conversation_id: str, state: dict[str, Any]) -> None:
+    key = _state_cache_key(conversation_id)
+    with _STATE_CACHE_LOCK:
+        _STATE_CACHE[key] = copy.deepcopy(state)
+        _STATE_CACHE.move_to_end(key)
+        while len(_STATE_CACHE) > _STATE_CACHE_MAX:
+            _STATE_CACHE.popitem(last=False)
+
+def _cached_state(conversation_id: str) -> dict[str, Any] | None:
+    key = _state_cache_key(conversation_id)
+    with _STATE_CACHE_LOCK:
+        value = _STATE_CACHE.get(key)
+        if value is None:
+            return None
+        _STATE_CACHE.move_to_end(key)
+        return copy.deepcopy(value)
+
+def _invalidate_state_cache(conversation_id: str) -> None:
+    with _STATE_CACHE_LOCK:
+        _STATE_CACHE.pop(_state_cache_key(conversation_id), None)
+
 _DEFAULT_LIMITS = {
     "objective_chars": 1600,
     "background_chars": 2600,
@@ -59,43 +94,69 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
+def _configure_connection(conn: sqlite3.Connection, *, initialize: bool = False) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=15000")
-    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
-    # Legacy singleton retained for older installations/tests; new code uses the
-    # conversation-keyed table so browser tabs and saved chats cannot share state.
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS working_state (
-            id INTEGER PRIMARY KEY CHECK(id = 1),
-            turn_id INTEGER NOT NULL DEFAULT 0,
-            version INTEGER NOT NULL DEFAULT 2,
-            state_json TEXT NOT NULL DEFAULT '{}',
-            updated_at TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS working_states (
-            conversation_id TEXT PRIMARY KEY,
-            turn_id INTEGER NOT NULL DEFAULT 0,
-            version INTEGER NOT NULL DEFAULT 3,
-            state_json TEXT NOT NULL DEFAULT '{}',
-            updated_at TEXT NOT NULL
-        )
-        """
-    )
-    legacy = conn.execute("SELECT turn_id, state_json, updated_at FROM working_state WHERE id=1").fetchone()
-    if legacy:
-        conn.execute(
-            "INSERT OR IGNORE INTO working_states(conversation_id, turn_id, version, state_json, updated_at) VALUES (?, ?, 3, ?, ?)",
-            (DEFAULT_CONVERSATION_ID, int(legacy[0] or 0), str(legacy[1] or '{}'), str(legacy[2] or utc_now())),
-        )
+    if initialize:
+        # WAL is persistent database configuration. Do this once during schema
+        # setup rather than on every hot-path state read/write connection.
+        conn.execute("PRAGMA journal_mode=WAL")
     return conn
+
+
+def _ensure_schema() -> None:
+    """Initialize Tier-1 durable tables once per database path.
+
+    Working-state reads happen repeatedly inside a single tool loop. The active
+    state itself is served from RAM; when SQLite is needed, avoid paying DDL and
+    migration checks on every connection.
+    """
+    db = str(DB_PATH)
+    with _STATE_SCHEMA_LOCK:
+        if db in _INITIALIZED_STATE_DBS:
+            return
+        conn = _configure_connection(sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT), initialize=True)
+        try:
+            # Legacy singleton retained for older installations/tests; new code
+            # uses the conversation-keyed table so saved chats cannot share state.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS working_state (
+                    id INTEGER PRIMARY KEY CHECK(id = 1),
+                    turn_id INTEGER NOT NULL DEFAULT 0,
+                    version INTEGER NOT NULL DEFAULT 2,
+                    state_json TEXT NOT NULL DEFAULT '{}',
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS working_states (
+                    conversation_id TEXT PRIMARY KEY,
+                    turn_id INTEGER NOT NULL DEFAULT 0,
+                    version INTEGER NOT NULL DEFAULT 3,
+                    state_json TEXT NOT NULL DEFAULT '{}',
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            legacy = conn.execute("SELECT turn_id, state_json, updated_at FROM working_state WHERE id=1").fetchone()
+            if legacy:
+                conn.execute(
+                    "INSERT OR IGNORE INTO working_states(conversation_id, turn_id, version, state_json, updated_at) VALUES (?, ?, 3, ?, ?)",
+                    (DEFAULT_CONVERSATION_ID, int(legacy[0] or 0), str(legacy[1] or '{}'), str(legacy[2] or utc_now())),
+                )
+            conn.commit()
+            _INITIALIZED_STATE_DBS.add(db)
+        finally:
+            conn.close()
+
+
+def _connect() -> sqlite3.Connection:
+    _ensure_schema()
+    return _configure_connection(sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT))
 
 
 def _empty_state() -> dict[str, Any]:
@@ -128,16 +189,21 @@ def _resolved_conversation_id(conversation_id: str | None = None) -> str:
 
 def _load(conversation_id: str | None = None) -> dict[str, Any]:
     cid = _resolved_conversation_id(conversation_id)
+    cached = _cached_state(cid)
+    if cached is not None:
+        return cached
     with _connect() as conn:
         row = conn.execute("SELECT state_json FROM working_states WHERE conversation_id = ?", (cid,)).fetchone()
     if not row:
-        return _empty_state()
+        value = _empty_state()
+        _cache_state(cid, value)
+        return copy.deepcopy(value)
     try:
         value = json.loads(row[0])
     except (TypeError, json.JSONDecodeError):
-        return _empty_state()
+        value = _empty_state()
     if not isinstance(value, dict):
-        return _empty_state()
+        value = _empty_state()
     merged = _empty_state()
     merged.update(value)
     merged.setdefault("task_epoch", 0)
@@ -146,8 +212,8 @@ def _load(conversation_id: str | None = None) -> dict[str, Any]:
     merged.setdefault("fact_requirements", [])
     merged.setdefault("requirements", [])
     merged.setdefault("persistent_goal", {})
-    return merged
-
+    _cache_state(cid, merged)
+    return copy.deepcopy(merged)
 
 def _save(state: dict[str, Any], conversation_id: str | None = None) -> None:
     cid = _resolved_conversation_id(conversation_id)
@@ -155,6 +221,7 @@ def _save(state: dict[str, Any], conversation_id: str | None = None) -> None:
     state["schema_version"] = 3
     state["updated_at"] = utc_now()
     turn_id = int(state.get("turn_id") or 0)
+    state_json = _json(state)
     with _connect() as conn:
         conn.execute(
             """
@@ -166,7 +233,7 @@ def _save(state: dict[str, Any], conversation_id: str | None = None) -> None:
                 state_json=excluded.state_json,
                 updated_at=excluded.updated_at
             """,
-            (cid, turn_id, _json(state), state["updated_at"]),
+            (cid, turn_id, state_json, state["updated_at"]),
         )
         if cid == DEFAULT_CONVERSATION_ID:
             conn.execute(
@@ -174,8 +241,10 @@ def _save(state: dict[str, Any], conversation_id: str | None = None) -> None:
                    VALUES(1, ?, 3, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET turn_id=excluded.turn_id, version=excluded.version,
                      state_json=excluded.state_json, updated_at=excluded.updated_at""",
-                (turn_id, _json(state), state["updated_at"]),
+                (turn_id, state_json, state["updated_at"]),
             )
+    _cache_state(cid, state)
+
 
 def _extract_constraints(user_text: str, policy_note: str, limit: int = 8) -> list[str]:
     items: list[str] = []
@@ -330,8 +399,7 @@ class WorkingStateStore:
         self.limits = merged
         if self.conversation_id is not None:
             self.conversation_id = _resolved_conversation_id(self.conversation_id)
-        with _connect():
-            pass
+        _ensure_schema()
 
     def _cid(self) -> str:
         return _resolved_conversation_id(self.conversation_id)
@@ -720,3 +788,4 @@ class WorkingStateStore:
             conn.execute("DELETE FROM working_states WHERE conversation_id = ?", (self._cid(),))
             if self._cid() == DEFAULT_CONVERSATION_ID:
                 conn.execute("DELETE FROM working_state WHERE id = ?", (_STATE_ID,))
+        _invalidate_state_cache(self._cid())

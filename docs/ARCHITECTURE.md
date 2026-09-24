@@ -130,7 +130,7 @@ Large results are persisted as tool observations. Preview compaction may render 
 - provider manifests describe capabilities but do not execute them;
 - generic loops (`turn_engine`, worker `runner`) should not contain domain-specific tool/job implementations.
 
-`tests/test_modular_architecture.py` and `scripts/check_architecture.py` enforce the main structural invariants.
+`tests/test_modular_architecture.py` and `diagnostics/check_architecture.py` enforce the main structural invariants.
 
 ## Model roles
 
@@ -141,7 +141,7 @@ The runtime uses three generative Ollama roles plus an optional embedding model:
 - `agent-report:9b` (`qwen3.5:9b`) is admitted only for long-form research synthesis and factuality repair with an 8K context; the worker evicts normal interactive residency before loading it and restores the interactive roles afterward.
 - `nomic-embed-text` is optional because `semantic_memory_enabled` defaults to `false`. It is used only by semantic-memory embedding operations (`remember_semantic`, `search_semantic_memory`/`get_relevant_memories` when enabled) and the optional embedding benchmark. Recipe search, skill search, tool discovery, observations, and ordinary routing do not use it.
 
-Deterministic routing, requirements, grounding, safety policy, parameter validation, recipe execution, and exact fast-path renderers remain authoritative and bypass model inference whenever possible. Fast-model helpers return bounded advisory JSON and fail back to deterministic behavior. `scripts/benchmark_model_roles.py` measures the live deployment cost of each role so additional model tiers are added only when they demonstrate a net benefit on the target host.
+Deterministic routing, requirements, grounding, safety policy, parameter validation, recipe execution, and exact fast-path renderers remain authoritative and bypass model inference whenever possible. Fast-model helpers return bounded advisory JSON and fail back to deterministic behavior. `diagnostics/benchmarks/benchmark_model_roles.py` measures the live deployment cost of each role so additional model tiers are added only when they demonstrate a net benefit on the target host.
 
 ## Multi-fact turn model
 

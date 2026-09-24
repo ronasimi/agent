@@ -62,15 +62,15 @@
           </div>
         </div>
         <div class="topbar-actions">
-          <button id="workspaceToggle" class="top-action" title="Toggle files in workspace" aria-expanded="false" aria-controls="workspaceDrawer">
-            <span class="mdi mdi-folder-outline mdi-ui" data-fallback="⇧" aria-hidden="true"></span><span class="top-action-label">Files in workspace</span>
+          <button id="workspaceToggle" class="ghost-icon" title="Files in workspace" aria-label="Files in workspace" aria-expanded="false" aria-controls="workspaceDrawer">
+            <span class="mdi mdi-folder-outline mdi-ui" data-fallback="⇧" aria-hidden="true"></span>
           </button>
           <div class="utility-menu-wrap">
             <button id="utilityMenuToggle" class="ghost-icon" type="button" title="Tools and settings" aria-label="Tools and settings" aria-expanded="false" aria-controls="utilityMenu"><span class="mdi mdi-wrench-outline mdi-ui" data-fallback="🔧" aria-hidden="true"></span></button>
             <div id="utilityMenu" class="utility-menu hidden" role="menu" aria-label="Tools and settings">
               <button id="profileSetup" type="button" role="menuitem"><span class="mdi mdi-account-circle-outline mdi-ui" aria-hidden="true"></span><span>Profile Setup</span></button>
               <button id="connectionsSetup" type="button" role="menuitem"><span class="mdi mdi-link-variant mdi-ui" aria-hidden="true"></span><span>Connections</span></button>
-              <button type="button" role="menuitem" data-utility-panel="state"><span class="mdi mdi-view-dashboard-outline mdi-ui" aria-hidden="true"></span><span>Working State</span></button>
+              <button id="bugReportGenerate" type="button" role="menuitem"><span class="mdi mdi-bug-outline mdi-ui" aria-hidden="true"></span><span>Generate Bug Report</span></button>
               <button type="button" role="menuitem" data-utility-panel="benchmarks"><span class="mdi mdi-chart-box-outline mdi-ui" aria-hidden="true"></span><span>UI Benchmarks</span></button>
             </div>
           </div>
@@ -101,9 +101,6 @@
         </div>
       </section>
 
-      <section id="statePanel" class="panel data-panel hidden">
-        <div class="data-wrap"><h2>Working State</h2><pre id="stateView"></pre></div>
-      </section>
       <section id="jobsPanel" class="panel data-panel hidden">
         <div class="data-wrap"><h2>Jobs</h2><div id="jobsView"></div></div>
       </section>

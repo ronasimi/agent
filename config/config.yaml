@@ -39,8 +39,8 @@ agent:
   # enables reasoning explicitly for the entire turn.
   thinking_default: false
   # Avoid synchronous per-fragment stdout logging while the model reasons.
-  # Enable only for terminal debugging; the WebUI intentionally does not render
-  # private reasoning deltas.
+  # Enable only for terminal debugging. The Web UI streams reasoning separately
+  # only when the user explicitly enables the Think toggle.
   log_thinking_trace: false
   show_perf_stats: true
 
@@ -67,7 +67,7 @@ agent:
     fast_model_prewarm: true
     # Tool-capable chat templates may place dynamic schemas before messages, so
     # a system-only prime often is not a reusable prefix. Keep it off by default;
-    # use scripts/benchmark_warmup.py and model_stats.cache_hit_pct to verify before enabling.
+    # use diagnostics/benchmarks/benchmark_warmup.py and model_stats.cache_hit_pct to verify before enabling.
     prime_system_prefix: false
 
   # Transport failures before the first streamed chunk are safe to retry and
@@ -95,9 +95,10 @@ agent:
   model_no_progress_max_retries: 2
   # Qwen3.8-Distill is a reasoning model. On some Ollama/model combinations a
   # request can finish with message.thinking populated while content/tool_calls
-  # remain empty. Retry that specific condition once with a short-reasoning mode
+  # remain empty. Retry that specific condition once with literal think=false
   # and a larger output allowance instead of consuming the generic no-progress
-  # budget. Hidden reasoning is never surfaced as the answer.
+  # budget. The original reasoning may be streamed only when Think was enabled;
+  # it is never promoted into the final answer.
   reasoning_recovery:
     enabled: true
     max_attempts: 1
@@ -266,8 +267,14 @@ agent:
     num_ctx: 16384
     reserve_tokens: 2048
     recent_messages: 12
+    # Tier-2 continuity is checked after every turn but compacted only after the
+    # threshold, keeping foreground latency at zero while retaining raw history.
     summary_keep_messages: 8
     compact_at_tokens: 9000
+    # Tier-3 recall uses SQLite timestamp indexes + FTS5 and is injected only
+    # for explicit historical-chat requests.
+    historical_recall_messages: 32
+    historical_recall_chars: 7000
     max_tool_output_chars: 4000
     tool_loop_reserve_tokens: 3072
     # Place the harness working-state/evidence blocks after the stable history.
@@ -288,8 +295,7 @@ agent:
     top_k: 20
 
   system_prompt: |
-    Local assistant for conversation, research, computer assistance, and workflows.
-    Answer the current request directly and use only the capabilities supplied for that turn.
+    Local assistant for conversation, research, computer tasks, and workflows.
 
 research:
   max_rounds: 3
@@ -420,4 +426,4 @@ self_optimization:
     - ["python", "-m", "compileall", "-q", "."]
     - ["python", "-m", "pytest", "-q"]
   benchmark_commands:
-    - ["python", "scripts/benchmark_harness.py", "--max-source-tokens", "250000"]
+    - ["python", "diagnostics/benchmarks/benchmark_harness.py", "--max-source-tokens", "250000"]

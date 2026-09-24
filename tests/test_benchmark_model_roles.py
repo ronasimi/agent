@@ -9,7 +9,7 @@ def _load_benchmark(monkeypatch):
         stub = types.ModuleType("ollama")
         stub.Client = object
         monkeypatch.setitem(sys.modules, "ollama", stub)
-    path = Path(__file__).resolve().parents[1] / "scripts" / "benchmark_model_roles.py"
+    path = Path(__file__).resolve().parents[1] / "diagnostics" / "benchmarks" / "benchmark_model_roles.py"
     spec = importlib.util.spec_from_file_location("benchmark_model_roles_test", path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None

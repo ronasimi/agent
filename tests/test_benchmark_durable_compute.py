@@ -1,4 +1,4 @@
-from scripts.benchmark_durable_compute import run_benchmark
+from diagnostics.benchmarks.benchmark_durable_compute import run_benchmark
 
 
 def test_durable_compute_benchmark_reports_throughput_and_checkpoint_cost():

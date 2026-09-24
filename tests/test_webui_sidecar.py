@@ -541,7 +541,8 @@ def test_sidebar_reopen_targets_clicked_conversation_and_highlights_only_it():
     root = Path(__file__).resolve().parents[1]
     js = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
 
-    assert "loadHistory(target),loadState(target)" in js
+    assert "await loadHistory(target);" in js
+    assert "loadState(target)" not in js
     assert "cid!==activeConversationId" in js
     assert "b.dataset.conversationId===activeConversationId" in js
     assert "document.querySelectorAll('.nav-item,.recent-item')" not in js
@@ -580,11 +581,15 @@ def test_advanced_views_are_hidden_behind_wrench_menu():
     utility_start = html.index('id="utilityMenu"')
     utility_end = html.index('</div>', utility_start)
     utility = html[utility_start:utility_end]
-    for label in ("Profile Setup", "Connections", "Working State", "UI Benchmarks"):
+    for label in ("Profile Setup", "Connections", "Generate Bug Report", "UI Benchmarks"):
         assert label in utility
+    assert "Working State" not in utility
     sidebar_nav = html[html.index('<nav class="nav"'):html.index('</nav>')]
     assert "Working State" not in sidebar_nav
     assert "UI Benchmarks" not in sidebar_nav
+    workspace_button = html[html.index('id="workspaceToggle"'):html.index('</button>', html.index('id="workspaceToggle"'))]
+    assert "Files in workspace" not in workspace_button.replace('title="Files in workspace"', "").replace('aria-label="Files in workspace"', "")
+    assert "mdi-folder-outline" in workspace_button
     assert "Jobs" in sidebar_nav and "Reminders" in sidebar_nav
     assert "toggleUtilityMenu" in js and "closeUtilityMenu" in js
 
@@ -620,7 +625,7 @@ def test_hidden_diagnostic_panels_are_not_refreshed_after_every_turn():
     start = js.index("else if(e.type==='history_refresh')")
     end = js.index("else if(e.type==='error')", start)
     refresh = js[start:end]
-    assert "if(!$('#statePanel').classList.contains('hidden'))loadState();" in refresh
+    assert "loadState" not in refresh
     assert "if(!$('#jobsPanel').classList.contains('hidden'))loadJobs();" in refresh
 
 

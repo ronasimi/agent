@@ -339,3 +339,63 @@ def test_prompt_policy_leak_guard_detects_runtime_policy_but_not_normal_tool_dis
     assert _looks_like_prompt_policy_leak("### Agent Runtime Policy\nTools are explicitly typed and supplied through native tool-calling schemas.")
     assert _looks_like_prompt_policy_leak("### Runtime contract\n- Answer the user's current request directly.")
     assert not _looks_like_prompt_policy_leak("A tool call is a structured request to an external function.")
+
+
+def test_4b_system_prompt_is_compact_and_zero_tool_safe():
+    from al_agent.prompts import build_system_prompt
+
+    prompt = build_system_prompt()
+    lower = prompt.lower()
+    assert len(prompt) < 1000
+    assert "if no tool is needed or supplied, answer directly" in lower
+    assert "call only supplied tools" in lower
+    assert "native channel" in lower
+    # Truncation recovery is injected only when truncation actually occurs.
+    assert "read_observation" not in prompt
+
+
+def test_turn_capability_context_never_mentions_unexposed_tools():
+    from al_agent.prompts import build_turn_capability_context
+
+    assert build_turn_capability_context("research this on the web", set()) == ""
+    assert build_turn_capability_context("what is the weather?", set()) == ""
+
+
+def test_specialized_fact_policy_avoids_generic_web_duplication():
+    from al_agent.prompts import build_turn_capability_context
+
+    weather = build_turn_capability_context(
+        "what is the weather?",
+        {"geocode_location", "weather_forecast", "web_search", "browse_url"},
+    )
+    assert "Weather:" in weather
+    assert "Web:" not in weather
+
+    market = build_turn_capability_context(
+        "current WTI price",
+        {"market_quote", "web_search", "browse_url"},
+    )
+    assert "Markets:" in market
+    assert "Web:" not in market
+
+
+def test_explicit_web_request_keeps_generic_web_policy_when_exposed():
+    from al_agent.prompts import build_turn_capability_context
+
+    context = build_turn_capability_context(
+        "research weather sources on the web",
+        {"geocode_location", "weather_forecast", "web_search", "browse_url"},
+    )
+    assert "Weather:" in context
+    assert "Web:" in context
+
+
+def test_durable_compute_policy_is_not_duplicated_as_generic_automation():
+    from al_agent.prompts import build_turn_capability_context
+
+    context = build_turn_capability_context(
+        "run a resumable deterministic computation",
+        {"start_computation", "get_computation_status", "cancel_computation"},
+    )
+    assert "Durable compute:" in context
+    assert "Long-running work:" not in context

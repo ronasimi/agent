@@ -35,6 +35,7 @@ from .memory import (
     init_db,
     read_observation,
     search_memory,
+    search_conversation_history,
     set_conversation_summary,
     store_tool_observation,
 )
@@ -46,7 +47,7 @@ __all__ = [
     "_save_message_to_db", "clear_chat_history", "create_conversation", "delete_conversation", "ensure_conversation", "list_conversations", "rename_conversation", "get_all_memories_prompt_summary",
     "get_conversation_summary", "set_conversation_summary", "get_compacted_through_id",
     "get_messages_for_compaction", "apply_conversation_compaction", "store_tool_observation",
-    "read_observation", "get_relevant_memories", "search_memory", "agent_tool",
+    "read_observation", "get_relevant_memories", "search_memory", "search_conversation_history", "agent_tool",
 ]
 
 # Backward-compatible selector-policy aliases used by tests/extensions.

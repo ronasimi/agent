@@ -184,9 +184,9 @@ def test_p2_benchmark_store_and_regression_dashboard(tmp_path, monkeypatch):
 
 def test_p2_optional_benchmark_files_and_dashboard_ui_exist():
     root = Path(__file__).resolve().parents[1]
-    assert (root / "requirements-benchmark.txt").read_text(encoding="utf-8").strip()
-    assert (root / "scripts" / "benchmark_browsergym.py").is_file()
-    assert (root / "scripts" / "browser_regression_dashboard.py").is_file()
+    assert (root / "diagnostics/requirements-benchmark.txt").read_text(encoding="utf-8").strip()
+    assert (root / "diagnostics" / "benchmarks" / "benchmark_browsergym.py").is_file()
+    assert (root / "diagnostics" / "browser_regression_dashboard.py").is_file()
     html = (root / "webui" / "static" / "index.html").read_text(encoding="utf-8")
     js = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
     server = (root / "webui" / "server.py").read_text(encoding="utf-8")

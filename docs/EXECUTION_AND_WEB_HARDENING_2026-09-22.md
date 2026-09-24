@@ -12,7 +12,7 @@ This revision tightens three agent-loop contracts:
 ## Validation
 
 - `451 passed, 1 skipped`
-- `scripts/check_architecture.py`: passed
+- `diagnostics/check_architecture.py`: passed
 - Python compilation: passed
 
 The validation environment does not provide the real `ollama` package, so external import-only stubs were used to permit test collection. They are not included in this repository and do not simulate inference success.

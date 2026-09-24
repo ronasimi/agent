@@ -1,13 +1,18 @@
 import json
+from pathlib import Path
 
 from al_agent.prompts import SYSTEM_POLICY
 from al_agent.turn_support import _bounded_tool_result_with_ref
 from tools import web
 
 
-def test_system_policy_requires_truncated_observation_read_and_execution_evidence():
-    assert "If you receive a 'middle truncated' warning from the harness, you MUST execute `read_observation`" in SYSTEM_POLICY
-    assert "Never confirm a task is complete unless you have successfully executed the corresponding tool and received an observation." in SYSTEM_POLICY
+def test_runtime_contract_keeps_execution_evidence_and_dynamic_truncation_gate():
+    # The 4B prompt keeps rare truncation instructions out of the stable prefix;
+    # the turn engine injects them only when a real middle-truncation occurs.
+    assert "Claim side effects only after success." in SYSTEM_POLICY
+    engine = Path("al_agent/turn_engine.py").read_text(encoding="utf-8")
+    assert "[Harness truncation gate]" in engine
+    assert "You MUST execute read_observation" in engine
 
 
 def test_extract_main_text_prefers_article_and_drops_site_chrome():

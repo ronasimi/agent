@@ -7,6 +7,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
 WORKSPACE = Path(os.environ.get("AGENT_WORKSPACE", "/app/workspace")).resolve()
+_DEFAULT_SOURCE_ROOT = Path("/app/source") if Path("/app/source").exists() else ROOT.parent
+SOURCE_ROOT = Path(os.environ.get("AGENT_SOURCE_ROOT", str(_DEFAULT_SOURCE_ROOT))).resolve()
 UPLOAD_DIR = (WORKSPACE / "uploads").resolve()
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 MAX_UPLOAD_BYTES = max(1024 * 1024, int(os.environ.get("WEBUI_MAX_UPLOAD_BYTES", str(16 * 1024 * 1024))))

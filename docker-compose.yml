@@ -127,6 +127,7 @@ services:
       - WEBUI_HOST=${WEBUI_HOST:-127.0.0.1}
       - WEBUI_PORT=${WEBUI_PORT:-8080}
       - AGENT_CREDENTIAL_DIR=/app/credentials
+      - AGENT_SOURCE_ROOT=/app/source
       - AGENT_CREDENTIAL_KEY=${AGENT_CREDENTIAL_KEY:-}
       - AGENT_CREDENTIAL_KEY_FILE=${AGENT_CREDENTIAL_KEY_FILE:-}
       - GOOGLE_OAUTH_REDIRECT_URI=${GOOGLE_OAUTH_REDIRECT_URI:-}
@@ -141,7 +142,7 @@ services:
       - agent-credentials:/app/credentials
       - ./tools:/app/tools:ro
       - ./webui:/app/webui:ro
-      - ./:/app/source:ro
+      - ./:/app/source
       - /:/host:ro
       - /var/log:/host_log:ro
       - /run/user/1000/bus:/run/user/1000/bus

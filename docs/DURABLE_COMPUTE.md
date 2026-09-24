@@ -139,7 +139,7 @@ python -m pytest -q \
 Benchmark deterministic transition throughput and SQLite checkpoint cost with:
 
 ```bash
-python scripts/benchmark_durable_compute.py
+python diagnostics/benchmarks/benchmark_durable_compute.py
 ```
 
 The benchmark tests 1K, 10K, and 100K transition quanta by default and measures a lightweight metadata checkpoint plus a sparse tape delta. Tune for the deployment host: the goal is to make checkpoint overhead small relative to useful work while keeping cancellation latency and queue fairness responsive.

@@ -2,6 +2,7 @@
 TOOL_SPECS = [
     ('memory', 'remember'),
     ('memory', 'search_memory'),
+    ('memory', 'search_conversation_history'),
     ('memory', 'remember_semantic'),
     ('memory', 'search_semantic_memory'),
     ('memory', 'read_observation'),

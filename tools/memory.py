@@ -4,11 +4,16 @@
 """Persistent memories and bounded conversation history."""
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
+import re
 import sqlite3
+import threading
+import time
 import uuid
+from collections import OrderedDict
 from typing import Any
 
 from .config import load_config
@@ -18,6 +23,51 @@ from .conversation_context import DEFAULT_CONVERSATION_ID, get_active_conversati
 config = load_config()
 EMBED_MODEL = config.get("agent", {}).get("embed_model", "nomic-embed-text")
 
+# Hot-path caches are process-local and keyed by the active database path so
+# tests/embedders can safely swap AGENT_DB_PATH. SQLite remains the durable
+# source of truth; these caches only avoid repeated reads within one process.
+_CACHE_LOCK = threading.RLock()
+_SCHEMA_LOCK = threading.RLock()
+_INITIALIZED_DB_PATHS: set[str] = set()
+_HISTORY_CACHE: OrderedDict[tuple[Any, ...], list[dict[str, Any]]] = OrderedDict()
+_CONTEXT_CACHE: OrderedDict[tuple[str, str], tuple[str, int, float]] = OrderedDict()
+_CACHE_MAX = 96
+_FTS_AVAILABLE: dict[str, bool] = {}
+# conversation_context is also updated by the background compaction worker,
+# which is a separate process. Keep a tiny TTL so repeated reads inside one
+# foreground turn stay in RAM while a later turn observes cross-process writes.
+_CONTEXT_CACHE_TTL_SECONDS = 0.25
+
+
+def _db_key() -> str:
+    return os.path.abspath(str(DB_PATH))
+
+
+def _cache_put(cache: OrderedDict, key: Any, value: Any) -> None:
+    with _CACHE_LOCK:
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > _CACHE_MAX:
+            cache.popitem(last=False)
+
+
+def _invalidate_history_cache(conversation_id: str | None = None) -> None:
+    cid = _conversation_id(conversation_id) if conversation_id is not None else ""
+    db = _db_key()
+    with _CACHE_LOCK:
+        for key in list(_HISTORY_CACHE):
+            if key and key[0] == db and (not cid or (len(key) > 1 and key[1] == cid)):
+                _HISTORY_CACHE.pop(key, None)
+
+
+def _invalidate_context_cache(conversation_id: str | None = None) -> None:
+    cid = _conversation_id(conversation_id) if conversation_id is not None else ""
+    db = _db_key()
+    with _CACHE_LOCK:
+        for key in list(_CONTEXT_CACHE):
+            if key[0] == db and (not cid or key[1] == cid):
+                _CONTEXT_CACHE.pop(key, None)
+
 
 def _connect() -> sqlite3.Connection:
     init_db()
@@ -25,6 +75,7 @@ def _connect() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=15000")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
@@ -33,71 +84,133 @@ def _conversation_id(value: str | None = None) -> str:
 
 
 def init_db() -> None:
-    """Initialize persistent memory, conversation, and runtime storage."""
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
-        conn.execute("PRAGMA busy_timeout=15000")
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("CREATE TABLE IF NOT EXISTS memory (topic TEXT PRIMARY KEY, fact TEXT, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)")
-        conn.execute("CREATE TABLE IF NOT EXISTS semantic_memory (id INTEGER PRIMARY KEY AUTOINCREMENT, topic TEXT, fact TEXT, embedding TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
-        conn.execute("CREATE TABLE IF NOT EXISTS chat_history (id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT, content TEXT, name TEXT, extra TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
-        chat_columns = {row[1] for row in conn.execute("PRAGMA table_info(chat_history)").fetchall()}
-        if "conversation_id" not in chat_columns:
-            conn.execute("ALTER TABLE chat_history ADD COLUMN conversation_id TEXT NOT NULL DEFAULT 'default'")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_history_conversation_id ON chat_history(conversation_id, id)")
+    """Initialize persistent memory/history storage once per database path.
 
-        # Keep the legacy singleton table for migration/backward compatibility,
-        # but use conversation_context as the canonical per-thread state.
-        conn.execute("CREATE TABLE IF NOT EXISTS conversation_state (id INTEGER PRIMARY KEY CHECK(id = 1), summary TEXT NOT NULL DEFAULT '', compacted_through_id INTEGER NOT NULL DEFAULT 0, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)")
-        state_columns = {row[1] for row in conn.execute("PRAGMA table_info(conversation_state)").fetchall()}
-        if "compacted_through_id" not in state_columns:
-            conn.execute("ALTER TABLE conversation_state ADD COLUMN compacted_through_id INTEGER NOT NULL DEFAULT 0")
-        conn.execute("INSERT OR IGNORE INTO conversation_state(id, summary) VALUES (1, '')")
+    SQLite WAL + NORMAL synchronous mode is the durable low-latency store. FTS5
+    indexes are maintained by triggers when the bundled SQLite supports them.
+    """
+    db = _db_key()
+    with _SCHEMA_LOCK:
+        if db in _INITIALIZED_DB_PATHS and os.path.exists(db):
+            return
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+        with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+            conn.execute("PRAGMA busy_timeout=15000")
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("CREATE TABLE IF NOT EXISTS memory (topic TEXT PRIMARY KEY, fact TEXT, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_updated_at ON memory(updated_at DESC)")
+            conn.execute("CREATE TABLE IF NOT EXISTS semantic_memory (id INTEGER PRIMARY KEY AUTOINCREMENT, topic TEXT, fact TEXT, embedding TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
+            conn.execute("CREATE TABLE IF NOT EXISTS chat_history (id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT, content TEXT, name TEXT, extra TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
+            chat_columns = {row[1] for row in conn.execute("PRAGMA table_info(chat_history)").fetchall()}
+            if "conversation_id" not in chat_columns:
+                conn.execute("ALTER TABLE chat_history ADD COLUMN conversation_id TEXT NOT NULL DEFAULT 'default'")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_history_conversation_id ON chat_history(conversation_id, id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_history_created_at ON chat_history(created_at DESC, id DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_history_conversation_time ON chat_history(conversation_id, created_at DESC, id DESC)")
 
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS conversations (
-                   id TEXT PRIMARY KEY,
-                   title TEXT NOT NULL DEFAULT '',
-                   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                   updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-               )"""
-        )
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS conversation_context (
-                   conversation_id TEXT PRIMARY KEY,
-                   summary TEXT NOT NULL DEFAULT '',
-                   compacted_through_id INTEGER NOT NULL DEFAULT 0,
-                   updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                   FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-               )"""
-        )
-        conn.execute(
-            "INSERT OR IGNORE INTO conversations(id, title) VALUES (?, ?)",
-            (DEFAULT_CONVERSATION_ID, "Current conversation"),
-        )
-        legacy = conn.execute("SELECT summary, compacted_through_id FROM conversation_state WHERE id = 1").fetchone()
-        conn.execute(
-            "INSERT OR IGNORE INTO conversation_context(conversation_id, summary, compacted_through_id) VALUES (?, ?, ?)",
-            (DEFAULT_CONVERSATION_ID, str(legacy[0] or "") if legacy else "", int(legacy[1] or 0) if legacy else 0),
-        )
+            # Keep the legacy singleton table for migration/backward compatibility,
+            # but use conversation_context as the canonical per-thread state.
+            conn.execute("CREATE TABLE IF NOT EXISTS conversation_state (id INTEGER PRIMARY KEY CHECK(id = 1), summary TEXT NOT NULL DEFAULT '', compacted_through_id INTEGER NOT NULL DEFAULT 0, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)")
+            state_columns = {row[1] for row in conn.execute("PRAGMA table_info(conversation_state)").fetchall()}
+            if "compacted_through_id" not in state_columns:
+                conn.execute("ALTER TABLE conversation_state ADD COLUMN compacted_through_id INTEGER NOT NULL DEFAULT 0")
+            conn.execute("INSERT OR IGNORE INTO conversation_state(id, summary) VALUES (1, '')")
 
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS tool_observations (
-                id TEXT PRIMARY KEY,
-                tool_name TEXT NOT NULL,
-                content TEXT NOT NULL,
-                char_count INTEGER NOT NULL,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            )"""
-        )
-        obs_columns = {row[1] for row in conn.execute("PRAGMA table_info(tool_observations)").fetchall()}
-        if "conversation_id" not in obs_columns:
-            conn.execute("ALTER TABLE tool_observations ADD COLUMN conversation_id TEXT NOT NULL DEFAULT 'default'")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_tool_observations_conversation_id ON tool_observations(conversation_id, created_at)")
-        conn.execute("CREATE TABLE IF NOT EXISTS background_tasks (task_name TEXT PRIMARY KEY, status TEXT, output TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)")
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS conversations (
+                       id TEXT PRIMARY KEY,
+                       title TEXT NOT NULL DEFAULT '',
+                       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                   )"""
+            )
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS conversation_context (
+                       conversation_id TEXT PRIMARY KEY,
+                       summary TEXT NOT NULL DEFAULT '',
+                       compacted_through_id INTEGER NOT NULL DEFAULT 0,
+                       updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                       FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+                   )"""
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO conversations(id, title) VALUES (?, ?)",
+                (DEFAULT_CONVERSATION_ID, "Current conversation"),
+            )
+            legacy = conn.execute("SELECT summary, compacted_through_id FROM conversation_state WHERE id = 1").fetchone()
+            conn.execute(
+                "INSERT OR IGNORE INTO conversation_context(conversation_id, summary, compacted_through_id) VALUES (?, ?, ?)",
+                (DEFAULT_CONVERSATION_ID, str(legacy[0] or "") if legacy else "", int(legacy[1] or 0) if legacy else 0),
+            )
+
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS tool_observations (
+                    id TEXT PRIMARY KEY,
+                    tool_name TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    char_count INTEGER NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )"""
+            )
+            obs_columns = {row[1] for row in conn.execute("PRAGMA table_info(tool_observations)").fetchall()}
+            if "conversation_id" not in obs_columns:
+                conn.execute("ALTER TABLE tool_observations ADD COLUMN conversation_id TEXT NOT NULL DEFAULT 'default'")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tool_observations_conversation_id ON tool_observations(conversation_id, created_at)")
+            conn.execute("CREATE TABLE IF NOT EXISTS background_tasks (task_name TEXT PRIMARY KEY, status TEXT, output TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)")
+
+            # Historical recall and durable-memory lookup are both lexical hot
+            # paths. FTS5 avoids Python table scans and keeps embeddings/model
+            # calls out of ordinary recall. External-content indexes add little
+            # duplicate storage and stay synchronized through triggers.
+            fts_ok = True
+            try:
+                chat_fts_existed = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chat_history_fts'"
+                ).fetchone() is not None
+                memory_fts_existed = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_fts'"
+                ).fetchone() is not None
+                conn.execute(
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS chat_history_fts USING fts5(content, role UNINDEXED, conversation_id UNINDEXED, content='chat_history', content_rowid='id', tokenize='unicode61 remove_diacritics 2')"
+                )
+                conn.execute(
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(topic, fact, content='memory', content_rowid='rowid', tokenize='unicode61 remove_diacritics 2')"
+                )
+                conn.executescript(
+                    """
+                    CREATE TRIGGER IF NOT EXISTS chat_history_ai AFTER INSERT ON chat_history BEGIN
+                      INSERT INTO chat_history_fts(rowid, content, role, conversation_id) VALUES (new.id, new.content, new.role, new.conversation_id);
+                    END;
+                    CREATE TRIGGER IF NOT EXISTS chat_history_ad AFTER DELETE ON chat_history BEGIN
+                      INSERT INTO chat_history_fts(chat_history_fts, rowid, content, role, conversation_id) VALUES ('delete', old.id, old.content, old.role, old.conversation_id);
+                    END;
+                    CREATE TRIGGER IF NOT EXISTS chat_history_au AFTER UPDATE ON chat_history BEGIN
+                      INSERT INTO chat_history_fts(chat_history_fts, rowid, content, role, conversation_id) VALUES ('delete', old.id, old.content, old.role, old.conversation_id);
+                      INSERT INTO chat_history_fts(rowid, content, role, conversation_id) VALUES (new.id, new.content, new.role, new.conversation_id);
+                    END;
+                    CREATE TRIGGER IF NOT EXISTS memory_ai AFTER INSERT ON memory BEGIN
+                      INSERT INTO memory_fts(rowid, topic, fact) VALUES (new.rowid, new.topic, new.fact);
+                    END;
+                    CREATE TRIGGER IF NOT EXISTS memory_ad AFTER DELETE ON memory BEGIN
+                      INSERT INTO memory_fts(memory_fts, rowid, topic, fact) VALUES ('delete', old.rowid, old.topic, old.fact);
+                    END;
+                    CREATE TRIGGER IF NOT EXISTS memory_au AFTER UPDATE ON memory BEGIN
+                      INSERT INTO memory_fts(memory_fts, rowid, topic, fact) VALUES ('delete', old.rowid, old.topic, old.fact);
+                      INSERT INTO memory_fts(rowid, topic, fact) VALUES (new.rowid, new.topic, new.fact);
+                    END;
+                    """
+                )
+                if not chat_fts_existed:
+                    conn.execute("INSERT INTO chat_history_fts(chat_history_fts) VALUES('rebuild')")
+                if not memory_fts_existed:
+                    conn.execute("INSERT INTO memory_fts(memory_fts) VALUES('rebuild')")
+            except sqlite3.OperationalError:
+                fts_ok = False
+            _FTS_AVAILABLE[db] = fts_ok
+        _INITIALIZED_DB_PATHS.add(db)
     init_runtime_db()
-
 
 def _init_chat_db() -> None:
     init_db()
@@ -110,7 +223,7 @@ def _init_checkpoint_db() -> None:
 def ensure_conversation(conversation_id: str | None = None, title: str = "") -> str:
     init_db()
     cid = _conversation_id(conversation_id)
-    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+    with _connect() as conn:
         conn.execute(
             "INSERT OR IGNORE INTO conversations(id, title) VALUES (?, ?)",
             (cid, str(title or "").strip()[:120]),
@@ -131,7 +244,7 @@ def create_conversation(title: str = "") -> dict[str, Any]:
 
 def rename_conversation(conversation_id: str, title: str) -> None:
     cid = ensure_conversation(conversation_id)
-    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+    with _connect() as conn:
         conn.execute(
             "UPDATE conversations SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (str(title or "").strip()[:120] or "Conversation", cid),
@@ -144,7 +257,7 @@ def list_conversations(
     init_db()
     limit = max(1, min(int(limit), 200))
     active_id = str(active_conversation_id or "").strip()[:128]
-    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+    with _connect() as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
@@ -190,7 +303,7 @@ def delete_conversation(conversation_id: str) -> bool:
     if cid == DEFAULT_CONVERSATION_ID:
         clear_chat_history(cid)
         return True
-    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+    with _connect() as conn:
         conn.execute("DELETE FROM chat_history WHERE conversation_id = ?", (cid,))
         conn.execute("DELETE FROM tool_observations WHERE conversation_id = ?", (cid,))
         conn.execute("DELETE FROM conversation_context WHERE conversation_id = ?", (cid,))
@@ -199,6 +312,8 @@ def delete_conversation(conversation_id: str) -> bool:
         except sqlite3.Error:
             pass
         cursor = conn.execute("DELETE FROM conversations WHERE id = ?", (cid,))
+    _invalidate_history_cache(cid)
+    _invalidate_context_cache(cid)
     return bool(cursor.rowcount)
 
 
@@ -212,7 +327,7 @@ def _save_message_to_db(msg: dict, conversation_id: str | None = None) -> int:
         if key in msg:
             extra_data[key] = msg[key]
     extra = json.dumps(extra_data, ensure_ascii=False) if extra_data else None
-    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+    with _connect() as conn:
         cursor = conn.execute(
             "INSERT INTO chat_history(role, content, name, extra, conversation_id) VALUES (?, ?, ?, ?, ?)",
             (role, content, name, extra, cid),
@@ -226,44 +341,81 @@ def _save_message_to_db(msg: dict, conversation_id: str | None = None) -> int:
                 )
         else:
             conn.execute("UPDATE conversations SET updated_at=CURRENT_TIMESTAMP WHERE id=?", (cid,))
-        return int(cursor.lastrowid)
+        message_id = int(cursor.lastrowid)
+    _invalidate_history_cache(cid)
+    return message_id
+
+
+def _context_state(conversation_id: str | None = None) -> tuple[str, int]:
+    cid = ensure_conversation(conversation_id)
+    key = (_db_key(), cid)
+    with _CACHE_LOCK:
+        cached = _CONTEXT_CACHE.get(key)
+        if cached is not None:
+            summary, watermark, loaded_at = cached
+            if (time.monotonic() - loaded_at) <= _CONTEXT_CACHE_TTL_SECONDS:
+                _CONTEXT_CACHE.move_to_end(key)
+                return summary, watermark
+            _CONTEXT_CACHE.pop(key, None)
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT summary, compacted_through_id FROM conversation_context WHERE conversation_id = ?", (cid,)
+        ).fetchone()
+        summary = str(row[0] or "") if row else ""
+        watermark = int(row[1] or 0) if row else 0
+        if cid == DEFAULT_CONVERSATION_ID:
+            legacy = conn.execute("SELECT summary, compacted_through_id FROM conversation_state WHERE id = 1").fetchone()
+            if legacy and int(legacy[1] or 0) > watermark:
+                watermark = int(legacy[1] or 0)
+                if not summary:
+                    summary = str(legacy[0] or "")
+    value = (summary, watermark, time.monotonic())
+    _cache_put(_CONTEXT_CACHE, key, value)
+    return summary, watermark
 
 
 def _load_chat_history_from_db(
     limit: int = 20, *, include_compacted: bool = False, conversation_id: str | None = None
 ) -> list[dict]:
-    """Load bounded history for one conversation, or complete rows for export."""
+    """Load bounded timestamped history for one conversation.
+
+    Results are cached in RAM for repeated prompt/UI reads. Raw rows remain in
+    SQLite permanently; compaction only advances the prompt-facing watermark.
+    """
     cid = ensure_conversation(conversation_id)
     requested_limit = int(limit)
     export_limit = (0 if requested_limit <= 0 else min(requested_limit, 100000)) if include_compacted else max(1, min(requested_limit, 200))
-    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+    watermark = 0 if include_compacted else _context_state(cid)[1]
+    cache_key = (_db_key(), cid, bool(include_compacted), export_limit, watermark)
+    with _CACHE_LOCK:
+        cached = _HISTORY_CACHE.get(cache_key)
+        if cached is not None:
+            _HISTORY_CACHE.move_to_end(cache_key)
+            return copy.deepcopy(cached)
+    with _connect() as conn:
         if include_compacted:
             if export_limit == 0:
                 rows = conn.execute(
-                    "SELECT id, role, content, name, extra FROM chat_history WHERE conversation_id=? ORDER BY id DESC",
+                    "SELECT id, role, content, name, extra, created_at FROM chat_history WHERE conversation_id=? ORDER BY id DESC",
                     (cid,),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT id, role, content, name, extra FROM chat_history WHERE conversation_id=? ORDER BY id DESC LIMIT ?",
+                    "SELECT id, role, content, name, extra, created_at FROM chat_history WHERE conversation_id=? ORDER BY id DESC LIMIT ?",
                     (cid, export_limit),
                 ).fetchall()
         else:
-            row = conn.execute("SELECT compacted_through_id FROM conversation_context WHERE conversation_id = ?", (cid,)).fetchone()
-            watermark = int(row[0] or 0) if row else 0
-            if cid == DEFAULT_CONVERSATION_ID:
-                # Honor legacy callers that still update the singleton state
-                # directly during migration; canonical writes keep both in sync.
-                legacy = conn.execute("SELECT compacted_through_id FROM conversation_state WHERE id = 1").fetchone()
-                watermark = max(watermark, int(legacy[0] or 0) if legacy else 0)
             rows = conn.execute(
-                "SELECT id, role, content, name, extra FROM chat_history WHERE conversation_id=? AND id > ? ORDER BY id DESC LIMIT ?",
+                "SELECT id, role, content, name, extra, created_at FROM chat_history WHERE conversation_id=? AND id > ? ORDER BY id DESC LIMIT ?",
                 (cid, watermark, export_limit),
             ).fetchall()
     rows.reverse()
     result = []
-    for message_id, role, content, name, extra in rows:
-        msg = {"role": role, "content": content or "", "_db_id": int(message_id), "_conversation_id": cid}
+    for message_id, role, content, name, extra, created_at in rows:
+        msg = {
+            "role": role, "content": content or "", "_db_id": int(message_id),
+            "_conversation_id": cid, "_created_at": str(created_at or ""),
+        }
         if name:
             msg["name"] = name
         if extra:
@@ -272,17 +424,19 @@ def _load_chat_history_from_db(
             except json.JSONDecodeError:
                 pass
         result.append(msg)
+    _cache_put(_HISTORY_CACHE, cache_key, copy.deepcopy(result))
     return result
-
 
 def clear_chat_history(conversation_id: str | None = None) -> str:
     cid = ensure_conversation(conversation_id)
-    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+    with _connect() as conn:
         conn.execute("DELETE FROM chat_history WHERE conversation_id=?", (cid,))
         conn.execute("DELETE FROM tool_observations WHERE conversation_id=?", (cid,))
         conn.execute("UPDATE conversation_context SET summary = '', compacted_through_id = 0, updated_at = CURRENT_TIMESTAMP WHERE conversation_id = ?", (cid,))
         if cid == DEFAULT_CONVERSATION_ID:
             conn.execute("UPDATE conversation_state SET summary = '', compacted_through_id = 0, updated_at = CURRENT_TIMESTAMP WHERE id = 1")
+    _invalidate_context_cache(cid)
+    _invalidate_history_cache(cid)
     try:
         from .working_state import WorkingStateStore
         WorkingStateStore(conversation_id=cid).clear()
@@ -292,43 +446,36 @@ def clear_chat_history(conversation_id: str | None = None) -> str:
 
 
 def get_conversation_summary(conversation_id: str | None = None) -> str:
-    cid = ensure_conversation(conversation_id)
-    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
-        row = conn.execute("SELECT summary FROM conversation_context WHERE conversation_id = ?", (cid,)).fetchone()
-    return row[0] if row else ""
-
+    return _context_state(conversation_id)[0]
 
 def set_conversation_summary(summary: str, conversation_id: str | None = None) -> None:
     cid = ensure_conversation(conversation_id)
-    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+    with _connect() as conn:
         conn.execute(
             "INSERT INTO conversation_context(conversation_id, summary, updated_at) VALUES(?, ?, CURRENT_TIMESTAMP) ON CONFLICT(conversation_id) DO UPDATE SET summary=excluded.summary, updated_at=excluded.updated_at",
             (cid, str(summary or "").strip()),
         )
         if cid == DEFAULT_CONVERSATION_ID:
             conn.execute("UPDATE conversation_state SET summary=?, updated_at=CURRENT_TIMESTAMP WHERE id=1", (str(summary or "").strip(),))
+    _invalidate_context_cache(cid)
 
 
 def get_compacted_through_id(conversation_id: str | None = None) -> int:
-    cid = ensure_conversation(conversation_id)
-    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
-        row = conn.execute("SELECT compacted_through_id FROM conversation_context WHERE conversation_id = ?", (cid,)).fetchone()
-    return int(row[0] or 0) if row else 0
-
+    return _context_state(conversation_id)[1]
 
 def get_messages_for_compaction(through_id: int, conversation_id: str | None = None) -> list[dict[str, Any]]:
     cid = ensure_conversation(conversation_id)
     through_id = max(0, int(through_id))
-    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+    with _connect() as conn:
         state = conn.execute("SELECT compacted_through_id FROM conversation_context WHERE conversation_id = ?", (cid,)).fetchone()
         watermark = int(state[0] or 0) if state else 0
         rows = conn.execute(
-            "SELECT id, role, content, name, extra FROM chat_history WHERE conversation_id=? AND id > ? AND id <= ? ORDER BY id",
+            "SELECT id, role, content, name, extra, created_at FROM chat_history WHERE conversation_id=? AND id > ? AND id <= ? ORDER BY id",
             (cid, watermark, through_id),
         ).fetchall()
     messages = []
-    for message_id, role, content, name, extra in rows:
-        message: dict[str, Any] = {"_db_id": int(message_id), "role": role, "content": content or ""}
+    for message_id, role, content, name, extra, created_at in rows:
+        message: dict[str, Any] = {"_db_id": int(message_id), "role": role, "content": content or "", "_created_at": str(created_at or "")}
         if name:
             message["name"] = name
         if extra:
@@ -346,7 +493,7 @@ def apply_conversation_compaction(summary: str, through_id: int, conversation_id
     if not summary or not through_id:
         return False
     cid = ensure_conversation(conversation_id)
-    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+    with _connect() as conn:
         cursor = conn.execute(
             """
             UPDATE conversation_context
@@ -358,6 +505,9 @@ def apply_conversation_compaction(summary: str, through_id: int, conversation_id
         )
         if cid == DEFAULT_CONVERSATION_ID and cursor.rowcount == 1:
             conn.execute("UPDATE conversation_state SET summary=?, compacted_through_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=1", (summary[:8000], through_id))
+    if cursor.rowcount == 1:
+        _invalidate_context_cache(cid)
+        _invalidate_history_cache(cid)
     return cursor.rowcount == 1
 
 
@@ -365,7 +515,7 @@ def store_tool_observation(tool_name: str, content: str, conversation_id: str | 
     cid = ensure_conversation(conversation_id)
     observation_id = uuid.uuid4().hex
     text = str(content)
-    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+    with _connect() as conn:
         conn.execute(
             "INSERT INTO tool_observations(id, tool_name, content, char_count, conversation_id) VALUES (?, ?, ?, ?, ?)",
             (observation_id, str(tool_name or "tool"), text, len(text), cid),
@@ -380,7 +530,7 @@ def read_observation(observation_id: str = "", offset: int = 0, length: int = 50
     offset = max(0, int(offset))
     length = max(100, min(int(length), 10000))
     cid = ensure_conversation()
-    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+    with _connect() as conn:
         row = conn.execute(
             "SELECT tool_name, content, char_count FROM tool_observations WHERE id = ? AND conversation_id = ?",
             (observation_id, cid),
@@ -409,7 +559,7 @@ def remember(topic: str = "general_knowledge", fact: str = "Recorded by agent ac
     fact = str(fact).strip()
     if not fact:
         return "Error: Missing required 'fact' parameter."
-    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+    with _connect() as conn:
         conn.execute(
             "INSERT INTO memory(topic, fact, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT(topic) DO UPDATE SET fact=excluded.fact, updated_at=CURRENT_TIMESTAMP",
             (topic, fact),
@@ -434,29 +584,47 @@ def _memory_query_terms(query: str) -> list[str]:
     ][:24]
 
 
-def search_memory(query: str = "", limit: int = 10) -> str:
-    """Search durable memories using relevance-ranked meaningful terms.
+def _fts_query(terms: list[str]) -> str:
+    clean = []
+    for term in terms:
+        term = str(term or "").replace('"', '""').strip()
+        if term:
+            clean.append(f'"{term}"')
+    return " OR ".join(clean)
 
-    Common conversational words are ignored so a query such as "what did I tell
-    you earlier?" does not inject unrelated facts merely because they contain
-    words like "my" or "you". Results require at least one meaningful term
-    match and are ranked by topic matches, fact matches, then recency.
-    """
+
+def search_memory(query: str = "", limit: int = 10) -> str:
+    """Search durable explicit memories through SQLite FTS5 when available."""
+    init_db()
     limit = max(1, min(int(limit), 50))
     raw_query = str(query or "").strip().lower()
-    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+    with _connect() as conn:
         if not raw_query or raw_query in {"memory", "all", "everything"}:
             rows = conn.execute(
-                "SELECT topic, fact, updated_at FROM memory ORDER BY updated_at DESC LIMIT ?",
-                (limit,),
+                "SELECT topic, fact, updated_at FROM memory ORDER BY updated_at DESC LIMIT ?", (limit,)
             ).fetchall()
         else:
             terms = _memory_query_terms(raw_query)
-            if not terms:
-                rows = []
-            else:
-                # Bound the scoring pool; memory is user-authored and typically
-                # small, but never scan an unbounded table on each turn.
+            rows = []
+            fts_failed = False
+            if terms and _FTS_AVAILABLE.get(_db_key(), False):
+                try:
+                    rows = conn.execute(
+                        """
+                        SELECT m.topic, m.fact, m.updated_at
+                        FROM memory_fts
+                        JOIN memory m ON m.rowid = memory_fts.rowid
+                        WHERE memory_fts MATCH ?
+                        ORDER BY bm25(memory_fts, 3.0, 1.0), m.updated_at DESC
+                        LIMIT ?
+                        """,
+                        (_fts_query(terms), limit),
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    fts_failed = True
+            if terms and (not _FTS_AVAILABLE.get(_db_key(), False) or fts_failed):
+                # Portable fallback for SQLite builds without FTS5. The durable
+                # memory table is intentionally small, and this path is bounded.
                 candidates = conn.execute(
                     "SELECT topic, fact, updated_at FROM memory ORDER BY updated_at DESC LIMIT 500"
                 ).fetchall()
@@ -464,19 +632,132 @@ def search_memory(query: str = "", limit: int = 10) -> str:
                 for row in candidates:
                     topic = str(row[0] or "").lower()
                     fact = str(row[1] or "").lower()
-                    topic_hits = sum(1 for term in terms if term in topic)
-                    fact_hits = sum(1 for term in terms if term in fact)
-                    score = topic_hits * 3 + fact_hits
+                    score = sum(3 for term in terms if term in topic) + sum(1 for term in terms if term in fact)
                     if score > 0:
                         scored.append((score, str(row[2] or ""), row))
                 scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
                 rows = [item[2] for item in scored[:limit]]
     return json.dumps(
         [{"topic": row[0], "fact": row[1], "updated_at": row[2]} for row in rows],
-        ensure_ascii=False,
-        indent=2,
+        ensure_ascii=False, indent=2,
     ) if rows else "No related memories found."
 
+
+_HISTORY_QUERY_STOPWORDS = _MEMORY_QUERY_STOPWORDS | {
+    "about", "again", "before", "chat", "conversation", "conversations", "covered",
+    "discuss", "discussed", "discussion", "history", "last", "night", "recall",
+    "remember", "talk", "talked", "talking", "today", "week", "yesterday",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+}
+
+
+def _history_query_terms(query: str) -> list[str]:
+    return [
+        token for token in re.findall(r"[a-z0-9][a-z0-9_.:-]*", str(query or "").lower())
+        if len(token) >= 3 and token not in _HISTORY_QUERY_STOPWORDS
+    ][:24]
+
+
+def search_conversation_history_records(
+    query: str = "", *, start_time: str = "", end_time: str = "",
+    conversation_id: str = "", limit: int = 20, before_id: int = 0,
+) -> list[dict[str, Any]]:
+    """Return timestamped user/assistant rows across saved conversations.
+
+    ``start_time``/``end_time`` use SQLite UTC timestamp form (ISO strings are
+    accepted because their leading ``YYYY-MM-DD HH:MM:SS`` sorts identically).
+    FTS5 handles lexical recall; timestamp indexes handle date-only recall.
+    """
+    init_db()
+    limit = max(1, min(int(limit), 100))
+    terms = _history_query_terms(query)
+    clauses = ["h.role IN ('user','assistant')"]
+    params: list[Any] = []
+    if start_time:
+        clauses.append("h.created_at >= ?")
+        params.append(str(start_time).replace("T", " ")[:19])
+    if end_time:
+        clauses.append("h.created_at < ?")
+        params.append(str(end_time).replace("T", " ")[:19])
+    if conversation_id:
+        clauses.append("h.conversation_id = ?")
+        params.append(normalize_conversation_id(conversation_id))
+    if int(before_id or 0) > 0:
+        # Historical recall is built after the current user row is persisted.
+        # Excluding that row prevents a generic search from "remembering" the
+        # question that asked for the memory instead of the older conversation.
+        clauses.append("h.id < ?")
+        params.append(int(before_id))
+    where = " AND ".join(clauses)
+    rows = []
+    with _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        fts_failed = False
+        if terms and _FTS_AVAILABLE.get(_db_key(), False):
+            try:
+                rows = conn.execute(
+                    f"""
+                    SELECT h.id, h.conversation_id, c.title, h.role, h.content, h.created_at,
+                           bm25(chat_history_fts) AS rank
+                    FROM chat_history_fts
+                    JOIN chat_history h ON h.id = chat_history_fts.rowid
+                    LEFT JOIN conversations c ON c.id = h.conversation_id
+                    WHERE chat_history_fts MATCH ? AND {where}
+                    ORDER BY rank ASC, h.created_at DESC, h.id DESC
+                    LIMIT ?
+                    """,
+                    [_fts_query(terms), *params, limit],
+                ).fetchall()
+            except sqlite3.OperationalError:
+                fts_failed = True
+        if terms and (not _FTS_AVAILABLE.get(_db_key(), False) or fts_failed):
+            like_clauses = []
+            like_params: list[Any] = []
+            for term in terms:
+                like_clauses.append("LOWER(h.content) LIKE ?")
+                like_params.append(f"%{term}%")
+            rows = conn.execute(
+                f"""
+                SELECT h.id, h.conversation_id, c.title, h.role, h.content, h.created_at, 0.0 AS rank
+                FROM chat_history h LEFT JOIN conversations c ON c.id=h.conversation_id
+                WHERE {where} AND ({' OR '.join(like_clauses)})
+                ORDER BY h.created_at DESC, h.id DESC LIMIT ?
+                """,
+                [*params, *like_params, limit],
+            ).fetchall()
+        elif not terms:
+            rows = conn.execute(
+                f"""
+                SELECT h.id, h.conversation_id, c.title, h.role, h.content, h.created_at, 0.0 AS rank
+                FROM chat_history h LEFT JOIN conversations c ON c.id=h.conversation_id
+                WHERE {where}
+                ORDER BY h.created_at DESC, h.id DESC LIMIT ?
+                """,
+                [*params, limit],
+            ).fetchall()
+    # Present selected evidence chronologically so the small model can reconstruct
+    # the conversation without having to undo relevance/recency ordering itself.
+    result = [
+        {
+            "id": int(row["id"]), "conversation_id": str(row["conversation_id"] or ""),
+            "title": str(row["title"] or "Conversation"), "role": str(row["role"] or ""),
+            "content": str(row["content"] or ""), "created_at": str(row["created_at"] or ""),
+        }
+        for row in rows
+    ]
+    result.sort(key=lambda item: (item["created_at"], item["id"]))
+    return result
+
+
+def search_conversation_history(
+    query: str = "", start_time: str = "", end_time: str = "",
+    conversation_id: str = "", limit: int = 20,
+) -> str:
+    """Search timestamped saved chat history across conversations."""
+    rows = search_conversation_history_records(
+        query, start_time=start_time, end_time=end_time, conversation_id=conversation_id, limit=limit,
+    )
+    return json.dumps(rows, ensure_ascii=False, indent=2) if rows else "No matching conversation history found."
 
 def _cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
     if not vec1 or not vec2 or len(vec1) != len(vec2):
@@ -503,7 +784,7 @@ def remember_semantic(topic: str = "general_knowledge", fact: str = "") -> str:
     except Exception as exc:
         return f"Error: embedding generation failed: {exc}"
 
-    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+    with _connect() as conn:
         conn.execute(
             "INSERT INTO semantic_memory(topic, fact, embedding) VALUES (?, ?, ?)",
             (str(topic), str(fact), embedding_json),
@@ -526,7 +807,7 @@ def search_semantic_memory(query: str = "", limit: int = 5) -> str:
     except Exception:
         return search_memory(query, limit=limit)
 
-    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+    with _connect() as conn:
         rows = conn.execute("SELECT topic, fact, embedding FROM semantic_memory").fetchall()
 
     scored = []
@@ -573,7 +854,7 @@ def check_background_task(task_name: str = "") -> str:
     """Return legacy background task state if one exists."""
     if not task_name:
         return "Error: Missing required 'task_name' parameter."
-    with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
+    with _connect() as conn:
         row = conn.execute("SELECT status, output, timestamp FROM background_tasks WHERE task_name = ?", (task_name,)).fetchone()
     return json.dumps({"task_name": task_name, "status": row[0], "output": row[1], "timestamp": row[2]}) if row else f"No legacy background task named '{task_name}'."
 

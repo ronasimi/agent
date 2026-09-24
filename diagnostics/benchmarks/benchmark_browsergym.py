@@ -2,8 +2,8 @@
 """Run an optional BrowserGym task through an external policy callable.
 
 Example:
-  python scripts/benchmark_browsergym.py --probe
-  python scripts/benchmark_browsergym.py --env browsergym/miniwob.click-test \
+  python diagnostics/benchmarks/benchmark_browsergym.py --probe
+  python diagnostics/benchmarks/benchmark_browsergym.py --env browsergym/miniwob.click-test \
       --policy my_policy:decide
 
 The policy signature is ``decide(observation, budget_snapshot)`` and may return
@@ -18,7 +18,7 @@ import json
 from pathlib import Path
 import sys
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
