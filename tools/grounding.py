@@ -16,7 +16,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from .task_requirements import (
     classify_request_intent, derive_fact_frames, derive_task_frame, is_implementation_request,
-    is_news_fact_request, is_weather_fact_request,
+    is_news_fact_request, is_nonexecuting_tool_selection_request, is_weather_fact_request,
 )
 from .market import extract_market_instruments, is_market_price_request
 
@@ -162,6 +162,8 @@ def requested_fact_types(
 ) -> set[str]:
     """Return fact types with deterministic grounding policies for this request."""
     text = " ".join(str(user_request or "").split())
+    if is_nonexecuting_tool_selection_request(user_request):
+        return set()
     frame = dict(task_frame or {})
     result: set[str] = set()
     result.update(str(key) for key in dict(fact_frames or {}) if str(key))

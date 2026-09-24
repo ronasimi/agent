@@ -331,6 +331,8 @@ def classify_request_intent(user_text: str) -> str:
     """Classify only explicit operational/live-fact intents for task framing."""
     text = " ".join(str(user_text or "").strip().split())
     lower = text.lower()
+    if is_nonexecuting_tool_selection_request(text):
+        return ""
     implementation = is_implementation_request(text)
     if is_weather_fact_request(text):
         return "weather"
@@ -671,6 +673,48 @@ _FACT_FRAME_ANCHORS: dict[str, re.Pattern[str]] = {
     "repository_state": re.compile(r"\b(?:repo(?:sitory)? (?:status|diff|health)|git status|git diff)\b", re.I),
     "market_price": re.compile(r"\b(?:price|prices|quote|quotes|trading at|worth|wti|brent|crude oil|gold|silver|natural gas|copper)\b", re.I),
 }
+
+_NONEXECUTING_TOOL_SELECTION_RE = re.compile(
+    r"(?:"
+    r"^\s*(?:\d{1,3}[.)]\s*)?(?:#{1,6}\s*)?tool\s+selection\b|"
+    r"\b(?:identify|name|choose|select|compare|map)\b.{0,120}\b(?:tool|tools|primitive|primitives|capabilit(?:y|ies))\b"
+    r")",
+    re.I | re.S,
+)
+_NONEXECUTION_QUALIFIER_RE = re.compile(
+    r"\b(?:without\s+(?:executing|running|calling|invoking|using)|"
+    r"do\s+not\s+(?:execute|run|call|invoke|use)|"
+    r"don't\s+(?:execute|run|call|invoke|use)|"
+    r"before\s+(?:executing|running|calling|invoking|using))\b",
+    re.I,
+)
+
+
+def is_nonexecuting_tool_selection_request(user_text: str) -> bool:
+    """Return whether a request asks to *identify* tools, not execute them.
+
+    Tool-routing audits frequently contain fact-like nouns (``current weather``,
+    ``repository status``, ``DNS lookup``) as examples of intents.  Treating
+    those nouns as live requests creates grounding requirements and can copy the
+    surrounding audit prose into tool parameters.  This predicate is purposely
+    narrow: either the step is explicitly headed ``Tool Selection`` or it
+    contains both selection language and a clear non-execution qualifier.
+
+    A large multi-step objective containing such a step is not classified as a
+    selection-only request; the structured-plan scheduler will pass the atomic
+    step here after decomposition.
+    """
+    raw = str(user_text or "").strip()
+    if not raw:
+        return False
+    # A complete multi-step specification is not itself a selection-only turn.
+    if len(re.findall(r"(?m)^\s*#{1,6}\s+\d{1,3}[.)]\s+", raw)) >= 2:
+        return False
+    text = " ".join(raw.split())
+    headed = bool(re.match(r"^\s*(?:\d{1,3}[.)]\s*)?(?:#{1,6}\s*)?tool\s+selection\b", text, re.I))
+    selected = bool(_NONEXECUTING_TOOL_SELECTION_RE.search(text))
+    no_execute = bool(_NONEXECUTION_QUALIFIER_RE.search(text))
+    return bool(headed or (selected and no_execute))
 _COMPOUND_CONNECTOR_RE = re.compile(r"\b(?:and|as\s+well\s+as|along\s+with|plus)\b|;", re.I)
 _ALL_TIME_MODIFIER_RE = re.compile(
     r"\b(?:latest|recent|current|today(?:'s)?|tomorrow|tonight|now|right\s+now|"
@@ -686,6 +730,8 @@ def detect_fact_frame_types(user_text: str) -> set[str]:
     raw = str(user_text or "")
     text = " ".join(raw.strip().split())
     if not text:
+        return set()
+    if is_nonexecuting_tool_selection_request(raw):
         return set()
     tool_recipe_requirements = derive_tool_recipe_stress_requirements(raw)
     if tool_recipe_requirements:
@@ -986,18 +1032,53 @@ def effective_request_for_frame(user_text: str, frame: dict[str, Any] | None) ->
 
 def _extract_target(tool: str, text: str) -> str:
     lower = str(text or "")
+    if is_nonexecuting_tool_selection_request(lower):
+        return ""
+
+    def clean(candidate: str) -> str:
+        return str(candidate or "").strip().strip("`'").rstrip(".,);:]}`'")
+
+    def plausible_host(candidate: str) -> str:
+        value = clean(candidate).lower()
+        if not value:
+            return ""
+        generic = {
+            "request", "requests", "lookup", "lookups", "resolution", "diagnosis", "diagnose",
+            "server", "servers", "resolver", "resolvers", "record", "records", "use", "using",
+            "report", "reported", "available", "supported", "tool", "tools", "primitive", "primitives",
+        }
+        if value in generic:
+            return ""
+        if value == "localhost":
+            return value
+        # Permit IP literals, FQDNs, and ordinary single-label hostnames only
+        # after an explicit action form such as ``resolve HOST``/``traceroute HOST``.
+        if re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,252}[a-z0-9]", value) or re.fullmatch(r"[a-z0-9]", value):
+            return value
+        if ":" in value and re.fullmatch(r"[0-9a-f:]+", value):
+            return value
+        return ""
+
     if tool == "dns_diagnose":
-        match = re.search(r"\bresolve\s+([a-z0-9.-]+)", lower, re.I) or re.search(r"\bdns(?: lookup| resolution| diagnose)?\s+(?:for\s+)?([a-z0-9.-]+)", lower, re.I)
-        return str(match.group(1)).lower().rstrip(".") if match else ""
+        # ``DNS requests`` and ``DNS lookup`` are frequently descriptive prose,
+        # not targets.  Require either an explicit resolve verb or a lookup form
+        # with an actual following target.
+        match = re.search(r"\bresolve\s+([a-z0-9.:-]+)", lower, re.I)
+        if match:
+            return plausible_host(match.group(1))
+        match = re.search(r"\bdns\s+(?:lookup|resolution|diagnosis|diagnose)\s+(?:for\s+|of\s+)?([a-z0-9.:-]+)", lower, re.I)
+        return plausible_host(match.group(1)) if match else ""
     if tool in {"http_probe", "browse_url"}:
         match = re.search(r"https?://[^\s<>'\"]+", lower, re.I)
-        return match.group(0).rstrip(".,)") if match else ""
+        return clean(match.group(0)) if match else ""
     if tool == "read_file":
         match = re.search(r"\bread\s+(?:the\s+)?(?:file\s+)?((?:/|\./|\.\./)[^\s,;]+)", lower, re.I)
-        return match.group(1).rstrip(".,)") if match else ""
+        return clean(match.group(1)) if match else ""
     if tool == "network_path":
-        match = re.search(r"\b(?:traceroute|mtr|network path(?: to)?)\s+([a-z0-9.:-]+)", lower, re.I)
-        return str(match.group(1)).lower() if match else ""
+        match = re.search(r"\b(?:traceroute|mtr)\s+([a-z0-9.:-]+)", lower, re.I)
+        if not match:
+            match = re.search(r"\bnetwork\s+path\s+to\s+([a-z0-9.:-]+)", lower, re.I)
+        return plausible_host(match.group(1)) if match else ""
     return ""
 
 
@@ -1540,6 +1621,8 @@ def _scope_matches(
 def derive_requirements(user_text: str) -> list[Requirement]:
     """Return ordered, deduplicated requirements explicitly present in a request."""
     text = str(user_text or "")
+    if is_nonexecuting_tool_selection_request(text):
+        return []
     generalized_recipe_stress = derive_generalized_recipe_stress_requirements(text)
     if generalized_recipe_stress:
         return generalized_recipe_stress

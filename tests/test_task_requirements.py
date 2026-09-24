@@ -388,3 +388,35 @@ def test_generic_weather_followups_inherit_location_instead_of_question_words():
     toronto = derive_task_frame("And Toronto?", tomorrow, default_location="London, Ontario, Canada")
     assert toronto["entity"] == "Toronto"
     assert toronto["time_scope"] == "tomorrow"
+
+
+def test_tool_selection_audit_is_not_reparsed_as_live_fact_work():
+    from tools.grounding import requested_fact_types
+    from tools.task_requirements import (
+        derive_fact_frames,
+        derive_requirements,
+        derive_task_frame,
+        is_nonexecuting_tool_selection_request,
+    )
+
+    request = (
+        "3. Tool Selection: For each of these intents, identify the most appropriate primitive "
+        "without executing it yet: * current time * CPU information * memory usage * network routes "
+        "* DNS lookup * current weather * public webpage retrieval * repository status "
+        "* reading a local file * parsing JSON * running a calculation * historical conversation recall."
+    )
+    assert is_nonexecuting_tool_selection_request(request)
+    assert derive_task_frame(request) == {}
+    assert derive_fact_frames(request) == {}
+    assert requested_fact_types(request) == set()
+    assert derive_requirements(request) == []
+
+
+def test_target_extraction_rejects_instruction_prose_and_strips_markdown():
+    from tools.task_requirements import _extract_target
+
+    assert _extract_target("dns_diagnose", "Do not probe systems except through ordinary public HTTP/DNS requests.") == ""
+    assert _extract_target("network_path", "Network Path: Use a safe path/traceroute-style primitive if available.") == ""
+    assert _extract_target("dns_diagnose", "Resolve example.com using the DNS primitive.") == "example.com"
+    assert _extract_target("network_path", "Use the network path to example.com and report the hops.") == "example.com"
+    assert _extract_target("browse_url", "Fetch `https://example.com` and report the title.") == "https://example.com"

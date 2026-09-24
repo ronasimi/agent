@@ -373,3 +373,51 @@ def test_turn_engine_never_sends_future_steps_to_main_model(monkeypatch, tmp_pat
     # Full completed scheduler results become visible only to the final synthesis.
     assert "ACTIVE_ALPHA" in final and "FUTURE_BETA" in final and "FUTURE_GAMMA" in final
     assert messages[-1]["content"] == "combined complete"
+
+
+def test_explicit_numbered_plan_does_not_attach_next_phase_heading():
+    from al_agent.fast_tasks import compile_structured_plan
+
+    class CompilerMustNotRun:
+        def chat(self, **kwargs):
+            raise AssertionError("explicit numbered requirements should bypass the compiler")
+
+    prompt = """# Audit
+Treat every numbered requirement below as independent.
+
+# PHASE 1 — DISCOVERY
+## 1. Tool Selection
+Identify the appropriate primitive without executing it.
+
+# PHASE 2 — HOST
+## 2. Host Snapshot
+Collect the host snapshot.
+
+# FINAL REPORT
+Summarize the results.
+"""
+    plan = compile_structured_plan(
+        CompilerMustNotRun(), model="agent-main:2b", objective=prompt,
+        min_chars=10, min_commands=2, max_steps=96,
+    )
+    assert len(plan) == 2
+    assert plan[0] == "1. Tool Selection: Identify the appropriate primitive without executing it."
+    assert "PHASE 2" not in plan[0]
+
+
+def test_selection_only_capability_digest_uses_metadata_not_executable_calls():
+    from al_agent.turn_engine import _selection_only_capability_digest
+
+    request = (
+        "3. Tool Selection: identify the most appropriate primitive without executing it yet: "
+        "* current time * CPU information * memory usage * network routes * DNS lookup "
+        "* current weather * public webpage retrieval * repository status * reading a local file "
+        "* parsing JSON * running a calculation * historical conversation recall"
+    )
+    digest = _selection_only_capability_digest(request)
+    for name in (
+        "current_time", "cpu_info", "memory_info", "route_list", "dns_query", "weather_forecast",
+        "browse_url", "repo_status", "read_file", "json_query", "calculate", "search_conversation_history",
+    ):
+        assert name in digest
+    assert "DO NOT execute these tools" in digest

@@ -107,6 +107,10 @@ def _explicit_numbered_requirement_plan(user_text: str, max_steps: int) -> list[
         title = re.sub(r"\s+", " ", match.group(2)).strip()
         section_end = matches[idx + 1].start() if idx + 1 < len(matches) else len(source)
         body = source[match.end():section_end]
+        # Markdown phase headings belong to the document structure, not to the
+        # preceding atomic requirement. Keeping ``# PHASE 2`` attached to step 3
+        # pollutes intent/fact extraction and can later become a tool parameter.
+        body = re.split(r"(?mi)^\s*#{1,6}\s+PHASE\b", body, maxsplit=1)[0]
         # A final non-numbered report/output section belongs to synthesis, not
         # the last executable requirement.
         body = re.split(r"(?mi)^\s*#{1,6}\s+(?:FINAL\s+REPORT|OUTPUT\b)", body, maxsplit=1)[0]

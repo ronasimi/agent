@@ -293,3 +293,29 @@ def test_qwen_xml_recovery_uses_registry_validation_and_allows_supplied_mutator(
     calls, errors = turn_support._recover_qwen_xml_tool_calls(text, {"write_file"})
     assert errors == []
     assert calls[0]["function"]["arguments"] == {"filename": "note.txt", "content": "hello"}
+
+
+def test_prompt_sized_selector_argument_is_suppressed_before_execution():
+    from al_agent.turn_support import _sanitize_prompt_leaking_tool_calls
+
+    active = (
+        "# PHASE 3 — WEB\n\nSafety Rules\nTreat every numbered requirement below as independent.\n"
+        + "Inspect the active subsystem and report verified evidence. " * 30
+    )
+    calls = [{
+        "id": "leak",
+        "type": "function",
+        "function": {"name": "web_search", "arguments": {"query": active}},
+    }]
+    accepted, notes = _sanitize_prompt_leaking_tool_calls(calls, active)
+    assert accepted == []
+    assert any("prompt/control-text leak" in note for note in notes)
+
+    normal = [{
+        "id": "ok",
+        "type": "function",
+        "function": {"name": "web_search", "arguments": {"query": "OpenAI official website"}},
+    }]
+    accepted, notes = _sanitize_prompt_leaking_tool_calls(normal, active)
+    assert accepted == normal
+    assert notes == []

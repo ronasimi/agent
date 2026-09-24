@@ -310,6 +310,73 @@ def _sanitize_tool_call_batch(
             mutating += 1
     return accepted, notes
 
+
+_PROMPT_ARGUMENT_STRUCTURAL_MARKERS = (
+    "# phase ", "## phase ", "### phase ", "safety rules", "final report",
+    "treat every numbered requirement", "harness scheduler", "current request",
+    "harness working state", "runtime contract", "pending requirements",
+)
+_PROMPT_ARGUMENT_PAYLOAD_KEYS = {"content", "code", "command", "script", "body", "data"}
+
+
+def _sanitize_prompt_leaking_tool_calls(
+    calls: list[dict[str, Any]],
+    active_request: str,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Reject tool calls whose selector arguments contain copied prompt/control text.
+
+    Small local models occasionally copy a large scheduler/audit prompt into a
+    ``query``, ``target``, ``name`` or similar argument.  Schema validation alone
+    cannot catch that because the value is still a valid string.  This guard is
+    deliberately conservative: it ignores payload fields where long literal
+    content is expected and rejects only large structured copies or distinctive
+    harness/control text.
+    """
+    request = re.sub(r"\s+", " ", str(active_request or "")).strip().lower()
+    accepted: list[dict[str, Any]] = []
+    notes: list[str] = []
+
+    def leaked(key: str, value: Any) -> bool:
+        if str(key or "").lower() in _PROMPT_ARGUMENT_PAYLOAD_KEYS or not isinstance(value, str):
+            return False
+        raw = str(value or "")
+        if len(raw) < 180:
+            return False
+        probe = re.sub(r"\s+", " ", raw).strip().lower()
+        marker_hits = sum(marker in probe for marker in _PROMPT_ARGUMENT_STRUCTURAL_MARKERS)
+        if marker_hits >= 1 and len(probe) >= 240:
+            return True
+        if request and len(request) >= 240:
+            # Exact/near-exact copies of the active structured request should
+            # never be used as a selector parameter.  Prefix/suffix clipping is
+            # included because models often truncate the copied prompt.
+            if probe == request:
+                return True
+            shorter, longer = (probe, request) if len(probe) <= len(request) else (request, probe)
+            if len(shorter) >= 240 and shorter in longer and len(shorter) / max(1, len(longer)) >= 0.72:
+                return True
+        return False
+
+    for call in calls:
+        function = call.get("function", {}) if isinstance(call, dict) else {}
+        name = str(function.get("name") or "")
+        arguments = function.get("arguments", {})
+        bad_keys: list[str] = []
+        if isinstance(arguments, dict):
+            for key, value in arguments.items():
+                if leaked(str(key), value):
+                    bad_keys.append(str(key))
+                elif isinstance(value, list):
+                    if any(leaked(str(key), item) for item in value):
+                        bad_keys.append(str(key))
+        if bad_keys:
+            notes.append(
+                f"suppressed prompt/control-text leak in {name} argument(s): {', '.join(sorted(set(bad_keys)))}"
+            )
+            continue
+        accepted.append(call)
+    return accepted, notes
+
 def _tool_status_prefix(success: bool, reason: str, status: str = "") -> str:
     resolved = str(status or ("ok" if success else "error"))
     if resolved == "ok":

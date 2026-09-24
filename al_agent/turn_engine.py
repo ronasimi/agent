@@ -48,7 +48,8 @@ from tools.runtime import create_singleton_job, record_monitor_state, utc_now
 from tools.conversation_context import get_active_conversation_id
 from tools.task_requirements import (
     TaskRequirementLedger, build_news_query, derive_fact_frames, derive_task_frame, effective_request_for_frame,
-    is_evidence_reuse_request, is_task_continuation, news_region_for_frame, select_primary_fact_frame,
+    is_evidence_reuse_request, is_nonexecuting_tool_selection_request, is_task_continuation,
+    news_region_for_frame, select_primary_fact_frame,
 )
 from tools.turn_policy import derive_turn_tool_policy
 from tools.user_profile import get_relevant_user_prompt_context, get_user_location, resolve_profile_fact_query
@@ -82,7 +83,7 @@ from .turn_support import (
     _ensure_tool_schemas, _execute_registered_tool, _finalize_after_limit, _parse_tool_calls,
     _recover_qwen_xml_tool_calls, _recover_textual_readonly_tool_call,
     _prune_compacted_history, _queue_compaction_if_needed, _refresh_requirement_tool_schemas,
-    _sanitize_tool_call_batch, _suppress_completed_requirement_calls, _tool_status_prefix,
+    _sanitize_prompt_leaking_tool_calls, _sanitize_tool_call_batch, _suppress_completed_requirement_calls, _tool_status_prefix,
     _looks_like_prompt_policy_leak, _prune_mismatched_fact_tools, _selection_context_for_turn,
 )
 
@@ -112,6 +113,81 @@ def _bounded_active_schemas(
     )
     limit = max(max(1, int(cap)), len(ordered[: len(required)]))
     return ordered[:limit]
+
+
+def _selection_only_capability_digest(request: str, max_candidates: int = 24) -> str:
+    """Render compact registry candidates for a no-execution tool-selection task.
+
+    The model needs tool *metadata* to answer routing questions, but native tool
+    schemas would make those tools executable.  Build a small text-only index
+    from the harness catalog instead.  Bulleted intent lists are scored item by
+    item so one broad phrase cannot crowd every other intent out of the digest.
+    """
+    raw = str(request or "")
+    parts = [re.sub(r"\s+", " ", part).strip(" ,.;:-") for part in re.split(r"\s*\*\s*", raw)]
+    parts = [part for part in parts if part]
+    # Drop the leading instruction and trailing prose when a star-delimited list
+    # is present; each actual item gets its own catalog lookup.
+    if len(parts) >= 4:
+        intents = parts[1:]
+    else:
+        intents = [raw]
+
+    canonical_hints: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
+        (re.compile(r"\bcurrent\s+time\b", re.I), ("current_time",)),
+        (re.compile(r"\bcpu\s+(?:information|info|usage)\b", re.I), ("cpu_info",)),
+        (re.compile(r"\bmemory\s+(?:usage|information|info)\b", re.I), ("memory_info",)),
+        (re.compile(r"\bnetwork\s+routes?\b", re.I), ("route_list", "route_lookup")),
+        (re.compile(r"\bdns\s+(?:lookup|query|resolution)\b", re.I), ("dns_query", "dns_diagnose")),
+        (re.compile(r"\bcurrent\s+weather\b|\bweather\s+(?:forecast|conditions)\b", re.I), ("weather_forecast",)),
+        (re.compile(r"\bpublic\s+webpage\s+retrieval\b|\bwebpage\s+retrieval\b", re.I), ("browse_url", "fetch_url")),
+        (re.compile(r"\brepository\s+status\b|\brepo\s+status\b", re.I), ("repo_status",)),
+        (re.compile(r"\breading\s+(?:a\s+)?local\s+file\b|\bread\s+(?:a\s+)?local\s+file\b", re.I), ("read_file",)),
+        (re.compile(r"\bparsing\s+json\b|\bjson\s+(?:parse|query)\b", re.I), ("json_query", "json_keys")),
+        (re.compile(r"\brunning\s+(?:a\s+)?calculation\b|\bcalculation\b", re.I), ("calculate",)),
+        (re.compile(r"\bhistorical\s+conversation\s+recall\b|\bconversation\s+history\b", re.I), ("search_conversation_history",)),
+    )
+
+    rows: list[str] = []
+    seen: set[str] = set()
+    for intent in intents[:16]:
+        preferred: list[dict[str, Any]] = []
+        for pattern, names in canonical_hints:
+            if not pattern.search(intent):
+                continue
+            for name in names:
+                schema = get_tool_schema(name)
+                if schema:
+                    preferred.append(schema)
+            break
+        schemas = preferred or select_tool_schemas(intent, max_tools=2, context_text="", active_task=intent)
+        candidates: list[str] = []
+        for schema in schemas:
+            function = schema.get("function", {}) if isinstance(schema, dict) else {}
+            name = str(function.get("name") or "")
+            if not name:
+                continue
+            description = re.sub(r"\s+", " ", str(function.get("description") or "")).strip()
+            candidates.append(f"{name} — {description[:180]}")
+            seen.add(name)
+        if candidates:
+            label = re.sub(r"\s+", " ", intent).strip()[:120]
+            rows.append(f"- {label}: " + "; ".join(candidates))
+        if len(seen) >= max_candidates:
+            break
+
+    if not rows:
+        for schema in select_tool_schemas(raw, max_tools=max_candidates, context_text="", active_task=raw):
+            function = schema.get("function", {}) if isinstance(schema, dict) else {}
+            name = str(function.get("name") or "")
+            if not name:
+                continue
+            description = re.sub(r"\s+", " ", str(function.get("description") or "")).strip()
+            rows.append(f"- {name}: {description[:180]}")
+    return (
+        "[Harness capability candidates — metadata only; DO NOT execute these tools]\n"
+        + "\n".join(rows[:max_candidates])
+    ) if rows else ""
 
 
 def handle_user_turn(
@@ -317,6 +393,7 @@ def handle_user_turn(
 
         plan_enabled = WORKING_STATE_ENABLED and len(compiled_steps) >= 2
         active_request = compiled_steps[0] if plan_enabled else user_input
+        selection_only = is_nonexecuting_tool_selection_request(active_request)
         legacy_task_frame = derive_task_frame(
             active_request,
             previous_frame if continuation else {},
@@ -331,8 +408,13 @@ def handle_user_turn(
         )
         task_frame = select_primary_fact_frame(fact_frames, legacy_task_frame)
         effective_request = effective_request_for_frame(active_request, task_frame)
-        requirement_request = user_input if plan_enabled else (effective_request if continuation else user_input)
-        requirement_ledger = _task_requirement_ledger_cls.from_request(requirement_request)
+        requirement_request = effective_request if continuation else user_input
+        # Once a structured scheduler exists it is the authoritative durable
+        # representation of the full objective. Re-parsing the original giant
+        # prompt into a second lexical requirement ledger leaks future-step text
+        # back into the model-facing state and can create bogus targets such as
+        # ``DNS requests`` -> ``requests``. Keep only the active step ledger.
+        requirement_ledger = _task_requirement_ledger_cls.from_request("" if plan_enabled else requirement_request)
         active_requirement_ledger = (
             _task_requirement_ledger_cls.from_request(active_request)
             if plan_enabled else requirement_ledger
@@ -350,12 +432,16 @@ def handle_user_turn(
             existing = str(observation_id or "").strip()
             if existing or str(tool_name or "") == "read_observation":
                 return existing
+            ledgers = [requirement_ledger]
+            if active_requirement_ledger is not requirement_ledger:
+                ledgers.append(active_requirement_ledger)
             key_matches = bool(requirement_key) and any(
-                item.key == str(requirement_key) for item in requirement_ledger.requirements
+                item.key == str(requirement_key)
+                for ledger in ledgers for item in ledger.requirements
             )
             tool_matches = any(
                 item.tool == str(tool_name or "") and not bool((item.scope or {}).get("derived"))
-                for item in requirement_ledger.requirements
+                for ledger in ledgers for item in ledger.requirements
             )
             if not (key_matches or tool_matches):
                 return ""
@@ -412,7 +498,7 @@ def handle_user_turn(
         recipe_preflight = {
             "status": "disabled", "checked": False, "candidates": [], "relevant": [], "error": "",
         }
-        if RECIPES_ENABLED:
+        if RECIPES_ENABLED and not selection_only:
             recipe_preflight = check_recipes_for_task(
                 active_request, threshold=_recipe_match_threshold, limit=RECIPE_PREFLIGHT_LIMIT,
             )
@@ -446,7 +532,8 @@ def handle_user_turn(
             if plan_enabled else
             min(REQUIREMENT_TOOL_CAP, max(MAX_TOOLS_PER_TURN, len(required_tools) + 4))
         )
-        selected_tool_schemas = select_tool_schemas(
+        selection_only_candidates = _selection_only_capability_digest(active_request) if selection_only else ""
+        selected_tool_schemas = [] if selection_only else select_tool_schemas(
             selection_text,
             max_tools=selection_limit,
             context_text="" if historical_recall and not selection_text else recent_selection_context,
@@ -622,6 +709,8 @@ def handle_user_turn(
             )
         if RECIPES_ENABLED:
             request_context.append(render_recipe_preflight(recipe_preflight))
+        if selection_only_candidates:
+            request_context.append(selection_only_candidates)
         if recalled_context and not WORKING_STATE_ENABLED:
             request_context.append("### Relevant stored context\n" + recalled_context)
         if request_context:
@@ -653,7 +742,7 @@ def handle_user_turn(
                 recent_messages=messages[-10:-1],
                 policy_note=policy_note,
                 tool_schemas=tool_schemas,
-                requirements=requirement_ledger.as_list(),
+                requirements=(active_requirement_ledger if plan_enabled else requirement_ledger).as_list(),
                 continuation=continuation,
                 task_frame=task_frame,
                 fact_frames=fact_frames,
@@ -980,8 +1069,20 @@ def handle_user_turn(
                 blocked.extend(active_requirement_ledger.block_exhausted(MAX_RECOVERY_ATTEMPTS_PER_REQUIREMENT))
                 blocked = list(dict.fromkeys(blocked))
             if blocked and WORKING_STATE_ENABLED:
-                WORKING_STATE.update_requirements(requirement_ledger.as_list())
+                update_working_requirements()
             return blocked
+
+        def update_working_requirements() -> None:
+            """Render only the current scheduler step's requirement ledger.
+
+            The complete multi-step objective already lives in ``scheduler``.
+            Mirroring a second whole-prompt lexical ledger into working state
+            defeats scheduler isolation and reintroduces future-step prompt text.
+            """
+            if not WORKING_STATE_ENABLED:
+                return
+            ledger = active_requirement_ledger if plan_enabled else requirement_ledger
+            WORKING_STATE.update_requirements(ledger.as_list())
 
         def canonical_tool_arguments(tool_name: str, raw_args: Any) -> Any:
             """Apply harness-owned scope to arguments a small model must not guess."""
@@ -1189,7 +1290,7 @@ def handle_user_turn(
             current_snapshot = json.dumps(fact_grounding_ledger.as_list(), ensure_ascii=False, sort_keys=True)
             if WORKING_STATE_ENABLED and current_snapshot != fact_ledger_snapshot:
                 WORKING_STATE.update_fact_requirements(fact_grounding_ledger.as_list())
-                WORKING_STATE.update_requirements(requirement_ledger.as_list())
+                update_working_requirements()
                 fact_ledger_snapshot = current_snapshot
             report["fact_requirements"] = fact_grounding_ledger.as_list()
             return report
@@ -1312,7 +1413,7 @@ def handle_user_turn(
                 record_local_grounding("recipe:weather.current_forecast", raw, status, {"request": effective_request})
                 record_recipe_stage_requirements(result, reason="grounding_weather_recovery")
                 if WORKING_STATE_ENABLED:
-                    WORKING_STATE.update_requirements(requirement_ledger.as_list())
+                    update_working_requirements()
                 context = (
                     "[Harness grounding recovery: weather.current_forecast; status=ok]\n"
                     "The hard grounding gate found no qualifying weather evidence and executed the builtin "
@@ -1386,6 +1487,7 @@ def handle_user_turn(
             main-model prompt and catalog selector.
             """
             nonlocal active_request, active_requirement_ledger, task_frame, fact_frames
+            nonlocal selection_only, selection_only_candidates
             nonlocal required_fact_types, fact_grounding_ledger, fact_ledger_snapshot
             nonlocal effective_request, required_tools, grounding_recovery_attempted, grounding_discards
             nonlocal last_weather_recovery_result, last_news_search_content, last_news_search_attempt
@@ -1404,9 +1506,10 @@ def handle_user_turn(
             complete = bool(steps) and index >= len(steps)
             if complete:
                 clear_control_note("[Harness scheduler] Active requirement ")
+                clear_control_note("[Harness capability candidates")
                 tool_schemas.clear()
                 WORKING_STATE.update_tools(tool_schemas)
-                WORKING_STATE.update_requirements(requirement_ledger.as_list())
+                update_working_requirements()
                 emit_event("structured_plan_step", status=status, complete=True, step_count=len(steps))
                 return False, True
 
@@ -1414,6 +1517,8 @@ def handle_user_turn(
             if not next_task:
                 return False, False
             active_request = next_task
+            selection_only = is_nonexecuting_tool_selection_request(active_request)
+            selection_only_candidates = _selection_only_capability_digest(active_request) if selection_only else ""
             active_requirement_ledger = _task_requirement_ledger_cls.from_request(active_request)
             legacy = derive_task_frame(active_request, {}, default_location=default_location)
             active_fact_types = requested_fact_types(active_request, task_frame=legacy) if GROUNDING_ENABLED else set()
@@ -1454,7 +1559,7 @@ def handle_user_turn(
             required_tools = active_requirement_ledger.required_tools()
             turn_tool_policy.allow_explicit_requirements(set(required_tools), TOOL_METADATA)
             step_limit = min(REQUIREMENT_TOOL_CAP, max(STRUCTURED_PLAN_MAX_TOOLS, len(required_tools)))
-            next_schemas = select_tool_schemas(
+            next_schemas = [] if selection_only else select_tool_schemas(
                 active_request,
                 max_tools=step_limit,
                 context_text="",
@@ -1487,7 +1592,7 @@ def handle_user_turn(
 
             tool_schemas[:] = _bounded_active_schemas(
                 next_schemas, required_tools, STRUCTURED_PLAN_MAX_TOOLS,
-            )
+            ) if not selection_only else []
             model_user_msg["content"] = active_request
             WORKING_STATE.update_tools(tool_schemas)
             WORKING_STATE.update_active_context(
@@ -1495,7 +1600,10 @@ def handle_user_turn(
                 fact_frames=fact_frames,
                 fact_requirements=fact_grounding_ledger.as_list(),
             )
-            WORKING_STATE.update_requirements(requirement_ledger.as_list())
+            update_working_requirements()
+            clear_control_note("[Harness capability candidates")
+            if selection_only_candidates:
+                append_control_note(selection_only_candidates)
             replace_control_note(
                 "[Harness scheduler] Active requirement ",
                 f"[Harness scheduler] Active requirement {index + 1}/{len(steps)}: {active_request}\n"
@@ -1618,7 +1726,7 @@ def handle_user_turn(
                 record_local_grounding(f"recipe:{recipe_name}", raw, status)
                 record_recipe_stage_requirements(result, reason="validator_recipe")
                 if WORKING_STATE_ENABLED:
-                    WORKING_STATE.update_requirements(requirement_ledger.as_list())
+                    update_working_requirements()
                 if RECIPES_ENABLED and RECIPE_SUGGEST:
                     try:
                         trace = [
@@ -1703,7 +1811,7 @@ def handle_user_turn(
                 else:
                     mark_requirement_blocked(name, "blocked by explicit turn tool policy")
                 if WORKING_STATE_ENABLED:
-                    WORKING_STATE.update_requirements(requirement_ledger.as_list())
+                    update_working_requirements()
                 return False
             emit_event("tool_start", name=name, arguments=args, harness_recovery=True)
             try:
@@ -1775,7 +1883,7 @@ def handle_user_turn(
                     result_text=result_content, fingerprint=str(outcome.get("fingerprint") or ""),
                     observation_id=observation_id,
                 )
-                WORKING_STATE.update_requirements(requirement_ledger.as_list())
+                update_working_requirements()
             if success:
                 if name == "read_observation":
                     satisfy_truncated_observation_read(normalized, result_content, True)
@@ -1830,7 +1938,7 @@ def handle_user_turn(
                         "structured weather and bounded web fallbacks returned no current weather values",
                     )
                     if WORKING_STATE_ENABLED:
-                        WORKING_STATE.update_requirements(requirement_ledger.as_list())
+                        update_working_requirements()
 
             direct = {
                 "host_state": ("host_snapshot", {}),
@@ -2072,7 +2180,7 @@ def handle_user_turn(
         def _tooltest_mark(key: str, status: str, reason: str) -> None:
             requirement_ledger.mark_key(key, status, reason)
             if WORKING_STATE_ENABLED:
-                WORKING_STATE.update_requirements(requirement_ledger.as_list())
+                update_working_requirements()
 
         def _tooltest_result_payload(key: str) -> dict[str, Any]:
             row = deterministic_requirement_results.get(key) or {}
@@ -2138,7 +2246,7 @@ def handle_user_turn(
                 evidence_ref=evidence_ref, count_attempt=count_attempt,
             )
             if WORKING_STATE_ENABLED:
-                WORKING_STATE.update_requirements(requirement_ledger.as_list())
+                update_working_requirements()
 
         def _tooltest_aux(
             name: str, args: dict[str, Any], *, label: str, provenance_key: str = ""
@@ -2176,7 +2284,7 @@ def handle_user_turn(
                     reason=reason,
                 )
             if WORKING_STATE_ENABLED:
-                WORKING_STATE.update_requirements(requirement_ledger.as_list())
+                update_working_requirements()
 
         def _genrecipe_payload(key: str) -> dict[str, Any]:
             row = deterministic_requirement_results.get(key) or {}
@@ -2439,7 +2547,7 @@ def handle_user_turn(
                     reason="pre-create semantic search found no equivalent parameterized recipe",
                 )
                 if WORKING_STATE_ENABLED:
-                    WORKING_STATE.update_requirements(requirement_ledger.as_list())
+                    update_working_requirements()
                 _genrecipe_mark("genrecipe:35", "satisfied", "no equivalent parameterized recipe existed; creation branch selected")
                 recipe_args = {
                     "name": "public_endpoint_health_check",
@@ -3326,7 +3434,7 @@ def handle_user_turn(
                     requirement_ledger.mark_key("stress:24", "satisfied", "no unrecovered middle truncation remains")
 
             if WORKING_STATE_ENABLED:
-                WORKING_STATE.update_requirements(requirement_ledger.as_list())
+                update_working_requirements()
 
         attempt_initial_grounding_recovery()
         attempt_initial_explicit_requirements()
@@ -3361,7 +3469,7 @@ def handle_user_turn(
                 )
             if WORKING_STATE_ENABLED:
                 WORKING_STATE.update_tools(tool_schemas)
-                WORKING_STATE.update_requirements(requirement_ledger.as_list())
+                update_working_requirements()
             else:
                 shared_context.update_tools(tool_schemas)
 
@@ -3383,7 +3491,7 @@ def handle_user_turn(
                 _ensure_tool_schemas(tool_schemas, sorted(pending_names), turn_tool_policy)
             if WORKING_STATE_ENABLED:
                 WORKING_STATE.update_tools(tool_schemas)
-                WORKING_STATE.update_requirements(requirement_ledger.as_list())
+                update_working_requirements()
             else:
                 shared_context.update_tools(tool_schemas)
 
@@ -4493,7 +4601,7 @@ def handle_user_turn(
                                 ),
                             )
                             if WORKING_STATE_ENABLED:
-                                WORKING_STATE.update_requirements(requirement_ledger.as_list())
+                                update_working_requirements()
                     suggested = str(stall_validation.get("suggested_tool") or "")
                     if suggested:
                         already_selected = suggested in selected_names
@@ -4974,13 +5082,14 @@ def handle_user_turn(
                         full_content = ""
                         emit_event("tool_call_repaired", name=repaired_name, source="assistant_text")
             tool_calls, batch_notes = _sanitize_tool_call_batch(parsed_calls, successful_mutating_signatures)
+            tool_calls, prompt_arg_notes = _sanitize_prompt_leaking_tool_calls(tool_calls, active_request)
             tool_calls, repeat_notes = _suppress_completed_requirement_calls(
                 tool_calls,
                 active_requirement_ledger if plan_enabled else requirement_ledger,
                 successful_readonly_signatures,
                 active_request if plan_enabled else user_input,
             )
-            control_notes = [*parse_errors, *batch_notes, *repeat_notes]
+            control_notes = [*parse_errors, *batch_notes, *prompt_arg_notes, *repeat_notes]
 
             # A zero-tool turn is a direct-answer contract. Small local models can
             # still emit stale/native tool-call artifacts because the stable system
@@ -5170,7 +5279,7 @@ def handle_user_turn(
                     mark_requirement_blocked(blocked_name, "blocked or unavailable under harness policy")
                 if WORKING_STATE_ENABLED:
                     WORKING_STATE.update_tools(tool_schemas)
-                    WORKING_STATE.update_requirements(requirement_ledger.as_list())
+                    update_working_requirements()
                 else:
                     shared_context.update_tools(tool_schemas)
                 still_pending = active_requirement_ledger.pending()
@@ -5699,7 +5808,7 @@ def handle_user_turn(
                         post_validator_blocked.append(name)
                         tracker.reset_window()
                 if WORKING_STATE_ENABLED:
-                    WORKING_STATE.update_requirements(requirement_ledger.as_list())
+                    update_working_requirements()
                 if success:
                     iteration_progress = True
                     readonly_call = bool(TOOL_METADATA.get(name, {}).get("readonly", True))
@@ -5789,7 +5898,7 @@ def handle_user_turn(
                 tool_schemas[:] = bounded
             if WORKING_STATE_ENABLED:
                 WORKING_STATE.update_tools(tool_schemas)
-                WORKING_STATE.update_requirements(requirement_ledger.as_list())
+                update_working_requirements()
             elif policy_changed or schemas_changed or terminal_schema_changed:
                 shared_context.update_tools(tool_schemas)
             # Tool evidence/failures and requirement completion were just
