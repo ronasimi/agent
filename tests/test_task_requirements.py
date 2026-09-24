@@ -363,3 +363,28 @@ def test_ui_requirements_are_derived_and_only_closed_by_verifier():
 
     ledger.invalidate_ui_outcome()
     assert len(ledger.pending()) == 2
+
+
+def test_generic_weather_followups_inherit_location_instead_of_question_words():
+    previous = derive_task_frame(
+        "What's the weather in London, Ontario?",
+        default_location="London, Ontario, Canada",
+    )
+    for request in (
+        "what is the current weather?",
+        "what is the weather?",
+        "weather right now",
+        "what's the forecast?",
+        "forecast please",
+    ):
+        frame = derive_task_frame(request, previous, default_location="London, Ontario, Canada")
+        assert frame["intent"] == "weather"
+        assert frame["entity"] == previous["entity"]
+
+    tomorrow = derive_task_frame("What about tomorrow?", previous, default_location="London, Ontario, Canada")
+    assert tomorrow["entity"] == previous["entity"]
+    assert tomorrow["time_scope"] == "tomorrow"
+
+    toronto = derive_task_frame("And Toronto?", tomorrow, default_location="London, Ontario, Canada")
+    assert toronto["entity"] == "Toronto"
+    assert toronto["time_scope"] == "tomorrow"

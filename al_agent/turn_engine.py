@@ -35,6 +35,7 @@ from tools.grounding import (
 )
 from tools.media import unpack_media_result
 from tools.market import extract_market_instruments, format_market_quotes, is_simple_market_price_request
+from tools.memory import load_tool_observation_content
 from tools.model_context import SharedModelContext
 from tools.recipe_learning import handle_recipe_confirmation, maybe_create_recipe_candidate, pending_recipe_prompt
 from .fast_tasks import infer_recipe_parameter_hints
@@ -51,7 +52,7 @@ from tools.task_requirements import (
 )
 from tools.turn_policy import derive_turn_tool_policy
 from tools.user_profile import get_relevant_user_prompt_context, get_user_location, resolve_profile_fact_query
-from tools.weather import format_weather_recovery, is_simple_weather_request
+from tools.weather import format_weather_recovery, is_simple_weather_request, weather_recovery_from_observation
 from tools.web import (
     format_encyclopedia_result, format_news_no_results, format_news_provider_error, format_news_results,
     is_simple_encyclopedic_request, is_simple_headline_request, news_search_is_empty, requested_headline_limit,
@@ -942,6 +943,80 @@ def handle_user_turn(
             # SQLite state on every gate check adds latency and no new evidence.
             return list(local_grounding_observations)
 
+        def _strip_harness_status_prefix(raw: str) -> str:
+            text = str(raw or "").strip()
+            if text.startswith("[Harness status=") and "\n" in text:
+                return text.split("\n", 1)[1].lstrip()
+            return text
+
+        def _downgrade_unrenderable_fact(report: dict[str, Any], fact_type: str, reason: str) -> None:
+            evidence_map = report.setdefault("evidence", {})
+            evidence_map.pop(fact_type, None)
+            report.setdefault("evidence_details", {}).pop(fact_type, None)
+            missing = set(report.get("missing_fact_types") or [])
+            missing.add(fact_type)
+            report["missing_fact_types"] = sorted(missing)
+            report["grounded"] = False
+            report["status"] = "missing_evidence"
+            report["diagnosis"] = "insufficient_evidence"
+            report["reason"] = str(reason or "grounded evidence is not renderable")
+            for row in report.get("fact_requirements") or []:
+                if isinstance(row, dict) and str(row.get("fact_type") or "") == fact_type:
+                    row.update({
+                        "status": "pending", "satisfied": False, "evidence": [],
+                        "last_error": str(reason or "unrenderable_evidence"),
+                    })
+
+        def _hydrate_grounded_fact_payloads(report: dict[str, Any]) -> None:
+            """Hydrate deterministic renderers from the exact observation selected by grounding.
+
+            Grounding and completion must not diverge: if a fact is marked
+            satisfied but its deterministic payload cannot be recovered, reopen
+            that fact so the normal retrieval path runs instead of falling into a
+            slow or unsupported synthesis path.
+            """
+            nonlocal last_weather_recovery_result, last_news_search_content
+            nonlocal last_market_quote_content, last_current_time_content
+            details = dict(report.get("evidence_details") or {})
+
+            def exact_content(fact_type: str) -> str:
+                detail = dict(details.get(fact_type) or {})
+                ref = str(detail.get("evidence_ref") or "").strip()
+                if not ref:
+                    return ""
+                try:
+                    return _strip_harness_status_prefix(load_tool_observation_content(ref))
+                except Exception:
+                    return ""
+
+            if "current_time" in (report.get("evidence") or {}) and not last_current_time_content:
+                last_current_time_content = exact_content("current_time")
+                if not last_current_time_content:
+                    _downgrade_unrenderable_fact(report, "current_time", "grounded current-time evidence was not recoverable")
+
+            if "news" in (report.get("evidence") or {}) and not last_news_search_content:
+                last_news_search_content = exact_content("news")
+                if not last_news_search_content:
+                    _downgrade_unrenderable_fact(report, "news", "grounded news evidence was not recoverable")
+
+            if "market_price" in (report.get("evidence") or {}) and not last_market_quote_content:
+                last_market_quote_content = exact_content("market_price")
+                if not last_market_quote_content:
+                    _downgrade_unrenderable_fact(report, "market_price", "grounded market evidence was not recoverable")
+
+            if "weather" in (report.get("evidence") or {}) and not last_weather_recovery_result:
+                detail = dict(details.get("weather") or {})
+                raw = exact_content("weather")
+                if raw:
+                    location = str((fact_frames.get("weather") or {}).get("entity") or default_location or "")
+                    last_weather_recovery_result = weather_recovery_from_observation(
+                        str(detail.get("tool") or ""), raw, location,
+                    )
+                request = str((fact_frames.get("weather") or {}).get("source_text") or user_input)
+                if not last_weather_recovery_result or not format_weather_recovery(last_weather_recovery_result, request):
+                    last_weather_recovery_result = None
+                    _downgrade_unrenderable_fact(report, "weather", "grounded weather evidence was not recoverable/renderable")
+
         def grounding_report() -> dict[str, Any]:
             nonlocal fact_ledger_snapshot
             if not required_fact_types:
@@ -951,9 +1026,13 @@ def handle_user_turn(
                 weather_max_age_seconds=WEATHER_GROUNDING_MAX_AGE_SECONDS, task_frame=task_frame,
                 fact_frames=fact_frames,
             )
+            _hydrate_grounded_fact_payloads(report)
             fact_grounding_ledger.apply_report(report)
+            details = dict(report.get("evidence_details") or {})
             for fact_type in (report.get("evidence") or {}):
-                requirement_ledger.mark_fact_satisfied(str(fact_type), reason="grounding_evidence")
+                requirement_ledger.mark_fact_satisfied(
+                    str(fact_type), reason="grounding_evidence", evidence=dict(details.get(str(fact_type)) or {}),
+                )
             current_snapshot = json.dumps(fact_grounding_ledger.as_list(), ensure_ascii=False, sort_keys=True)
             if WORKING_STATE_ENABLED and current_snapshot != fact_ledger_snapshot:
                 WORKING_STATE.update_fact_requirements(fact_grounding_ledger.as_list())
@@ -991,6 +1070,16 @@ def handle_user_turn(
                     requirement_ledger.record_tool(
                         stage_tool, status=stage_status, reason=reason, arguments=stage_summary.get("args"),
                         result_metadata=grounding_meta,
+                        evidence_preview=json.dumps(
+                            {
+                                "recipe_stage": stage_summary.get("id"),
+                                "tool": stage_tool,
+                                "status": stage_status,
+                                "args": stage_summary.get("args"),
+                                "grounding": grounding_meta,
+                            },
+                            ensure_ascii=False, default=str,
+                        ),
                     )
 
         def note_missing_grounding(report: dict[str, Any], trigger: str) -> None:
@@ -1048,6 +1137,14 @@ def handle_user_turn(
             raw = json.dumps(result, ensure_ascii=False, indent=2, default=str)
             result_with_status = _tool_status_prefix(success, reason, status) + "\n" + raw
             result_text, observation_id = _bounded_tool_result_with_ref("weather_grounding", result_with_status)
+            # Weather is the one fact type that may be reused automatically while
+            # fresh. Persist an exact observation handle even when the provider
+            # payload is small enough to fit inline, otherwise a later turn can
+            # be marked grounded without having anything exact to hydrate.
+            observation_id = ensure_requirement_evidence_ref(
+                "recipe:weather.current_forecast", result_with_status, observation_id,
+                requirement_key="weather_forecast",
+            )
             register_truncated_observation(result_with_status, result_text, observation_id)
             emit_event(
                 "tool_result", name="recipe:weather.current_forecast", status=status, reason=reason,

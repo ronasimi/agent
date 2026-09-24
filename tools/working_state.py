@@ -362,7 +362,9 @@ def _bounded_observations(state: dict[str, Any], observations: list[dict[str, An
             continue
         for tool in item.get("evidence") or []:
             value = str(tool or "").strip()
-            if value and not value.startswith("stored:"):
+            if value.startswith("stored:"):
+                value = value.split(":", 1)[1].strip()
+            if value:
                 pinned_tools.add(value)
 
     pinned_indexes: set[int] = set()

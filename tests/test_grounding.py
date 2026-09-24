@@ -357,3 +357,234 @@ def test_weather_numeric_values_still_qualify_when_an_unrelated_field_is_unavail
         "Wind W 12 km/h. Visibility No Data Available."
     )
     assert is_weather_data_evidence(text) is True
+
+
+def test_malformed_generic_weather_entity_cannot_match_carried_evidence():
+    now = datetime(2026, 9, 24, 2, 40, tzinfo=timezone.utc)
+    content = "Current Conditions Temperature 18 C Humidity 70 percent Wind 8 km/h Forecast clear"
+    observation = make_observation(
+        "browse_url",
+        content,
+        at=_at(now - timedelta(minutes=5)),
+        turn_id=20,
+        arguments={"url": "https://weather.example/london"},
+    )
+    report = validate_fact_grounding(
+        "what is the current weather?",
+        [observation],
+        current_turn_id=21,
+        weather_max_age_seconds=3600,
+        now=now,
+        task_frame={"intent": "weather", "entity": "what is the", "time_scope": "current"},
+    )
+    assert report["grounded"] is False
+    assert report["missing_fact_types"] == ["weather"]
+
+
+def test_grounding_records_selected_evidence_details_for_supported_fact_paths():
+    now = datetime(2026, 9, 24, 2, 40, tzinfo=timezone.utc)
+
+    time_obs = make_observation(
+        "current_time",
+        '{"utc":"2026-09-24T02:40:00+00:00","local":"2026-09-23T22:40:00-04:00","timezone":"America/Toronto"}',
+        at=_at(now), turn_id=31,
+    )
+    time_obs["evidence_ref"] = "time-ref"
+    time_report = validate_fact_grounding("What time is it?", [time_obs], current_turn_id=31, now=now)
+    assert time_report["evidence_details"]["current_time"]["evidence_ref"] == "time-ref"
+
+    news_obs = make_observation(
+        "news_search",
+        '[{"title":"Headline","url":"https://example.com/story","source":"Example"}]',
+        at=_at(now), turn_id=31, arguments={"query": "latest news", "location": ""},
+    )
+    news_obs["evidence_ref"] = "news-ref"
+    news_report = validate_fact_grounding("latest news", [news_obs], current_turn_id=31, now=now)
+    assert news_report["evidence_details"]["news"]["evidence_ref"] == "news-ref"
+
+    market_obs = make_observation(
+        "market_quote",
+        '{"quotes":[{"instrument":"brent","symbol":"BZ=F","price":74.2}]}',
+        at=_at(now), turn_id=31, arguments={"instruments": ["brent"]},
+    )
+    market_obs["evidence_ref"] = "market-ref"
+    market_report = validate_fact_grounding(
+        "What is the current price of Brent crude?", [market_obs], current_turn_id=31, now=now,
+    )
+    assert market_report["evidence_details"]["market_price"]["evidence_ref"] == "market-ref"
+
+
+def test_fact_requirement_closure_keeps_grounding_provenance():
+    from tools.task_requirements import TaskRequirementLedger
+
+    ledger = TaskRequirementLedger.from_request("What is the weather?")
+    ledger.mark_fact_satisfied(
+        "weather",
+        evidence={
+            "tool": "recipe:weather.current_forecast",
+            "evidence_ref": "weather-ref",
+            "evidence_preview": "Open-Meteo structured weather",
+        },
+    )
+    row = next(item for item in ledger.as_list() if item["tool"] == "weather_forecast")
+    assert row["status"] == "satisfied"
+    assert row["evidence"]
+    assert row["evidence"][-1]["evidence_ref"] == "weather-ref"
+
+
+def test_fresh_stored_weather_exposes_exact_selected_evidence_reference():
+    now = datetime(2026, 9, 24, 2, 40, tzinfo=timezone.utc)
+    content = '''{
+      "ok": true,
+      "stages": [{"id":"forecast","tool":"weather_forecast","ok":true}],
+      "result": {"forecast":{"current":{"temperature_2m":12.5},"daily":{"time":["2026-09-24"]}}},
+      "grounding_recovery": {"fact_type":"weather","query":"London Ontario weather current","location":"London, Ontario, Canada"}
+    }'''
+    observation = make_observation(
+        "recipe:weather.current_forecast",
+        content,
+        at=_at(now - timedelta(minutes=5)),
+        turn_id=20,
+        task_frame={"intent": "weather", "entity": "London, Ontario, Canada", "time_scope": "current"},
+    )
+    observation["evidence_ref"] = "weather-observation-ref"
+    report = validate_fact_grounding(
+        "what is the current weather?",
+        [observation],
+        current_turn_id=21,
+        weather_max_age_seconds=3600,
+        now=now,
+        task_frame={"intent": "weather", "entity": "London, Ontario, Canada", "time_scope": "current"},
+        fact_frames={"weather": {"intent": "weather", "entity": "London, Ontario, Canada", "time_scope": "current"}},
+    )
+    assert report["grounded"] is True
+    assert report["evidence_details"]["weather"]["source"] == "stored"
+    assert report["evidence_details"]["weather"]["evidence_ref"] == "weather-observation-ref"
+
+
+def test_every_grounded_fact_path_has_selected_evidence_metadata():
+    now = datetime(2026, 9, 24, 2, 40, tzinfo=timezone.utc)
+    cases = []
+
+    time_obs = make_observation(
+        "current_time",
+        '{"utc":"2026-09-24T02:40:00+00:00","local":"2026-09-23T22:40:00-04:00","timezone":"America/Toronto"}',
+        at=_at(now), turn_id=31,
+    )
+    cases.append(("What time is it?", [time_obs], {"current_time"}))
+
+    host_obs = make_observation("host_snapshot", '{"cpu":{"load":0.1}}', at=_at(now), turn_id=31)
+    cases.append(("Check host health", [host_obs], {"host_state"}))
+
+    news_obs = make_observation(
+        "news_search",
+        '[{"title":"Headline","url":"https://example.com/story","source":"Example"}]',
+        at=_at(now), turn_id=31, arguments={"query": "latest news", "location": ""},
+    )
+    cases.append(("latest news", [news_obs], {"news"}))
+
+    market_obs = make_observation(
+        "market_quote",
+        '{"quotes":[{"instrument":"brent","symbol":"BZ=F","price":74.2}]}',
+        at=_at(now), turn_id=31, arguments={"instruments": ["brent"]},
+    )
+    cases.append(("current price of Brent crude", [market_obs], {"market_price"}))
+
+    for request, observations, expected in cases:
+        report = validate_fact_grounding(request, observations, current_turn_id=31, now=now)
+        assert report["grounded"] is True, (request, report)
+        assert expected.issubset(set(report["evidence_details"])), (request, report)
+        assert set(report["evidence"]).issubset(set(report["evidence_details"])), (request, report)
+
+
+def test_all_grounded_fact_types_expose_selected_evidence_metadata():
+    """Every grounding success must identify the concrete observation that closed it."""
+    import json
+
+    now = datetime(2026, 9, 24, 2, 40, tzinfo=timezone.utc)
+    turn = 44
+    cases = []
+
+    cases.append((
+        "Who is Ada Lovelace?",
+        [make_observation(
+            "wiki_search",
+            json.dumps({"title": "Ada Lovelace", "summary": "English mathematician and writer."}),
+            at=_at(now), turn_id=turn, arguments={"query": "Ada Lovelace"},
+        )],
+        "encyclopedic",
+    ))
+    cases.append((
+        "Check host health",
+        [make_observation("host_snapshot", json.dumps({"cpu": {"load": 0.1}}), at=_at(now), turn_id=turn)],
+        "host_state",
+    ))
+    cases.append((
+        "Check network status",
+        [make_observation("network_snapshot", json.dumps({"interfaces": []}), at=_at(now), turn_id=turn)],
+        "network_state",
+    ))
+    cases.append((
+        "Check repo status",
+        [make_observation("repo_status", json.dumps({"branch": "main", "dirty": False}), at=_at(now), turn_id=turn)],
+        "repository_state",
+    ))
+    cases.append((
+        "latest news",
+        [make_observation(
+            "news_search",
+            json.dumps([{"title": "Headline", "url": "https://example.com/story", "source": "Example"}]),
+            at=_at(now), turn_id=turn, arguments={"query": "latest news", "location": ""},
+        )],
+        "news",
+    ))
+    cases.append((
+        "current price of Brent crude",
+        [make_observation(
+            "market_quote",
+            json.dumps({"quotes": [{"instrument": "brent", "symbol": "BZ=F", "price": 74.2}]}),
+            at=_at(now), turn_id=turn, arguments={"instruments": ["brent"]},
+        )],
+        "market_price",
+    ))
+
+    search = make_observation(
+        "web_search",
+        json.dumps([{"title": "Python release", "url": "https://example.com/python", "snippet": "current Python release"}]),
+        at=_at(now), turn_id=turn, arguments={"query": "current Python release"},
+    )
+    browse = make_observation(
+        "browse_url",
+        "URL: https://example.com/python\nCurrent Python release information.",
+        at=_at(now), turn_id=turn, arguments={"url": "https://example.com/python"},
+    )
+    cases.append(("Search the web for current Python release", [search, browse], "web_fact"))
+
+    weather = make_observation(
+        "recipe:weather.current_forecast",
+        json.dumps({
+            "ok": True,
+            "stages": [{"id": "forecast", "tool": "weather_forecast", "ok": True}],
+            "result": {
+                "location": "London, Ontario, Canada",
+                "forecast": {
+                    "current": {"temperature_2m": 12.5, "weather_code": 1},
+                    "daily": {"time": ["2026-09-24"], "weather_code": [1]},
+                },
+            },
+            "grounding_recovery": {
+                "fact_type": "weather", "query": "London Ontario weather now",
+                "location": "London, Ontario, Canada",
+            },
+        }),
+        at=_at(now), turn_id=turn,
+        task_frame={"intent": "weather", "entity": "London, Ontario, Canada", "time_scope": "now"},
+    )
+    cases.append(("weather in London, Ontario, Canada now", [weather], "weather"))
+
+    for request, observations, fact_type in cases:
+        report = validate_fact_grounding(request, observations, current_turn_id=turn, now=now)
+        assert report["grounded"] is True, (fact_type, report)
+        assert fact_type in report["evidence"], (fact_type, report)
+        detail = report["evidence_details"].get(fact_type)
+        assert isinstance(detail, dict) and detail.get("tool"), (fact_type, report)

@@ -364,3 +364,54 @@ def test_compound_headline_request_does_not_leak_formatting_words_into_news_quer
     assert query == "London, Ontario, Canada local latest news"
     for token in ("retrieve", "exactly", "each", "report"):
         assert token not in query.lower()
+
+
+def test_stored_weather_observation_can_be_hydrated_for_deterministic_rendering():
+    from tools.weather import weather_recovery_from_observation
+
+    structured = {
+        "ok": True,
+        "result": {
+            "location": "London, Ontario, Canada",
+            "place": {"name": "London", "admin1": "Ontario", "country": "Canada"},
+            "forecast": {
+                "provider": "Open-Meteo",
+                "retrieved_at": "2026-09-24T02:40:44+00:00",
+                "timezone_abbreviation": "GMT-4",
+                "current": {
+                    "time": "2026-09-23T22:30",
+                    "temperature_2m": 12.5,
+                    "apparent_temperature": 8.9,
+                    "precipitation": 0.0,
+                    "weather_code": 1,
+                    "cloud_cover": 20,
+                    "wind_speed_10m": 17.0,
+                    "wind_direction_10m": 80,
+                    "wind_gusts_10m": 25.0,
+                },
+                "daily": {"time": ["2026-09-23"], "weather_code": [1], "temperature_2m_max": [20], "temperature_2m_min": [9]},
+            },
+        },
+        "grounding_recovery": {"fact_type": "weather", "location": "London, Ontario, Canada"},
+    }
+    raw = "[Harness status=ok]\n" + json.dumps(structured)
+    hydrated = weather_recovery_from_observation(
+        "recipe:weather.current_forecast", raw, "London, Ontario, Canada"
+    )
+    rendered = format_weather_recovery(hydrated, "what is the current weather?")
+    assert "Current weather for London, Ontario, Canada" in rendered
+    assert "12.5 °C" in rendered
+
+
+def test_direct_weather_forecast_observation_can_be_hydrated():
+    from tools.weather import weather_recovery_from_observation
+
+    raw = json.dumps({
+        "provider": "Open-Meteo",
+        "retrieved_at": "2026-09-24T02:40:44+00:00",
+        "timezone_abbreviation": "EDT",
+        "current": {"time": "2026-09-23T22:30", "temperature_2m": 11.0, "weather_code": 0},
+        "daily": {"time": ["2026-09-23"], "weather_code": [0], "temperature_2m_max": [20], "temperature_2m_min": [8]},
+    })
+    hydrated = weather_recovery_from_observation("weather_forecast", raw, "London, Ontario, Canada")
+    assert "11.0 °C" in format_weather_recovery(hydrated, "current weather")

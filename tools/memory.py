@@ -523,6 +523,25 @@ def store_tool_observation(tool_name: str, content: str, conversation_id: str | 
     return observation_id
 
 
+def load_tool_observation_content(observation_id: str = "", conversation_id: str | None = None) -> str:
+    """Return the full durable observation content for trusted harness reuse.
+
+    This is an internal fast path used to hydrate deterministic renderers. It is
+    deliberately conversation-scoped and should not be exposed as a broad model
+    primitive; model-facing reads remain bounded through ``read_observation``.
+    """
+    observation_id = str(observation_id or "").strip()
+    if not observation_id:
+        return ""
+    cid = ensure_conversation(conversation_id)
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT content FROM tool_observations WHERE id = ? AND conversation_id = ?",
+            (observation_id, cid),
+        ).fetchone()
+    return str(row[0]) if row else ""
+
+
 def read_observation(observation_id: str = "", offset: int = 0, length: int = 5000) -> str:
     observation_id = str(observation_id or "").strip()
     if not observation_id:

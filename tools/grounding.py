@@ -673,6 +673,30 @@ def _frame_tokens(value: Any) -> list[str]:
     ]
 
 
+_WEATHER_SCOPE_STOP_TOKENS = {
+    "condition", "conditions", "current", "currently", "forecast", "here", "local",
+    "now", "right", "there", "today", "tomorrow", "tonight", "weather", "what",
+    "when", "where", "which",
+}
+
+
+def _weather_entity_tokens(value: Any) -> list[str]:
+    """Return only location-bearing tokens for weather scope validation."""
+    return [token for token in _frame_tokens(value) if token not in _WEATHER_SCOPE_STOP_TOKENS]
+
+
+def _evidence_detail(item: dict[str, Any], *, source: str = "current") -> dict[str, Any]:
+    """Return bounded provenance for the concrete observation selected by grounding."""
+    return {
+        "source": str(source or "current"),
+        "tool": str(item.get("tool") or ""),
+        "turn_id": int(item.get("turn_id") or 0),
+        "at": str(item.get("at") or ""),
+        "evidence_ref": str(item.get("evidence_ref") or ""),
+        "evidence_preview": str(item.get("evidence_preview") or item.get("content") or "")[:640],
+    }
+
+
 def _observation_matches_frame(item: dict[str, Any], frame: dict[str, Any], *, linked_search: bool = False) -> bool:
     if not frame or frame.get("intent") != "weather":
         return True
@@ -693,7 +717,7 @@ def _observation_matches_frame(item: dict[str, Any], frame: dict[str, Any], *, l
     proof_terms.update(_frame_tokens(proof.get("scope_entity") or ""))
     proof_terms.update(_frame_tokens(proof.get("scope_time") or ""))
     observed_terms = set(_frame_tokens(haystack)) | proof_terms
-    entity_tokens = _frame_tokens(entity)
+    entity_tokens = _weather_entity_tokens(entity)
     tool_name = str(item.get("tool") or "").lower()
     # For browse_url, ``target`` is the source URL and is not semantic location
     # metadata. New observations carry arguments/proof; old persisted browse rows
@@ -705,6 +729,11 @@ def _observation_matches_frame(item: dict[str, Any], frame: dict[str, Any], *, l
         or bool(proof.get("scope_terms"))
         or bool(item.get("target") and tool_name != "browse_url")
     )
+    # A non-empty entity that collapses to zero location-bearing tokens is a
+    # malformed frame (for example "what is the"). Never let generic question
+    # words prove scope against carried evidence.
+    if entity and not entity_tokens:
+        return False
     if entity_tokens and not all(token in observed_terms for token in entity_tokens):
         # Search->browse linkage proves provenance, not identity. A modern browse
         # observation must still carry the requested location/entity; otherwise a
@@ -993,7 +1022,15 @@ def validate_fact_grounding(
     frames = {str(k): dict(v or {}) for k, v in dict(fact_frames or {}).items() if isinstance(v, dict)}
     required = requested_fact_types(user_request, frame, frames)
     if not frames and required:
-        frames = derive_fact_frames(user_request, required_fact_types=required)
+        # An explicitly supplied task frame is authoritative for its fact type.
+        # Derive only missing sibling frames instead of silently replacing scope
+        # (for example a caller-provided weather location) with a fresh parse.
+        primary_intent = str(frame.get("intent") or "")
+        if primary_intent in required:
+            frames[primary_intent] = dict(frame)
+        missing_frames = set(required) - set(frames)
+        if missing_frames:
+            frames.update(derive_fact_frames(user_request, required_fact_types=missing_frames))
 
     def frame_for(fact_type: str) -> dict[str, Any]:
         scoped = dict(frames.get(str(fact_type or "")) or {})
@@ -1014,12 +1051,18 @@ def validate_fact_grounding(
     observed = sorted({fact for item in usable for fact in _fact_types(item)})
     missing: list[str] = []
     evidence: dict[str, list[str]] = {}
+    evidence_details: dict[str, dict[str, Any]] = {}
     allow_carried = _explicit_evidence_reuse_request(user_request)
     turn_usable = _turn_scoped_items(usable, current_turn_id, allow_carried=allow_carried)
     current_geocodes = [
         item for item in turn_usable
         if str(item.get("tool") or "").lower() == "geocode_location"
     ]
+
+    def evidence_source(item: dict[str, Any]) -> str:
+        if current_turn_id and int(item.get("turn_id") or 0) != int(current_turn_id):
+            return "stored"
+        return "current"
 
     if "current_time" in required:
         time_items = [
@@ -1029,6 +1072,7 @@ def validate_fact_grounding(
         ]
         if time_items:
             evidence["current_time"] = [str(item.get("tool") or "") for item in time_items[-2:]]
+            evidence_details["current_time"] = _evidence_detail(time_items[-1], source=evidence_source(time_items[-1]))
         else:
             missing.append("current_time")
 
@@ -1042,6 +1086,7 @@ def validate_fact_grounding(
         ]
         if encyclopedia_items:
             evidence["encyclopedic"] = ["wiki_search"]
+            evidence_details["encyclopedic"] = _evidence_detail(encyclopedia_items[-1], source=evidence_source(encyclopedia_items[-1]))
         else:
             # Wikipedia is the preferred fast path, but a linked web discovery
             # and verified page from the current turn is an acceptable fallback
@@ -1061,7 +1106,7 @@ def validate_fact_grounding(
                 item for item in turn_items
                 if str(item.get("tool") or "").lower() == "browse_url" and "web_fact" in _fact_types(item)
             ]
-            linked = False
+            linked_item: dict[str, Any] | None = None
             for search in searches:
                 discovered = {_canonical_url(url) for url in (search.get("discovered_urls") or []) if url}
                 if not discovered:
@@ -1072,12 +1117,15 @@ def validate_fact_grounding(
                         dict(browse.get("arguments") or {}),
                     )
                     if source and source in discovered and _browse_contains_subject(browse, subject):
-                        linked = True
+                        linked_item = browse
                         break
-                if linked:
+                if linked_item is not None:
                     break
-            if linked:
+            if linked_item is not None:
                 evidence["encyclopedic"] = ["web_search", "browse_url"]
+                evidence_details["encyclopedic"] = _evidence_detail(
+                    linked_item, source=evidence_source(linked_item),
+                )
             else:
                 missing.append("encyclopedic")
 
@@ -1096,6 +1144,9 @@ def validate_fact_grounding(
         ]
         if matches:
             evidence[fact_type] = [str(matches[-1].get("tool") or "")]
+            evidence_details[fact_type] = _evidence_detail(
+                matches[-1], source=evidence_source(matches[-1]),
+            )
         else:
             missing.append(fact_type)
 
@@ -1108,6 +1159,7 @@ def validate_fact_grounding(
         ]
         if matches:
             evidence["news"] = ["news_search"]
+            evidence_details["news"] = _evidence_detail(matches[-1], source=evidence_source(matches[-1]))
         else:
             missing.append("news")
 
@@ -1149,6 +1201,7 @@ def validate_fact_grounding(
             matches.append(item)
         if matches:
             evidence["market_price"] = ["market_quote"]
+            evidence_details["market_price"] = _evidence_detail(matches[-1], source=evidence_source(matches[-1]))
         else:
             missing.append("market_price")
 
@@ -1209,6 +1262,9 @@ def validate_fact_grounding(
                 qualified.extend(legacy)
         if qualified:
             evidence["web_fact"] = ["web_search", "browse_url"] if searches else ["browse_url"]
+            evidence_details["web_fact"] = _evidence_detail(
+                qualified[-1], source=evidence_source(qualified[-1]),
+            )
         else:
             missing.append("web_fact")
 
@@ -1272,12 +1328,16 @@ def validate_fact_grounding(
 
         if current_api:
             evidence["weather"] = [str(current_api[-1].get("tool") or "weather API")]
+            evidence_details["weather"] = _evidence_detail(current_api[-1])
         elif current_recipe:
             evidence["weather"] = [str(current_recipe[-1].get("tool") or "weather recipe")]
+            evidence_details["weather"] = _evidence_detail(current_recipe[-1])
         elif linked_pairs:
             evidence["weather"] = ["web_search", "browse_url"]
+            evidence_details["weather"] = _evidence_detail(linked_pairs[-1][1])
         elif stored_weather:
             evidence["weather"] = [f"stored:{str(stored_weather[-1].get('tool') or 'weather')}" ]
+            evidence_details["weather"] = _evidence_detail(stored_weather[-1], source="stored")
         else:
             missing.append("weather")
 
@@ -1300,6 +1360,7 @@ def validate_fact_grounding(
             "missing_fact_types": sorted(set(missing)),
             "observed_fact_types": observed,
             "evidence": evidence,
+            "evidence_details": evidence_details,
             "diagnosis": "insufficient_evidence",
             "reason": "requested fact type is not present in qualifying observations",
             "fact_requirements": fact_requirements,
@@ -1311,6 +1372,7 @@ def validate_fact_grounding(
         "missing_fact_types": [],
         "observed_fact_types": observed,
         "evidence": evidence,
+        "evidence_details": evidence_details,
         "diagnosis": "task_complete",
         "fact_requirements": fact_requirements,
     }

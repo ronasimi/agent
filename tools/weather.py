@@ -383,6 +383,50 @@ def _format_verified_weather_excerpt(verification: str, location: str, source_ur
     return "\n".join(lines)
 
 
+def weather_recovery_from_observation(tool_name: str, content: str, location: str = "") -> dict[str, Any] | None:
+    """Normalize a durable weather observation into the deterministic renderer shape.
+
+    Stored observations may contain a full weather recipe result, a direct
+    ``weather_forecast`` payload, or a verified ``browse_url`` excerpt.  This
+    helper keeps renderer hydration deterministic and avoids asking the model to
+    reshape previously grounded data.
+    """
+    text = str(content or "").strip()
+    if not text:
+        return None
+    if text.startswith("[Harness status=") and "\n" in text:
+        text = text.split("\n", 1)[1].lstrip()
+    payload: Any = None
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        start = text.find("{")
+        if start >= 0:
+            try:
+                payload = json.loads(text[start:])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = None
+
+    name = str(tool_name or "").strip().lower()
+    if isinstance(payload, dict) and payload.get("ok") is True and isinstance(payload.get("result"), dict):
+        return payload
+    if name in {"weather_forecast", "weather_api"} and isinstance(payload, dict):
+        if isinstance(payload.get("daily"), dict) or isinstance(payload.get("current"), dict):
+            return {
+                "ok": True,
+                "result": {"location": str(location or "").strip(), "place": {}, "forecast": payload},
+                "grounding_recovery": {"fact_type": "weather", "source": name},
+            }
+    if name == "browse_url" or "weather" in name:
+        if text:
+            return {
+                "ok": True,
+                "result": {"location": str(location or "").strip(), "verification": text},
+                "grounding_recovery": {"fact_type": "weather", "source": name or "stored"},
+            }
+    return None
+
+
 def format_weather_recovery(result: dict[str, Any], user_request: str) -> str:
     """Render provider-backed weather without asking a small model to reshape data.
 

@@ -225,6 +225,12 @@ _TEMPORAL_RE = re.compile(
     re.I,
 )
 _LOCATION_STOP = {"the", "weather", "forecast", "today", "tomorrow", "tonight", "now", "current", "currently", "please", "like"}
+_WEATHER_GENERIC_ENTITY_TOKENS = {
+    "a", "an", "and", "are", "at", "conditions", "current", "currently", "forecast",
+    "for", "here", "how", "is", "it", "like", "local", "me", "my", "near", "now",
+    "please", "right", "same", "the", "there", "today", "tomorrow", "tonight", "weather",
+    "what", "whats", "when", "where", "which", "will", "would",
+}
 
 _CANADIAN_PROVINCES = {
     "ab": "Alberta", "bc": "British Columbia", "mb": "Manitoba", "nb": "New Brunswick",
@@ -539,12 +545,37 @@ def news_region_for_frame(frame: dict[str, Any] | None = None, default_location:
     return "ca-en"
 
 
+def _weather_location_candidate(value: str) -> str:
+    """Return a plausible location fragment or ``""`` for generic weather prose.
+
+    Weather follow-ups are often complete questions (``what is the current
+    weather?``) even though they omit a place.  Treating their interrogative
+    words as a location can accidentally match prior evidence.  Explicit
+    prepositional locations are handled before this helper.
+    """
+    candidate = _clean_entity(value)
+    if not candidate:
+        return ""
+    tokens = [
+        (token.lower()[:-2] if token.lower().endswith("'s") else token.lower())
+        for token in re.findall(r"[A-Za-z0-9'-]+", candidate) if len(token) > 1
+    ]
+    meaningful = [token for token in tokens if token not in _WEATHER_GENERIC_ENTITY_TOKENS]
+    if not meaningful:
+        return ""
+    # Deictic fragments inherit the previous/default location; they are not
+    # geocodable entities in their own right.
+    if all(token in {"area", "city", "location", "place"} for token in meaningful):
+        return ""
+    return candidate
+
+
 def _extract_weather_entity(text: str, previous: dict[str, Any] | None = None) -> str:
     value = " ".join(str(text or "").split())
     # Prefer explicit prepositional location phrases.
     matches = list(re.finditer(r"\b(?:in|at|near)\s+([^?]+)", value, flags=re.I))
     if matches:
-        candidate = _clean_entity(matches[-1].group(1))
+        candidate = _weather_location_candidate(matches[-1].group(1))
         if candidate:
             return candidate
     # "weather for Toronto tomorrow" and similar.
@@ -553,16 +584,16 @@ def _extract_weather_entity(text: str, previous: dict[str, Any] | None = None) -
         value, flags=re.I,
     )
     if match:
-        candidate = _clean_entity(match.group(1))
-        words = [w for w in re.findall(r"[A-Za-z0-9'-]+", candidate) if w.lower() not in _LOCATION_STOP]
-        if words:
-            return " ".join(words[:8])
+        candidate = _weather_location_candidate(match.group(1))
+        if candidate:
+            words = [w for w in re.findall(r"[A-Za-z0-9'-]+", candidate) if w.lower() not in _LOCATION_STOP]
+            if words:
+                return " ".join(words[:8])
     # Referential fragment: "And Toronto?"
     if previous and str(previous.get("intent") or "") == "weather":
         fragment = re.sub(r"^(?:and|also|what about)\s+", "", value, flags=re.I).strip()
-        candidate = _clean_entity(fragment)
-        generic = {"weather", "forecast", "the weather", "the forecast"}
-        if candidate and candidate.lower() not in generic and not _TEMPORAL_RE.fullmatch(candidate) and len(candidate.split()) <= 8:
+        candidate = _weather_location_candidate(fragment)
+        if candidate and not _TEMPORAL_RE.fullmatch(candidate) and len(candidate.split()) <= 8:
             if not re.search(r"\b(?:write|create|run|show|explain|tell|make|code|script)\b", candidate, re.I):
                 return candidate
     return str((previous or {}).get("entity") or "")
@@ -1832,13 +1863,23 @@ class TaskRequirementLedger:
                 evidence_preview=json.dumps(row, ensure_ascii=False)[:320],
             )
 
-    def mark_fact_satisfied(self, fact_type: str, reason: str = "grounding_evidence") -> None:
-        """Close tool requirements whose requested fact was grounded by any valid path."""
+    def mark_fact_satisfied(
+        self, fact_type: str, reason: str = "grounding_evidence", evidence: dict[str, Any] | None = None,
+    ) -> None:
+        """Close fact requirements and retain the evidence that actually satisfied them."""
         fact_type = str(fact_type or "")
+        detail = dict(evidence or {})
         for item in self.requirements:
             if str((item.scope or {}).get("fact_type") or "") == fact_type:
                 item.status = "satisfied"
                 item.last_reason = str(reason or "")[:120]
+                if detail:
+                    _append_requirement_evidence(
+                        item, source="grounding", tool_name=str(detail.get("tool") or fact_type),
+                        status="ok", reason=str(reason or "grounding_evidence"),
+                        evidence_ref=str(detail.get("evidence_ref") or ""),
+                        evidence_preview=str(detail.get("evidence_preview") or ""),
+                    )
 
     def status_for_tool(self, tool_name: str) -> str:
         for item in self.requirements:

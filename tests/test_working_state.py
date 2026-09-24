@@ -394,3 +394,21 @@ def test_requirement_evidence_preview_persists_but_is_omitted_from_model_render(
         rendered = json.loads(store.render())
         assert rendered["requirements"][0]["evidence"][0]["evidence_ref"] == "obs-clock"
         assert "evidence_preview" not in rendered["requirements"][0]["evidence"][0]
+
+
+def test_stored_fact_evidence_pins_underlying_observation_tool():
+    from tools.working_state import _bounded_observations
+
+    state = {
+        "requirements": [],
+        "fact_requirements": [
+            {"fact_type": "weather", "satisfied": True, "evidence": ["stored:recipe:weather.current_forecast"]}
+        ],
+    }
+    rows = [
+        {"tool": "recipe:weather.current_forecast", "fingerprint": "weather-old", "turn_id": 1},
+        {"tool": "read_observation", "fingerprint": "r1", "turn_id": 2},
+        {"tool": "read_observation", "fingerprint": "r2", "turn_id": 2},
+    ]
+    bounded = _bounded_observations(state, rows, 2)
+    assert any(row.get("tool") == "recipe:weather.current_forecast" for row in bounded)
