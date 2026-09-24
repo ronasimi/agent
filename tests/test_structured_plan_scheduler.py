@@ -77,6 +77,75 @@ def test_fast_compiler_allows_one_item_instead_of_inventing_tasks():
     assert plan == ["Review the supplied architecture document"]
 
 
+def test_fast_compiler_filters_global_constraints_from_executable_steps():
+    from al_agent.fast_tasks import compile_structured_plan
+
+    class FakeClient:
+        def chat(self, **kwargs):
+            return {"message": {"content": json.dumps([
+                "Do not install or modify packages.",
+                "Check the current local time",
+                "Read the repository README",
+            ])}}
+
+    plan = compile_structured_plan(
+        FakeClient(),
+        model="agent-main:2b",
+        objective="Do not install packages. Then check the time, then read the README. " + ("context " * 40),
+        min_chars=10,
+        min_commands=2,
+    )
+    assert plan == ["Check the current local time", "Read the repository README"]
+
+
+def test_explicit_numbered_suite_is_extracted_without_compiler_or_safety_steps():
+    from al_agent.fast_tasks import compile_structured_plan
+
+    class CompilerMustNotRun:
+        def chat(self, **kwargs):  # pragma: no cover - failure message is clearer
+            raise AssertionError("explicit numbered requirements should bypass the model compiler")
+
+    prompt = """# Stress Test
+
+## Safety Rules
+1. Prefer read-only operations.
+2. Do not install packages.
+3. Never modify network configuration.
+
+Treat every numbered requirement below as independent.
+
+## 1. Runtime Identity
+Determine hostname and current time using runtime tools.
+
+## 2. Host Snapshot
+Collect a read-only host snapshot and report memory.
+
+## 3. Repository Status
+Inspect Git status. Do not commit anything.
+
+## 4. Deterministic Termination
+Verify retries are bounded and the test terminates cleanly.
+
+# FINAL REPORT
+Summarize all completed requirements.
+"""
+    plan = compile_structured_plan(
+        CompilerMustNotRun(),
+        model="agent-main:2b",
+        objective=prompt,
+        min_chars=10,
+        min_commands=2,
+        max_steps=96,
+    )
+
+    assert len(plan) == 4
+    assert plan[0].startswith("1. Runtime Identity:")
+    assert plan[-1].startswith("4. Deterministic Termination:")
+    assert all("Prefer read-only operations" not in step for step in plan)
+    assert all("Do not install packages" not in step for step in plan)
+    assert all("FINAL REPORT" not in step for step in plan)
+
+
 def test_catalog_active_task_blocks_future_intent_schema_leakage():
     from tools.catalog import select_tool_schemas
 
@@ -149,6 +218,55 @@ def test_working_state_scheduler_hides_future_steps_and_advances_pointer(monkeyp
         results = json.loads(store.render_scheduler_results())
         assert [row["status"] for row in results] == ["PASS", "FAIL", "PASS"]
         assert results[1]["reason"] == "mail unavailable"
+
+
+def test_working_state_preserves_full_explicit_safety_section(monkeypatch):
+    from tools import working_state
+
+    with tempfile.TemporaryDirectory() as td:
+        monkeypatch.setattr(working_state, "DB_PATH", str(Path(td) / "state.db"))
+        store = working_state.WorkingStateStore()
+        safety = "\n".join(f"{i}. Safety rule {i}: do not perform action {i}." for i in range(1, 21))
+        objective = f"# Audit\n\n## Safety Rules\n{safety}\n\n## 1. Runtime Identity\nCheck hostname."
+        state = store.begin_turn(
+            turn_id=1,
+            objective=objective,
+            rolling_summary="",
+            recalled_context="",
+            recent_messages=[],
+            policy_note="",
+            tool_schemas=[],
+        )
+        assert len(state["constraints"]) == 20
+        assert state["constraints"][0].startswith("Safety rule 1")
+        assert state["constraints"][-1].startswith("Safety rule 20")
+
+
+def test_scheduler_final_synthesis_keeps_all_large_plan_rows(monkeypatch):
+    from tools import working_state
+
+    with tempfile.TemporaryDirectory() as td:
+        monkeypatch.setattr(working_state, "DB_PATH", str(Path(td) / "state.db"))
+        store = working_state.WorkingStateStore(limits={"scheduler_steps": 96})
+        steps = [f"Requirement {i}: verify subsystem {i}" for i in range(1, 78)]
+        store.begin_turn(
+            turn_id=1,
+            objective="Run all 77 requirements",
+            rolling_summary="",
+            recalled_context="",
+            recent_messages=[],
+            policy_note="",
+            tool_schemas=[],
+            execution_plan=steps,
+        )
+        for i in range(1, 78):
+            store.mark_active_requirement("PASS", result=f"verified result for subsystem {i}")
+
+        rows = json.loads(store.render_scheduler_results(24000))
+        assert len(rows) == 77
+        assert rows[0]["id"] == "step-001"
+        assert rows[-1]["id"] == "step-077"
+        assert all(row["status"] == "PASS" for row in rows)
 
 
 def test_scheduler_schema_budget_prioritizes_active_required_tool():
@@ -249,6 +367,9 @@ def test_turn_engine_never_sends_future_steps_to_main_model(monkeypatch, tmp_pat
     assert "FUTURE_BETA" in second
     assert "FUTURE_GAMMA" not in second
     assert "FUTURE_GAMMA" in third
+    assert second.count("[Harness scheduler] Active requirement ") == 1
+    assert third.count("[Harness scheduler] Active requirement ") == 1
+    assert "Active requirement 2/3: Handle FUTURE_BETA" not in third
     # Full completed scheduler results become visible only to the final synthesis.
     assert "ACTIVE_ALPHA" in final and "FUTURE_BETA" in final and "FUTURE_GAMMA" in final
     assert messages[-1]["content"] == "combined complete"

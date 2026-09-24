@@ -139,8 +139,20 @@ agent:
     enabled: true
     min_chars: 900
     min_commands: 3
-    max_steps: 32
+    # Explicit long-form audits/stress tests can contain many numbered
+    # requirements. Future steps remain hidden from the 4B model, so increasing
+    # the durable plan size does not increase each call's schema/prompt size.
+    max_steps: 96
     max_tools_per_step: 3
+    # Structured plans have a separate bounded runtime budget. The normal
+    # interactive six-call/180s circuit breakers remain unchanged for ordinary
+    # turns. Stop/cancel remains available throughout scheduled execution.
+    # A tool-using step generally consumes two main-model calls: select/execute
+    # the tool, then consume its result and close the requirement.
+    max_model_calls: 193
+    max_iterations: 208
+    soft_timeout_seconds: 3600
+    hard_timeout_seconds: 5400
   # Keep each small-model iteration narrow. Read-only calls may be batched, but
   # only one mutating side effect is allowed before the model sees its result.
   max_tool_calls_per_iteration: 3
@@ -209,6 +221,7 @@ agent:
     failure_items: 8
     validator_items: 6
     plan_items: 6
+    scheduler_steps: 96
 
   # Before the last allowed tool-loop iteration, the fast model classifies the
   # loop and the harness injects constrained recovery guidance for the main model.

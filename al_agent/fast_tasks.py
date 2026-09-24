@@ -24,6 +24,23 @@ STRUCTURED_PLAN_SCHEMA = {
     },
 }
 
+
+def _structured_plan_schema(max_steps: int) -> dict[str, Any]:
+    """Return the Ollama structured-output schema for the configured plan size.
+
+    ``STRUCTURED_PLAN_SCHEMA`` remains the stable/default 32-step contract used
+    by existing callers/tests, while large explicitly enumerated tasks may raise
+    the configured scheduler ceiling without silently truncating the compiler's
+    JSON output at 32 items.
+    """
+    limit = max(1, min(int(max_steps), 128))
+    if limit == int(STRUCTURED_PLAN_SCHEMA["maxItems"]):
+        return STRUCTURED_PLAN_SCHEMA
+    schema = dict(STRUCTURED_PLAN_SCHEMA)
+    schema["items"] = dict(STRUCTURED_PLAN_SCHEMA["items"])
+    schema["maxItems"] = limit
+    return schema
+
 _COMMAND_VERB_RE = re.compile(
     r"\b(?:check|read|scan|summari[sz]e|find|search|look\s+up|get|fetch|inspect|"
     r"list|show|compare|verify|test|run|execute|create|write|update|modify|fix|"
@@ -35,6 +52,73 @@ _COMMAND_BOUNDARY_RE = re.compile(
     r"(?:\n\s*(?:[-*•]|\d{1,3}[.)])\s+|\s*;\s*|\b(?:and\s+then|then|after\s+that|next)\b)",
     re.I,
 )
+
+_CONSTRAINT_ONLY_RE = re.compile(
+    r"^(?:"
+    r"do\s+not\b|don't\b|never\b|prefer\b|must\s+not\b|"
+    r"use\b.+\bonly\s+when\b|"
+    r"if\b.+\b(?:mark|report)\b.+\bblocked\b|"
+    r"verify\s+important\s+claims\b|"
+    r"complete\s+(?:the\s+)?entire\b|"
+    r"treat\s+every\s+numbered\b"
+    r")",
+    re.I,
+)
+
+_NUMBERED_HEADING_RE = re.compile(r"(?m)^\s*#{1,6}\s+(\d{1,3})[.)]\s+([^\n#]+?)\s*$")
+
+
+def _is_constraint_only_task(text: str) -> bool:
+    """Return True for global policy/guardrail text that must not consume a step.
+
+    The durable working-state layer extracts these constraints from the original
+    objective.  The plan compiler therefore must not turn them into model calls
+    of their own (for example, spending one inference to acknowledge
+    ``Do not modify packages``).
+    """
+    value = re.sub(r"\s+", " ", str(text or "")).strip(" -*•0123456789.)")
+    return bool(value and _CONSTRAINT_ONLY_RE.search(value))
+
+
+def _explicit_numbered_requirement_plan(user_text: str, max_steps: int) -> list[str]:
+    """Extract explicitly enumerated executable requirements without a model.
+
+    Large benchmark/audit prompts often say that *every numbered requirement*
+    is independent and then use markdown headings such as ``## 17. Network
+    Path``.  Sending that document to a 2B compiler can mistake the separate
+    numbered safety list for work and can fragment bullet lists into bogus
+    tasks.  When the user's structure is unambiguous, preserve it exactly.
+    """
+    source = str(user_text or "")
+    lower = source.casefold()
+    explicit = bool(
+        re.search(r"\b(?:every|each)\s+numbered\s+(?:requirement|item|test)\b", lower)
+        or "complete the entire suite" in lower
+    )
+    if not explicit:
+        return []
+    matches = list(_NUMBERED_HEADING_RE.finditer(source))
+    if len(matches) < 2:
+        return []
+    limit = max(2, min(int(max_steps), 128))
+    tasks: list[str] = []
+    for idx, match in enumerate(matches[:limit]):
+        number = match.group(1)
+        title = re.sub(r"\s+", " ", match.group(2)).strip()
+        section_end = matches[idx + 1].start() if idx + 1 < len(matches) else len(source)
+        body = source[match.end():section_end]
+        # A final non-numbered report/output section belongs to synthesis, not
+        # the last executable requirement.
+        body = re.split(r"(?mi)^\s*#{1,6}\s+(?:FINAL\s+REPORT|OUTPUT\b)", body, maxsplit=1)[0]
+        body = re.sub(r"(?m)^\s*---\s*$", " ", body)
+        body = re.sub(r"\s+", " ", body).strip()
+        task = f"{number}. {title}"
+        if body:
+            task += ": " + body
+        task = task[:1200].strip()
+        if task and not _is_constraint_only_task(task):
+            tasks.append(task)
+    return tasks
 
 
 def should_compile_structured_plan(
@@ -73,12 +157,15 @@ def _deterministic_plan_fallback(user_text: str, max_steps: int = 32) -> list[st
     # Prefer explicit list items because they preserve user-authored boundaries.
     item_re = re.compile(r"(?ms)^\s*(?:[-*•]|\d{1,3}[.)])\s+(.+?)(?=^\s*(?:[-*•]|\d{1,3}[.)])\s+|\Z)")
     candidates = [re.sub(r"\s+", " ", match.group(1)).strip() for match in item_re.finditer(text)]
-    candidates = [item for item in candidates if _COMMAND_VERB_RE.search(item)]
+    candidates = [
+        item for item in candidates
+        if _COMMAND_VERB_RE.search(item) and not _is_constraint_only_task(item)
+    ]
     if len(candidates) < 2:
         candidates = [
             re.sub(r"\s+", " ", part).strip(" ,.;:-")
             for part in _COMMAND_BOUNDARY_RE.split(text)
-            if _COMMAND_VERB_RE.search(part or "")
+            if _COMMAND_VERB_RE.search(part or "") and not _is_constraint_only_task(part or "")
         ]
     clean: list[str] = []
     seen: set[str] = set()
@@ -98,11 +185,13 @@ def structured_plan_compiler_prompt(user_text: str) -> list[dict[str, str]]:
         "You are a deterministic task-plan compiler. You do not execute tasks and you do not choose tools. "
         "Convert the user's actual requested work into a JSON array of short, sequential, self-contained task strings. "
         "Return ONLY the JSON array and no prose. Each array item must represent exactly one executable requirement. "
-        "Preserve the user's order, targets, quantities, paths, locations, dates, and safety constraints. "
+        "Preserve the user's order, targets, quantities, paths, locations, dates, and apply safety constraints to the work. "
         "Do not invent work, tools, arguments, credentials, or missing facts. "
         "Do not turn examples, quoted text, explanations, source snippets, hypothetical scenarios, or lists of possible intents "
-        "into tasks unless the user explicitly asks to execute them. Merge wording that belongs to the same atomic requirement. "
-        "If a global constraint applies to multiple tasks, repeat only the minimal relevant constraint in those task strings."
+        "into tasks unless the user explicitly asks to execute them. Global safety/policy constraints are NOT standalone tasks: "
+        "never emit an item whose only purpose is to acknowledge 'Do not ...', 'Never ...', 'Prefer ...', or similar guardrail text. "
+        "Merge wording that belongs to the same atomic requirement. If a global constraint materially changes one executable "
+        "task, attach only the minimal relevant constraint to that task."
     )
     # Keep the compiler request bounded even when the original prompt is huge;
     # the deterministic fallback remains available if the clipped view prevents
@@ -138,6 +227,9 @@ def compile_structured_plan(
     """
     if not should_compile_structured_plan(objective, min_chars=min_chars, min_commands=min_commands):
         return []
+    explicit_plan = _explicit_numbered_requirement_plan(objective, max_steps=max_steps)
+    if explicit_plan:
+        return explicit_plan
     fast_options = dict(options or {})
     fast_options["temperature"] = 0.0
     fast_options["num_predict"] = min(max(128, int(fast_options.get("num_predict") or 384)), 768)
@@ -146,7 +238,7 @@ def compile_structured_plan(
             model=model,
             messages=structured_plan_compiler_prompt(objective),
             stream=False,
-            format=STRUCTURED_PLAN_SCHEMA,
+            format=_structured_plan_schema(max_steps),
             options=fast_options,
             keep_alive=keep_alive,
             **capability_chat_overrides(model, think=False, tools=[]),
@@ -162,13 +254,16 @@ def compile_structured_plan(
                 continue
             task = re.sub(r"\s+", " ", raw).strip()
             marker = task.casefold()
-            if not task or len(task) > 1200 or marker in seen:
+            if not task or len(task) > 1200 or marker in seen or _is_constraint_only_task(task):
                 continue
             seen.add(marker)
             clean.append(task)
-    if clean:
+    if len(clean) >= 2:
         return clean
-    return _deterministic_plan_fallback(objective, max_steps=max_steps)
+    fallback = _deterministic_plan_fallback(objective, max_steps=max_steps)
+    if len(fallback) >= 2:
+        return fallback
+    return clean or fallback
 
 
 def _message_content(response: Any) -> str:

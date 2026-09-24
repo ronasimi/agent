@@ -38,7 +38,7 @@ STRUCTURED_PLAN_CFG = AGENT_CFG.get("structured_plan", {})
 STRUCTURED_PLAN_ENABLED = bool(STRUCTURED_PLAN_CFG.get("enabled", True))
 STRUCTURED_PLAN_MIN_CHARS = max(256, int(STRUCTURED_PLAN_CFG.get("min_chars", 900)))
 STRUCTURED_PLAN_MIN_COMMANDS = max(2, int(STRUCTURED_PLAN_CFG.get("min_commands", 3)))
-STRUCTURED_PLAN_MAX_STEPS = max(2, min(int(STRUCTURED_PLAN_CFG.get("max_steps", 32)), 64))
+STRUCTURED_PLAN_MAX_STEPS = max(2, min(int(STRUCTURED_PLAN_CFG.get("max_steps", 96)), 128))
 STRUCTURED_PLAN_MAX_TOOLS = max(1, min(int(STRUCTURED_PLAN_CFG.get("max_tools_per_step", 3)), 6))
 OLLAMA_HOST = AGENT_CFG.get("host", "http://127.0.0.1:11434")
 os.environ["OLLAMA_HOST"] = OLLAMA_HOST
@@ -72,6 +72,29 @@ MAX_ITERATIONS_HARD = max(MAX_ITERATIONS, int(AGENT_CFG.get("max_iterations_hard
 TURN_SOFT_TIMEOUT_SECONDS = max(1.0, float(AGENT_CFG.get("turn_soft_timeout_seconds", 120)))
 TURN_HARD_TIMEOUT_SECONDS = max(TURN_SOFT_TIMEOUT_SECONDS, float(AGENT_CFG.get("turn_hard_timeout_seconds", 180)))
 MAX_MODEL_CALLS_PER_TURN = max(1, int(AGENT_CFG.get("max_model_calls_per_turn", 6)))
+# Structured plans intentionally isolate one requirement at a time. They need a
+# separate bounded execution budget; applying the ordinary six-call interactive
+# ceiling makes any plan with >5 steps impossible to finish (one final synthesis
+# call is also required). These limits apply only when the harness-owned
+# scheduler is active.
+STRUCTURED_PLAN_MAX_MODEL_CALLS = max(
+    MAX_MODEL_CALLS_PER_TURN,
+    # A tool-using scheduler step normally needs one call to emit the tool call
+    # and a second call to consume the result/close the step, plus synthesis.
+    min(int(STRUCTURED_PLAN_CFG.get("max_model_calls", (STRUCTURED_PLAN_MAX_STEPS * 2) + 1)), 256),
+)
+STRUCTURED_PLAN_MAX_ITERATIONS = max(
+    MAX_ITERATIONS_HARD,
+    min(int(STRUCTURED_PLAN_CFG.get("max_iterations", (STRUCTURED_PLAN_MAX_STEPS * 2) + 16)), 320),
+)
+STRUCTURED_PLAN_SOFT_TIMEOUT_SECONDS = max(
+    TURN_SOFT_TIMEOUT_SECONDS,
+    float(STRUCTURED_PLAN_CFG.get("soft_timeout_seconds", 3600)),
+)
+STRUCTURED_PLAN_HARD_TIMEOUT_SECONDS = max(
+    STRUCTURED_PLAN_SOFT_TIMEOUT_SECONDS,
+    float(STRUCTURED_PLAN_CFG.get("hard_timeout_seconds", 5400)),
+)
 # Repeated empty/invalid/error responses are a no-progress condition, not a
 # reason to spend the entire global model-call safety budget.  Bound them
 # independently so the hard budget remains a last-resort circuit breaker.

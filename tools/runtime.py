@@ -18,6 +18,8 @@ from typing import Any, Optional
 
 DB_PATH = os.environ.get("AGENT_DB_PATH", "/app/memory/knowledge.db")
 DB_TIMEOUT = float(os.environ.get("AGENT_DB_TIMEOUT", "15"))
+COMPUTE_TAPE_PAGE_SIZE = 4096
+COMPUTE_TAPE_QUERY_PAGE_BATCH = 400
 
 _SCHEMA_LOCK = threading.Lock()
 
@@ -90,16 +92,6 @@ def init_runtime_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_job_checkpoints_job
               ON agent_job_checkpoints(job_id, step DESC);
 
-            CREATE TABLE IF NOT EXISTS durable_compute_tape (
-                job_id TEXT NOT NULL,
-                address INTEGER NOT NULL,
-                symbol TEXT NOT NULL,
-                PRIMARY KEY(job_id, address),
-                FOREIGN KEY(job_id) REFERENCES agent_jobs(id) ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS idx_durable_compute_tape_range
-              ON durable_compute_tape(job_id, address);
-
             CREATE TABLE IF NOT EXISTS monitor_state (
                 key TEXT PRIMARY KEY,
                 value_json TEXT NOT NULL,
@@ -160,6 +152,93 @@ def init_runtime_db() -> None:
             conn.execute("ALTER TABLE agent_jobs ADD COLUMN recovery_failures INTEGER NOT NULL DEFAULT 0")
         if "max_recovery_failures" not in columns:
             conn.execute("ALTER TABLE agent_jobs ADD COLUMN max_recovery_failures INTEGER NOT NULL DEFAULT 3")
+        _ensure_compute_tape_schema(conn)
+
+
+def _split_compute_tape_address(address: int | str) -> tuple[str, int]:
+    """Split an arbitrary-precision tape address into a durable page key/offset."""
+    value = int(address)
+    page, offset = divmod(value, COMPUTE_TAPE_PAGE_SIZE)
+    return str(page), int(offset)
+
+
+def _join_compute_tape_address(page_index: int | str, cell_offset: int) -> int:
+    """Reconstruct an arbitrary-precision tape address from its paged form."""
+    offset = int(cell_offset)
+    if offset < 0 or offset >= COMPUTE_TAPE_PAGE_SIZE:
+        raise ValueError(f"invalid durable compute tape cell offset: {offset}")
+    return int(page_index) * COMPUTE_TAPE_PAGE_SIZE + offset
+
+
+def _create_compute_tape_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS durable_compute_tape (
+            job_id TEXT NOT NULL,
+            page_index TEXT NOT NULL,
+            cell_offset INTEGER NOT NULL
+                CHECK(cell_offset >= 0 AND cell_offset < {COMPUTE_TAPE_PAGE_SIZE}),
+            symbol TEXT NOT NULL,
+            PRIMARY KEY(job_id, page_index, cell_offset),
+            FOREIGN KEY(job_id) REFERENCES agent_jobs(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_durable_compute_tape_page
+          ON durable_compute_tape(job_id, page_index, cell_offset)
+        """
+    )
+
+
+def _ensure_compute_tape_schema(conn: sqlite3.Connection) -> None:
+    """Create the arbitrary-precision paged tape schema and migrate v1 in place.
+
+    Version 1 stored absolute tape addresses in a SQLite INTEGER, which imposes
+    a signed-64-bit ceiling. Version 2 stores an arbitrary-precision decimal
+    page index as TEXT plus a small integer offset. The migration is fully
+    transactional and preserves every v1 cell.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(durable_compute_tape)").fetchall()}
+    if not columns:
+        _create_compute_tape_table(conn)
+        return
+    if {"page_index", "cell_offset", "symbol"}.issubset(columns):
+        _create_compute_tape_table(conn)
+        return
+    if "address" not in columns:
+        raise RuntimeError("unsupported durable_compute_tape schema")
+
+    conn.execute("SAVEPOINT migrate_durable_compute_tape_v2")
+    try:
+        conn.execute("DROP INDEX IF EXISTS idx_durable_compute_tape_range")
+        conn.execute("ALTER TABLE durable_compute_tape RENAME TO durable_compute_tape_v1")
+        _create_compute_tape_table(conn)
+        cursor = conn.execute(
+            "SELECT job_id, address, symbol FROM durable_compute_tape_v1"
+        )
+        while True:
+            rows = cursor.fetchmany(1000)
+            if not rows:
+                break
+            migrated = []
+            for row in rows:
+                page_index, cell_offset = _split_compute_tape_address(row[1])
+                migrated.append((str(row[0]), page_index, cell_offset, str(row[2])))
+            conn.executemany(
+                """
+                INSERT INTO durable_compute_tape(job_id, page_index, cell_offset, symbol)
+                VALUES (?, ?, ?, ?)
+                """,
+                migrated,
+            )
+        conn.execute("DROP TABLE durable_compute_tape_v1")
+        conn.execute("RELEASE SAVEPOINT migrate_durable_compute_tape_v2")
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT migrate_durable_compute_tape_v2")
+        conn.execute("RELEASE SAVEPOINT migrate_durable_compute_tape_v2")
+        raise
 
 
 def _json(value: Any) -> str:
@@ -193,46 +272,59 @@ def _apply_compute_tape_updates(
     job_id: str,
     updates: Optional[dict[int | str, Optional[str]]],
 ) -> None:
-    """Apply sparse tape deltas inside an existing SQLite transaction."""
+    """Apply arbitrary-precision sparse tape deltas in an existing transaction."""
     if not updates:
         return
-    deletes: list[tuple[str, int]] = []
-    upserts: list[tuple[str, int, str]] = []
+    deletes: list[tuple[str, str, int]] = []
+    upserts: list[tuple[str, str, int, str]] = []
     for raw_address, raw_symbol in updates.items():
-        address = int(raw_address)
+        page_index, cell_offset = _split_compute_tape_address(raw_address)
         if raw_symbol is None:
-            deletes.append((job_id, address))
+            deletes.append((str(job_id), page_index, cell_offset))
         else:
             symbol = str(raw_symbol)
             if not symbol:
                 raise ValueError("durable compute tape symbols must be non-empty strings")
-            upserts.append((job_id, address, symbol))
+            upserts.append((str(job_id), page_index, cell_offset, symbol))
     if deletes:
         conn.executemany(
-            "DELETE FROM durable_compute_tape WHERE job_id = ? AND address = ?",
+            """
+            DELETE FROM durable_compute_tape
+            WHERE job_id = ? AND page_index = ? AND cell_offset = ?
+            """,
             deletes,
         )
     if upserts:
         conn.executemany(
             """
-            INSERT INTO durable_compute_tape(job_id, address, symbol)
-            VALUES (?, ?, ?)
-            ON CONFLICT(job_id, address) DO UPDATE SET symbol = excluded.symbol
+            INSERT INTO durable_compute_tape(job_id, page_index, cell_offset, symbol)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(job_id, page_index, cell_offset)
+            DO UPDATE SET symbol = excluded.symbol
             """,
             upserts,
         )
 
 
 def replace_compute_tape(job_id: str, tape: dict[int | str, str]) -> int:
-    """Atomically replace one durable-compute job's sparse tape."""
+    """Atomically replace a job's sparse tape using arbitrary-precision pages."""
     init_runtime_db()
-    rows = [(str(job_id), int(address), str(symbol)) for address, symbol in (tape or {}).items()]
+    rows: list[tuple[str, str, int, str]] = []
+    for address, raw_symbol in (tape or {}).items():
+        symbol = str(raw_symbol)
+        if not symbol:
+            raise ValueError("durable compute tape symbols must be non-empty strings")
+        page_index, cell_offset = _split_compute_tape_address(address)
+        rows.append((str(job_id), page_index, cell_offset, symbol))
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         conn.execute("DELETE FROM durable_compute_tape WHERE job_id = ?", (str(job_id),))
         if rows:
             conn.executemany(
-                "INSERT INTO durable_compute_tape(job_id, address, symbol) VALUES (?, ?, ?)",
+                """
+                INSERT INTO durable_compute_tape(job_id, page_index, cell_offset, symbol)
+                VALUES (?, ?, ?, ?)
+                """,
                 rows,
             )
         conn.commit()
@@ -240,22 +332,43 @@ def replace_compute_tape(job_id: str, tape: dict[int | str, str]) -> int:
 
 
 def get_compute_tape_window(job_id: str, start: int, end_exclusive: int) -> dict[str, str]:
-    """Return populated cells in ``[start, end_exclusive)`` for one compute job."""
+    """Return populated cells in ``[start, end_exclusive)`` without int64 limits.
+
+    Page identifiers are exact arbitrary-precision decimal strings. Window reads
+    use bounded ``IN`` batches, so SQLite never needs to compare those strings
+    numerically and query parameter counts stay bounded even for large windows.
+    """
     init_runtime_db()
     start_i, end_i = int(start), int(end_exclusive)
     if end_i <= start_i:
         return {}
+
+    first_page = start_i // COMPUTE_TAPE_PAGE_SIZE
+    last_page = (end_i - 1) // COMPUTE_TAPE_PAGE_SIZE
+    result: dict[str, str] = {}
     with _connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT address, symbol
-            FROM durable_compute_tape
-            WHERE job_id = ? AND address >= ? AND address < ?
-            ORDER BY address ASC
-            """,
-            (str(job_id), start_i, end_i),
-        ).fetchall()
-    return {str(int(row[0])): str(row[1]) for row in rows}
+        page = first_page
+        while page <= last_page:
+            batch_last = min(last_page, page + COMPUTE_TAPE_QUERY_PAGE_BATCH - 1)
+            page_keys = [str(value) for value in range(page, batch_last + 1)]
+            placeholders = ",".join("?" for _ in page_keys)
+            rows = conn.execute(
+                f"""
+                SELECT page_index, cell_offset, symbol
+                FROM durable_compute_tape
+                WHERE job_id = ? AND page_index IN ({placeholders})
+                """,
+                [str(job_id), *page_keys],
+            ).fetchall()
+            cells = []
+            for row in rows:
+                address = _join_compute_tape_address(row[0], row[1])
+                if start_i <= address < end_i:
+                    cells.append((address, str(row[2])))
+            for address, symbol in sorted(cells, key=lambda item: item[0]):
+                result[str(address)] = symbol
+            page = batch_last + 1
+    return result
 
 
 def get_compute_tape_cell_count(job_id: str) -> int:

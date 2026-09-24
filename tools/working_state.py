@@ -64,7 +64,10 @@ _DEFAULT_LIMITS = {
     "failure_items": 8,
     "validator_items": 6,
     "plan_items": 6,
-    "scheduler_steps": 32,
+    # Large explicitly enumerated audit/stress-test requests may contain dozens
+    # of independent requirements. Keep the durable scheduler large enough to
+    # preserve them all while render() continues to expose only the active step.
+    "scheduler_steps": 96,
     "scheduler_task_chars": 1200,
     "scheduler_result_chars": 900,
     "scheduler_objective_chars": 24000,
@@ -262,17 +265,29 @@ def _save(state: dict[str, Any], conversation_id: str | None = None) -> None:
     _cache_state(cid, state)
 
 
-def _extract_constraints(user_text: str, policy_note: str, limit: int = 8) -> list[str]:
+def _extract_constraints(user_text: str, policy_note: str, limit: int = 32) -> list[str]:
     items: list[str] = []
     note = _normalize_space(policy_note)
     if note:
         items.append(note)
+    in_explicit_constraint_section = False
     for raw in str(user_text or "").splitlines():
+        heading = re.match(r"^\s*#{1,6}\s+(.+?)\s*$", raw)
+        if heading:
+            title = _normalize_space(heading.group(1)).casefold()
+            in_explicit_constraint_section = bool(
+                re.search(r"\b(?:safety|constraint|guardrail)\b", title)
+            )
+            continue
         line = _normalize_space(raw).lstrip("-*•0123456789. )")
         if not line:
             continue
         lower = line.lower()
-        if re.search(r"\b(do not|don't|never|must|only|unless|without|keep .*read[- ]only)\b", lower):
+        if in_explicit_constraint_section or re.search(
+            r"\b(do not|don't|never|must|only|unless|without|prefer|keep .*read[- ]only|"
+            r"use .*only when|verify important claims|complete the entire)\b",
+            lower,
+        ):
             clipped = _clip(line, 300)
             if clipped and clipped not in items:
                 items.append(clipped)
@@ -510,7 +525,7 @@ class WorkingStateStore:
                 "recent_context": _recent_context(recent_messages, self.limits["recent_context_chars"]) if continuation else "",
                 "recalled_context": _clip(recalled_context, self.limits["memory_chars"]),
             },
-            "constraints": constraints[:8],
+            "constraints": constraints[:32],
             "requirements": state_requirements,
             "tool_capabilities": _tool_capabilities(tool_schemas),
         })
@@ -616,34 +631,54 @@ class WorkingStateStore:
 
         This is intentionally separate from the normal canonical state so future
         steps remain invisible during execution. It is used only after all steps
-        are terminal.
+        are terminal. Prefer compacting every row over dropping early rows: the
+        final synthesis must be able to account for the complete plan.
         """
         state = _load(self._cid())
         scheduler = dict(state.get("scheduler") or {})
         if not scheduler.get("enabled") or not self.scheduler_complete(state=state):
             return "[]"
-        rows = []
-        for item in list(scheduler.get("steps") or []):
-            if not isinstance(item, dict):
-                continue
-            rows.append({
-                "id": str(item.get("id") or ""),
-                "task": _clip(item.get("task"), 360),
-                "status": str(item.get("status") or ""),
-                "reason": _clip(item.get("reason"), 160),
-                "result": _clip(item.get("result"), 520),
-            })
         limit = max(800, int(max_chars))
-        text = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
-        while len(rows) > 1 and len(text) > limit:
-            for row in rows:
-                row["task"] = _clip(row.get("task"), 180)
-                row["result"] = _clip(row.get("result"), 260)
-            text = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
+        source_rows = [dict(item) for item in list(scheduler.get("steps") or []) if isinstance(item, dict)]
+
+        def encode(task_chars: int, reason_chars: int, result_chars: int) -> str:
+            rows = [{
+                "id": str(item.get("id") or ""),
+                "task": _clip(item.get("task"), task_chars),
+                "status": str(item.get("status") or ""),
+                "reason": _clip(item.get("reason"), reason_chars),
+                "result": _clip(item.get("result"), result_chars),
+            } for item in source_rows]
+            return json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
+
+        # Progressive whole-plan compaction. Even the smallest tier retains each
+        # step's identity/status plus enough task/result text to synthesize a
+        # coverage table or blocker summary.
+        for task_chars, reason_chars, result_chars in (
+            (360, 160, 520),
+            (220, 120, 300),
+            (150, 90, 180),
+            (100, 70, 110),
+            (72, 48, 72),
+        ):
+            text = encode(task_chars, reason_chars, result_chars)
             if len(text) <= limit:
-                break
-            rows.pop(0)
-            text = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
+                return text
+
+        # Extremely small caller budgets cannot represent a large plan in full.
+        # Preserve deterministic coverage metadata for every step before falling
+        # back to dropping rows.
+        minimal_rows = [{
+            "id": str(item.get("id") or ""),
+            "status": str(item.get("status") or ""),
+            "task": _clip(item.get("task"), 48),
+        } for item in source_rows]
+        text = json.dumps(minimal_rows, ensure_ascii=False, separators=(",", ":"))
+        if len(text) <= limit:
+            return text
+        while len(minimal_rows) > 1 and len(text) > limit:
+            minimal_rows.pop(0)
+            text = json.dumps(minimal_rows, ensure_ascii=False, separators=(",", ":"))
         return text if len(text) <= limit else "[]"
 
     def update_tools(self, tool_schemas: list[dict[str, Any]]) -> None:

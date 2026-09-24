@@ -14,18 +14,22 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from .task_requirements import classify_request_intent, derive_fact_frames, derive_task_frame, is_implementation_request
+from .task_requirements import (
+    classify_request_intent, derive_fact_frames, derive_task_frame, is_implementation_request,
+    is_news_fact_request, is_weather_fact_request,
+)
 from .market import extract_market_instruments, is_market_price_request
 
 WEATHER_RECIPE_NAME = "weather.current_forecast"
 
 _WEATHER_REQUEST_PATTERNS = (
-    re.compile(r"\bwhat(?:'s| is) (?:the )?(?:weather|forecast)\b", re.I),
+    re.compile(r"\bwhat(?:'s| is) (?:the )?(?:weather|forecast|conditions? outside)\b", re.I),
+    re.compile(r"\b(?:conditions? outside|outside conditions?)\b", re.I),
     re.compile(r"\b(?:weather|forecast|temperature|precipitation|rain|snow|humidity|wind)\b.*\b(?:today|tomorrow|current|now|tonight|week|days?|hours?)\b", re.I),
     re.compile(r"\b(?:find|check|show|get|give|tell me|look up)\b.*\b(?:weather|forecast|temperature|precipitation|rain|snow|humidity|wind)\b", re.I),
 )
 _TIME_REQUEST_RE = re.compile(
-    r"\b(what time is it|current time|current date|today(?:'s)? date|what day is it|local time|utc time|timezone)\b",
+    r"\b(what time is it|current time|current clock time|current date|today(?:'s)? date|what day is it|local time|utc time|timezone|time in [A-Za-z])",
     re.I,
 )
 _HOST_REQUEST_RE = re.compile(
@@ -163,7 +167,9 @@ def requested_fact_types(
     result.update(str(key) for key in dict(fact_frames or {}) if str(key))
     explicit_intent = classify_request_intent(text)
     implementation = is_implementation_request(text)
-    if frame.get("intent") == "weather" or explicit_intent == "weather" or (not implementation and any(pattern.search(text) for pattern in _WEATHER_REQUEST_PATTERNS)):
+    if frame.get("intent") == "weather" or explicit_intent == "weather" or (
+        not implementation and (is_weather_fact_request(text) or any(pattern.search(text) for pattern in _WEATHER_REQUEST_PATTERNS))
+    ):
         result.add("weather")
     if frame.get("intent") == "current_time" or explicit_intent == "current_time" or (not implementation and _TIME_REQUEST_RE.search(text)):
         result.add("current_time")
@@ -173,7 +179,9 @@ def requested_fact_types(
         result.add("network_state")
     if frame.get("intent") == "repository_state" or explicit_intent == "repository_state" or (not implementation and _REPO_REQUEST_RE.search(text)):
         result.add("repository_state")
-    if frame.get("intent") == "news" or explicit_intent == "news" or (not implementation and _NEWS_REQUEST_RE.search(text)):
+    if frame.get("intent") == "news" or explicit_intent == "news" or (
+        not implementation and (is_news_fact_request(text) or _NEWS_REQUEST_RE.search(text))
+    ):
         result.add("news")
     if frame.get("intent") == "market_price" or explicit_intent == "market_price" or (not implementation and is_market_price_request(text)):
         result.add("market_price")

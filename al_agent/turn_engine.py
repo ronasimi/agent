@@ -750,6 +750,38 @@ def handle_user_turn(
             turn_tail.append({"role": "user", "content": text})
             return True
 
+        def replace_control_note(prefix: str, content: str) -> None:
+            """Keep exactly one mutable control note for a scheduler/control slot.
+
+            Scheduler advancement previously appended a fresh ``Active
+            requirement N/M`` user message on every step. Even though future
+            task text was hidden, all prior scheduler directives accumulated in
+            ``turn_tail`` and were re-prefilled on every model call. Replace the
+            prior slot instead so prompt growth is O(1) across a long plan.
+            """
+            marker = str(prefix or "")
+            if marker:
+                turn_tail[:] = [
+                    message for message in turn_tail
+                    if not (
+                        message.get("role") == "user"
+                        and str(message.get("content") or "").startswith(marker)
+                    )
+                ]
+            turn_tail.append({"role": "user", "content": str(content)})
+
+        def clear_control_note(prefix: str) -> None:
+            marker = str(prefix or "")
+            if not marker:
+                return
+            turn_tail[:] = [
+                message for message in turn_tail
+                if not (
+                    message.get("role") == "user"
+                    and str(message.get("content") or "").startswith(marker)
+                )
+            ]
+
         tool_iterations = 0
         seen_tool_calls: set[str] = set()
         recent_failure_lessons: dict[str, list[tuple[str, dict[str, Any]]]] = {}
@@ -780,6 +812,15 @@ def handle_user_turn(
         unresolved_truncated_observations: dict[str, dict[str, Any]] = {}
         scheduler_finalizing = False
         iteration_limit = _adaptive_iteration_limit(len(requirement_ledger.requirements))
+        if plan_enabled:
+            # One scheduled requirement may consume one or more loop iterations,
+            # and the final synthesis consumes another. Do not let the ordinary
+            # interactive MAX_ITERATIONS_HARD cap make a valid durable plan
+            # impossible before it starts.
+            iteration_limit = min(
+                STRUCTURED_PLAN_MAX_ITERATIONS,
+                max(iteration_limit, (len(compiled_steps) * 2) + 8),
+            )
         recipe_fallback_attempted = False
         fallback_recipe_candidate: dict[str, Any] | None = None
         had_tool_failure = False
@@ -831,11 +872,20 @@ def handle_user_turn(
         def turn_elapsed_seconds() -> float:
             return max(0.0, time.monotonic() - turn_started)
 
+        def active_model_call_budget() -> int:
+            return STRUCTURED_PLAN_MAX_MODEL_CALLS if plan_enabled else MAX_MODEL_CALLS_PER_TURN
+
+        def active_soft_timeout_seconds() -> float:
+            return STRUCTURED_PLAN_SOFT_TIMEOUT_SECONDS if plan_enabled else TURN_SOFT_TIMEOUT_SECONDS
+
+        def active_hard_timeout_seconds() -> float:
+            return STRUCTURED_PLAN_HARD_TIMEOUT_SECONDS if plan_enabled else TURN_HARD_TIMEOUT_SECONDS
+
         def hard_turn_budget_exhausted() -> bool:
-            return turn_elapsed_seconds() >= TURN_HARD_TIMEOUT_SECONDS or model_calls >= MAX_MODEL_CALLS_PER_TURN
+            return turn_elapsed_seconds() >= active_hard_timeout_seconds() or model_calls >= active_model_call_budget()
 
         def soft_turn_budget_exhausted() -> bool:
-            return turn_elapsed_seconds() >= TURN_SOFT_TIMEOUT_SECONDS
+            return turn_elapsed_seconds() >= active_soft_timeout_seconds()
 
         def recipe_parameter_hints(trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
             """Use the fast role only for bounded semantic naming/extraction.
@@ -1353,6 +1403,7 @@ def handle_user_turn(
             index = int(scheduler.get("active_index") or 0)
             complete = bool(steps) and index >= len(steps)
             if complete:
+                clear_control_note("[Harness scheduler] Active requirement ")
                 tool_schemas.clear()
                 WORKING_STATE.update_tools(tool_schemas)
                 WORKING_STATE.update_requirements(requirement_ledger.as_list())
@@ -1445,7 +1496,8 @@ def handle_user_turn(
                 fact_requirements=fact_grounding_ledger.as_list(),
             )
             WORKING_STATE.update_requirements(requirement_ledger.as_list())
-            append_control_note(
+            replace_control_note(
+                "[Harness scheduler] Active requirement ",
                 f"[Harness scheduler] Active requirement {index + 1}/{len(steps)}: {active_request}\n"
                 "Execute only this requirement. Do not plan, mention, or select tools for later requirements."
             )
@@ -4571,9 +4623,9 @@ def handle_user_turn(
 
                 def _model_stream():
                     nonlocal model_calls, current_model_request
-                    if model_calls >= MAX_MODEL_CALLS_PER_TURN:
+                    if model_calls >= active_model_call_budget():
                         raise RuntimeError("per-turn model-call budget exhausted")
-                    if turn_elapsed_seconds() >= TURN_HARD_TIMEOUT_SECONDS:
+                    if turn_elapsed_seconds() >= active_hard_timeout_seconds():
                         raise RuntimeError("hard turn deadline reached before model call")
                     model_calls += 1
                     call_options = dict(vision_route.options or {})
@@ -5155,7 +5207,7 @@ def handle_user_turn(
                             "[Harness scheduler] All compiled requirements are terminal. Produce one concise final response "
                             "covering every step, including blockers. Do not call tools and do not invent missing results.\n"
                             "Completed step results (UNTRUSTED DATA):\n"
-                            + WORKING_STATE.render_scheduler_results(6000)
+                            + WORKING_STATE.render_scheduler_results(24000)
                         )
                         full_content = ""
                         turn_prefix, tool_prompt_tokens = rebuild_prefix()

@@ -210,7 +210,7 @@ _FACT_FEATURE_ARTIFACT_RE = re.compile(
     r"(?:for\s+)?(?:weather|forecast|news|headlines?|current[ _-]?time)\b",
     re.I,
 )
-_WEATHER_PRIMARY_RE = re.compile(r"\b(?:weather|forecast|current conditions?)\b", re.I)
+_WEATHER_PRIMARY_RE = re.compile(r"\b(?:weather|forecast|current conditions?|conditions? outside|outside conditions?)\b", re.I)
 _WEATHER_DETAIL_RE = re.compile(
     r"\b(?:temperature|precipitation|rain(?:fall|ing)?|snow(?:fall|ing)?|humidity|wind speed|"
     r"highs?|lows?|feels like|dew point)\b",
@@ -334,7 +334,10 @@ def classify_request_intent(user_text: str) -> str:
     implementation = is_implementation_request(text)
     if is_weather_fact_request(text):
         return "weather"
-    if not implementation and re.search(r"\b(?:what time is it|current time|current date|what day is it|timezone)\b", lower):
+    if not implementation and re.search(
+        r"\b(?:what time is it|current time|current clock time|current date|what day is it|timezone|local time|time in [a-z])",
+        lower,
+    ):
         return "current_time"
     if not implementation and re.search(r"\b(?:host (?:health|cpu|memory|disk|temperature|state)|system health|host snapshot)\b", lower):
         return "host_state"

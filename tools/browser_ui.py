@@ -64,7 +64,14 @@ _BROWSER_INIT_JS = r"""
   window.__agentMutationLog = [];
   window.__agentRefMap = window.__agentRefMap || new WeakMap();
   window.__agentRefIndex = window.__agentRefIndex || new Map();
-  window.__agentRefCounter = window.__agentRefCounter || 1;
+  // Keep ephemeral refs monotonic across same-origin hard reloads.  This does
+  // not make a stale ref valid on a new document; it prevents a new element
+  // from silently reusing the same eN identifier and being mistaken for it.
+  let storedRefCounter = 0;
+  try {
+    storedRefCounter = parseInt(sessionStorage.getItem('__agentRefCounter') || '0', 10) || 0;
+  } catch (_) {}
+  window.__agentRefCounter = Math.max(Number(window.__agentRefCounter || 1), storedRefCounter > 0 ? storedRefCounter + 1000 : 1);
   window.__agentRefFor = (el) => {
     if (!el || el.nodeType !== 1) return '';
     let ref = window.__agentRefMap.get(el);
@@ -72,9 +79,36 @@ _BROWSER_INIT_JS = r"""
       ref = `e${window.__agentRefCounter++}`;
       window.__agentRefMap.set(el, ref);
       window.__agentRefIndex.set(ref, el);
+      try { sessionStorage.setItem('__agentRefCounter', String(window.__agentRefCounter)); } catch (_) {}
     }
     return ref;
   };
+  // Stable refs are recovery fingerprints, not primary action identifiers.
+  // Duplicate semantic controls may share a fingerprint, so Python only uses
+  // them when the current snapshot contains one unambiguous match.
+  const stableHash = (value) => {
+    let hash = 2166136261;
+    const text = String(value || '');
+    for (let i = 0; i < text.length; i++) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+  };
+  window.__agentStableRefFor = (el, semanticName='', semanticRole='') => {
+    if (!el || el.nodeType !== 1) return '';
+    const identity = [
+      el.tagName?.toLowerCase?.() || '',
+      semanticRole || el.getAttribute('role') || '',
+      String(semanticName || '').replace(/\s+/g, ' ').trim().slice(0, 120),
+      el.getAttribute('name') || '',
+      el.getAttribute('id') || '',
+      el.getAttribute('type') || '',
+      el.getAttribute('href') || '',
+    ].join('|');
+    return `s${stableHash(identity)}`;
+  };
+  window.__agentStableRefIndex = window.__agentStableRefIndex || new Map();
   const selector = %SELECTOR%;
   const bump = (kind='mutation', target=null, extra={}) => {
     window.__agentUiRevision = (window.__agentUiRevision || 0) + 1;
@@ -132,6 +166,9 @@ _BROWSER_INIT_JS = r"""
     clearTimeout(scrollTimer);
     scrollTimer = setTimeout(() => bump('scroll', event.target || document.documentElement), 24);
   }, true);
+  addEventListener('beforeunload', () => {
+    try { sessionStorage.setItem('__agentRefCounter', String(window.__agentRefCounter || 1)); } catch (_) {}
+  }, {once:true});
 })();
 """.replace("%SELECTOR%", json.dumps(_INTERACTIVE_SELECTOR))
 
@@ -223,12 +260,17 @@ _SEMANTIC_SNAPSHOT_JS = r"""
     const disabled = Boolean(el.disabled) || el.getAttribute('aria-disabled') === 'true';
     const selected = el.getAttribute('aria-selected');
     const expanded = el.getAttribute('aria-expanded');
+    const name = textOf(el).slice(0, 240);
+    const ref = refFor(el);
+    const stableRef = window.__agentStableRefFor?.(el, name, role) || '';
+    if (stableRef) window.__agentStableRefIndex?.set(stableRef, ref);
     elements.push({
-      ref: refFor(el),
+      ref,
+      stable_ref: stableRef,
       tag: el.tagName.toLowerCase(),
       input_type: inputType,
       role,
-      name: textOf(el).slice(0, 240),
+      name,
       value: value.slice(0, 500),
       disabled,
       checked,
@@ -308,8 +350,11 @@ refs => {
     const rawValue = ('value' in el && typeof el.value !== 'undefined') ? String(el.value ?? '') : '';
     const dx = rect.right < 0 ? -rect.right : (rect.left > innerWidth ? rect.left - innerWidth : 0);
     const dy = rect.bottom < 0 ? -rect.bottom : (rect.top > innerHeight ? rect.top - innerHeight : 0);
+    const role = inferRole(el), name = textOf(el).slice(0,240);
+    const stableRef = window.__agentStableRefFor?.(el, name, role) || '';
+    if (stableRef) window.__agentStableRefIndex?.set(stableRef, ref);
     return {
-      ref, tag:el.tagName.toLowerCase(), input_type:inputType, role:inferRole(el), name:textOf(el).slice(0,240),
+      ref, stable_ref:stableRef, tag:el.tagName.toLowerCase(), input_type:inputType, role, name,
       value:(inputType === 'password' ? '[redacted]' : rawValue).slice(0,500),
       disabled:Boolean(el.disabled) || el.getAttribute('aria-disabled') === 'true',
       checked:('checked' in el) ? Boolean(el.checked) : null,
@@ -345,6 +390,10 @@ class BrowserSession:
     step_count: int = 0
     recovery_attempts: int = 0
     session_create_ms: float = 0.0
+    # Bounded ephemeral→stable history lets a stale eN ref be reacquired after
+    # a same-origin reload or framework re-render without exposing stable hashes
+    # as primary action refs to the model.
+    ref_history: dict[str, str] = field(default_factory=dict)
 
 
 class BrowserRuntime:
@@ -554,6 +603,39 @@ def _element_map(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
         for row in snapshot.get("elements", [])
         if isinstance(row, dict) and row.get("ref")
     }
+
+
+def _remember_ref_history(session: BrowserSession, snapshot: dict[str, Any], *, limit: int = 2048) -> None:
+    """Retain a bounded mapping from ephemeral refs to semantic fingerprints."""
+    for row in snapshot.get("elements", []) if isinstance(snapshot, dict) else []:
+        if not isinstance(row, dict):
+            continue
+        ref = str(row.get("ref") or "")
+        stable = str(row.get("stable_ref") or "")
+        if ref and stable:
+            session.ref_history[ref] = stable
+    overflow = len(session.ref_history) - max(128, int(limit))
+    if overflow > 0:
+        # dict preserves insertion order; discard oldest history first.
+        for key in list(session.ref_history)[:overflow]:
+            session.ref_history.pop(key, None)
+
+
+def _stable_replacement_ref(old_row: dict[str, Any], current: dict[str, Any]) -> str:
+    stable = str(old_row.get("stable_ref") or "")
+    if not stable:
+        return ""
+    matches = [
+        str(row.get("ref") or "")
+        for row in current.get("elements", [])
+        if isinstance(row, dict) and str(row.get("stable_ref") or "") == stable and row.get("ref")
+    ]
+    return matches[0] if len(matches) == 1 else ""
+
+
+def _history_replacement_ref(session: BrowserSession, ref: str, current: dict[str, Any]) -> str:
+    stable = str(session.ref_history.get(str(ref or ""), ""))
+    return _stable_replacement_ref({"stable_ref": stable}, current) if stable else ""
 
 
 def _task_tokens(task_hint: str) -> set[str]:
@@ -823,12 +905,14 @@ async def _snapshot(session: BrowserSession, *, force: bool = False) -> dict[str
             cached["downloads"] = [dict(row) for row in session.downloads[-50:]]
             cached["auth"] = _detect_auth_state(cached)
             session.last_mutation_seq = max(session.last_mutation_seq, mutation_seq)
+            _remember_ref_history(session, cached)
             return cached
         events = _mutation_events_since(light, session.last_mutation_seq)
         patched = await _incremental_snapshot(session, light, events)
         if patched is not None:
             session.cache_hits += 1
             session.last_mutation_seq = max(session.last_mutation_seq, mutation_seq)
+            _remember_ref_history(session, patched)
             return patched
     session.cache_misses += 1
     try:
@@ -842,6 +926,7 @@ async def _snapshot(session: BrowserSession, *, force: bool = False) -> dict[str
     result["downloads"] = [dict(row) for row in session.downloads[-50:]]
     result["auth"] = _detect_auth_state(result)
     session.last_mutation_seq = max(session.last_mutation_seq, int(result.get("mutation_seq") or mutation_seq or 0))
+    _remember_ref_history(session, result)
     return result
 
 
@@ -974,14 +1059,24 @@ def _same_target(before: dict[str, Any], after: dict[str, Any], ref: str) -> boo
     if not ref:
         return True
     left = _element_map(before).get(ref)
+    if not left:
+        return False
     right = _element_map(after).get(ref)
-    if not left or not right:
+    if right is None:
+        replacement = _stable_replacement_ref(left, after)
+        right = _element_map(after).get(replacement) if replacement else None
+    if not right:
         return False
     fields = ("role", "name", "input_type", "disabled")
     return all(left.get(field) == right.get(field) for field in fields)
 
 
 def _find_replacement_ref(old_row: dict[str, Any], current: dict[str, Any]) -> str:
+    # A stable semantic fingerprint is stronger than a plain role/name match,
+    # but only when it identifies exactly one current element.
+    stable = _stable_replacement_ref(old_row, current)
+    if stable:
+        return stable
     role = str(old_row.get("role") or "")
     name = str(old_row.get("name") or "").strip().lower()
     candidates = [
@@ -1153,7 +1248,7 @@ async def _execute_action_with_recovery(
     if error and code == "ELEMENT_NOT_FOUND" and current_ref:
         old_row = _element_map(before).get(current_ref, {})
         fresh = await _snapshot(session, force=True)
-        replacement = _find_replacement_ref(old_row, fresh) if old_row else ""
+        replacement = _find_replacement_ref(old_row, fresh) if old_row else _history_replacement_ref(session, current_ref, fresh)
         if replacement and replacement != current_ref:
             recoveries.append({"kind": "reacquired_detached_element", "from_ref": current_ref, "to_ref": replacement})
             session.recovery_attempts += 1
@@ -1372,18 +1467,39 @@ def _sanitize_action_for_audit(action: dict[str, Any], snapshot: dict[str, Any])
     return clean
 
 
-def _token_metrics(full_projection: dict[str, Any], observation: dict[str, Any]) -> dict[str, Any]:
-    full_tokens = _estimate_tokens(full_projection)
+def _token_metrics(
+    full_snapshot: dict[str, Any],
+    projection: dict[str, Any],
+    observation: dict[str, Any],
+) -> dict[str, Any]:
+    """Account separately for canonical state, model projection, and delta output.
+
+    The previous metric named ``full_snapshot_tokens`` was actually measuring the
+    already-pruned model projection.  Keeping the three stages distinct makes the
+    browser diagnostics useful for deciding whether more capture-side pruning is
+    worth the state-fidelity tradeoff.
+    """
+    full_tokens = _estimate_tokens(full_snapshot)
+    projected_tokens = _estimate_tokens(projection)
     observation_tokens = _estimate_tokens(observation)
-    saved = max(0, full_tokens - observation_tokens)
+    projection_saved = max(0, full_tokens - projected_tokens)
+    delta_saved = max(0, projected_tokens - observation_tokens)
+    full_elements = len(full_snapshot.get("elements") or []) if isinstance(full_snapshot, dict) else 0
+    projected_elements = len(projection.get("elements") or []) if isinstance(projection, dict) else 0
     return {
         "full_snapshot_tokens": full_tokens,
+        "projected_snapshot_tokens": projected_tokens,
         "observation_tokens": observation_tokens,
-        "tokens_saved_by_delta": saved,
-        "delta_savings_pct": round((saved * 100.0 / full_tokens), 2) if full_tokens else 0.0,
-        "candidates_total": int(full_projection.get("candidate_count_total") or 0),
-        "candidates_exposed": int(full_projection.get("candidate_count_exposed") or 0),
-        "candidates_pruned": int(full_projection.get("candidate_pruned") or 0),
+        "tokens_saved_by_projection": projection_saved,
+        "projection_savings_pct": round((projection_saved * 100.0 / full_tokens), 2) if full_tokens else 0.0,
+        "tokens_saved_by_delta": delta_saved,
+        "delta_savings_pct": round((delta_saved * 100.0 / projected_tokens), 2) if projected_tokens else 0.0,
+        "element_count_full": full_elements,
+        "element_count_projected": projected_elements,
+        "element_pruning_ratio": round((projected_elements / full_elements), 4) if full_elements else 1.0,
+        "candidates_total": int(projection.get("candidate_count_total") or full_elements),
+        "candidates_exposed": int(projection.get("candidate_count_exposed") or projected_elements),
+        "candidates_pruned": int(projection.get("candidate_pruned") or max(0, full_elements - projected_elements)),
     }
 
 
@@ -1498,8 +1614,8 @@ async def _browser_step_async(
         safety = classify_action_safety(op, live_before or {}, ref=ref, value=value)
         recovery_meta: dict[str, Any] = {"attempted": False, "events": []}
 
-        def finish_metrics(full: dict[str, Any], observation: dict[str, Any]) -> dict[str, Any]:
-            token_metrics = _token_metrics(full, observation)
+        def finish_metrics(canonical: dict[str, Any], projection: dict[str, Any], observation: dict[str, Any]) -> dict[str, Any]:
+            token_metrics = _token_metrics(canonical, projection, observation)
             timings["semantic_cache_hits"] = session.cache_hits - cache_hits_before
             timings["semantic_cache_misses"] = session.cache_misses - cache_misses_before
             timings["incremental_semantic_updates"] = session.incremental_updates - incremental_before
@@ -1509,7 +1625,7 @@ async def _browser_step_async(
 
         def failure_payload(error: dict[str, Any], *, observation: dict[str, Any] | None = None, state: dict[str, Any] | None = None) -> dict[str, Any]:
             projected = observation or before_projection
-            token_metrics = finish_metrics(projected, projected)
+            token_metrics = finish_metrics(state or live_before or {}, projected, projected)
             payload = {
                 "ok": False,
                 "operation": op,
@@ -1574,7 +1690,7 @@ async def _browser_step_async(
                     current, task_hint=task_hint, max_candidates=max_candidates,
                     include_offscreen=include_offscreen, pinned_refs=pinned_refs,
                 )
-                token_metrics = finish_metrics(projected, {"verification": verification})
+                token_metrics = finish_metrics(current, projected, {"verification": verification})
                 payload = {
                     "ok": bool(verification["passed"]),
                     "operation": "verify",
@@ -1714,7 +1830,7 @@ async def _browser_step_async(
                 screenshot_path = await _capture_optional_screenshot(session, conversation_id)
                 timings["screenshot_ms"] = round((time.perf_counter() - shot_started) * 1000.0, 3)
 
-            token_metrics = finish_metrics(current_projection, delta)
+            token_metrics = finish_metrics(current, current_projection, delta)
             process_success = True
             target_grounded = (
                 bool(ref) or (op == "click" and x >= 0 and y >= 0)

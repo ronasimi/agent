@@ -235,3 +235,113 @@ def test_zero_recovery_limit_explicitly_allows_unlimited_infrastructure_recovery
             assert job["status"] == "pending"
             assert job["attempts"] == 0
             assert job["recovery_failures"] == expected
+
+
+def test_compute_tape_supports_arbitrary_precision_addresses(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        db = str(Path(td) / "agent.db")
+        monkeypatch.setenv("AGENT_DB_PATH", db)
+        from tools import runtime
+        runtime.DB_PATH = db
+        runtime.init_runtime_db()
+        job_id = runtime.create_job("durable_compute", "big-addresses", {"program": {}})
+
+        far = 10**100
+        tape = {
+            -far - 7: "NEG",
+            -1: "LEFT",
+            0: "ZERO",
+            far + 9: "POS",
+        }
+        assert runtime.replace_compute_tape(job_id, tape) == 4
+        assert runtime.get_compute_tape_cell_count(job_id) == 4
+        assert runtime.get_compute_tape_window(job_id, -far - 8, -far - 6) == {
+            str(-far - 7): "NEG"
+        }
+        assert runtime.get_compute_tape_window(job_id, far + 8, far + 10) == {
+            str(far + 9): "POS"
+        }
+        assert runtime.get_compute_tape_window(job_id, -2, 1) == {"-1": "LEFT", "0": "ZERO"}
+
+        with runtime._connect() as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(durable_compute_tape)")}
+            row = conn.execute(
+                "SELECT page_index, cell_offset FROM durable_compute_tape WHERE job_id = ? AND symbol = 'POS'",
+                (job_id,),
+            ).fetchone()
+        assert "address" not in columns
+        assert {"page_index", "cell_offset", "symbol"}.issubset(columns)
+        assert int(row[0]) * runtime.COMPUTE_TAPE_PAGE_SIZE + int(row[1]) == far + 9
+
+
+def test_compute_tape_delta_handles_addresses_beyond_sqlite_int64(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        db = str(Path(td) / "agent.db")
+        monkeypatch.setenv("AGENT_DB_PATH", db)
+        from tools import runtime
+        runtime.DB_PATH = db
+        runtime.init_runtime_db()
+        job_id = runtime.create_job("durable_compute", "big-delta", {"program": {}})
+        far = 2**127 + 12345
+        runtime.replace_compute_tape(job_id, {far: "A", -far: "B"})
+        runtime.claim_next_job("worker", ["durable_compute"])
+        state = {"checkpoint_version": 1, "checkpoint_generation": 1, "steps": 1}
+        assert runtime.checkpoint_and_defer_job(
+            job_id,
+            state,
+            step=1,
+            delay_seconds=0,
+            tape_updates={far: "C", -far: None, far + 1: "D"},
+        )
+        assert runtime.get_compute_tape_window(job_id, far, far + 2) == {
+            str(far): "C",
+            str(far + 1): "D",
+        }
+        assert runtime.get_compute_tape_window(job_id, -far - 1, -far + 1) == {}
+
+
+def test_runtime_migrates_legacy_int64_compute_tape_schema(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        db = str(Path(td) / "agent.db")
+        monkeypatch.setenv("AGENT_DB_PATH", db)
+        from tools import runtime
+        runtime.DB_PATH = db
+        runtime.init_runtime_db()
+        job_id = runtime.create_job("durable_compute", "legacy-tape-table", {"program": {}})
+
+        with runtime._connect() as conn:
+            conn.execute("DROP INDEX IF EXISTS idx_durable_compute_tape_page")
+            conn.execute("DROP TABLE durable_compute_tape")
+            conn.execute(
+                """
+                CREATE TABLE durable_compute_tape (
+                    job_id TEXT NOT NULL,
+                    address INTEGER NOT NULL,
+                    symbol TEXT NOT NULL,
+                    PRIMARY KEY(job_id, address),
+                    FOREIGN KEY(job_id) REFERENCES agent_jobs(id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX idx_durable_compute_tape_range ON durable_compute_tape(job_id, address)"
+            )
+            conn.executemany(
+                "INSERT INTO durable_compute_tape(job_id, address, symbol) VALUES (?, ?, ?)",
+                [(job_id, -4097, "L"), (job_id, 0, "Z"), (job_id, 8193, "R")],
+            )
+
+        runtime.init_runtime_db()
+        with runtime._connect() as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(durable_compute_tape)")}
+            legacy = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='durable_compute_tape_v1'"
+            ).fetchone()
+        assert "address" not in columns
+        assert {"page_index", "cell_offset", "symbol"}.issubset(columns)
+        assert legacy is None
+        assert runtime.get_compute_tape_window(job_id, -5000, 9000) == {
+            "-4097": "L",
+            "0": "Z",
+            "8193": "R",
+        }

@@ -185,3 +185,41 @@ def test_legacy_inline_tape_checkpoint_migrates_to_sparse_table(monkeypatch):
         assert runtime.get_compute_tape_window(job_id, 0, 4) == {"0": "1", "1": "1", "2": "1"}
     finally:
         td.cleanup()
+
+
+def test_durable_compute_worker_persists_beyond_int64_tape_addresses(monkeypatch):
+    td = _db(monkeypatch)
+    try:
+        monkeypatch.setattr(p15_compute, "DURABLE_COMPUTE_YIELD_DELAY_SECONDS", 0)
+        far = 10**80
+        program = {
+            "initial_state": "write",
+            "halt_states": ["HALT"],
+            "blank": "_",
+            "transitions": {
+                "write": {
+                    "_": {"write": "X", "move": "R", "next": "HALT"},
+                }
+            },
+        }
+        job_id = runtime.create_job(
+            "durable_compute",
+            "far-head",
+            {"program": program, "initial_head": far, "quantum": 1},
+        )
+        finished = _claim_and_run(job_id)
+        assert finished["status"] == "completed"
+        assert finished["state"]["head"] == far + 1
+        assert runtime.get_compute_tape_window(job_id, far, far + 1) == {str(far): "X"}
+
+        neg_job = runtime.create_job(
+            "durable_compute",
+            "far-negative-head",
+            {"program": program, "initial_head": -far, "quantum": 1},
+        )
+        finished = _claim_and_run(neg_job)
+        assert finished["status"] == "completed"
+        assert finished["state"]["head"] == -far + 1
+        assert runtime.get_compute_tape_window(neg_job, -far, -far + 1) == {str(-far): "X"}
+    finally:
+        td.cleanup()

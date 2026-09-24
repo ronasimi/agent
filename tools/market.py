@@ -15,6 +15,8 @@ _ASSETS: dict[str, dict[str, str]] = {
     "silver": {"symbol": "SI=F", "name": "Silver Futures", "unit": "USD/troy oz"},
     "natural gas": {"symbol": "NG=F", "name": "Natural Gas Futures", "unit": "USD/MMBtu"},
     "copper": {"symbol": "HG=F", "name": "Copper Futures", "unit": "USD/lb"},
+    "bitcoin": {"symbol": "BTC-USD", "name": "Bitcoin", "unit": "USD"},
+    "ethereum": {"symbol": "ETH-USD", "name": "Ethereum", "unit": "USD"},
 }
 
 _ALIAS_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -24,7 +26,18 @@ _ALIAS_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bsilver(?:\s+futures?)?\b|\bsi\s*=\s*f\b", re.I), "silver"),
     (re.compile(r"\bnatural\s+gas(?:\s+futures?)?\b|\bng\s*=\s*f\b", re.I), "natural gas"),
     (re.compile(r"\bcopper(?:\s+futures?)?\b|\bhg\s*=\s*f\b", re.I), "copper"),
+    (re.compile(r"\b(?:bitcoin|btc(?:-usd)?)\b", re.I), "bitcoin"),
+    (re.compile(r"\b(?:ethereum|ether|eth(?:-usd)?)\b", re.I), "ethereum"),
 )
+
+_TICKER_EXCLUSIONS = {
+    "A", "I", "AM", "PM", "USD", "CAD", "EUR", "GBP", "UTC", "GMT", "API", "URL",
+    "CPU", "RAM", "DNS", "HTTP", "HTTPS", "AI", "ETF", "IPO", "CEO", "CFO", "SEC",
+    # Already handled by semantic aliases above; excluding them here prevents
+    # duplicate canonical+symbol requirements for the same instrument.
+    "WTI", "BRENT", "BTC", "ETH", "CL=F", "BZ=F", "GC=F", "SI=F", "NG=F", "HG=F",
+}
+
 
 
 def extract_market_instruments(text: str) -> list[str]:
@@ -35,6 +48,18 @@ def extract_market_instruments(text: str) -> list[str]:
         match = pattern.search(raw)
         if match:
             found.append((match.start(), canonical))
+    # Explicit uppercase/$-prefixed ticker symbols are safe to retain when the
+    # surrounding request is quote-like.  Resolution remains delegated to the
+    # provider; this avoids hard-coding every equity while rejecting ordinary
+    # acronyms such as API/CPU/UTC.
+    quote_like = bool(re.search(r"\b(?:price|prices|quote|quotes|trading|worth|how much)\b", raw, re.I))
+    if quote_like:
+        for match in re.finditer(r"(?<![A-Za-z0-9])\$?([A-Z][A-Z0-9]{0,8}(?:[.=-][A-Z0-9]+)?)(?![A-Za-z0-9])", raw):
+            symbol = match.group(1).upper()
+            if symbol in _TICKER_EXCLUSIONS or any(canonical.upper() == symbol for _, canonical in found):
+                continue
+            found.append((match.start(), symbol))
+
     found.sort(key=lambda item: item[0])
     result: list[str] = []
     for _offset, canonical in found:
@@ -49,7 +74,7 @@ def is_market_price_request(text: str) -> bool:
     if not raw or not extract_market_instruments(raw):
         return False
     lower = raw.lower()
-    explicit_price = bool(re.search(r"\b(?:price|prices|quote|quotes|trading\s+at|worth)\b", lower))
+    explicit_price = bool(re.search(r"\b(?:price|prices|quote|quotes|trading(?:\s+at)?|worth|how much)\b", lower))
     current_cue = bool(re.search(r"\b(?:current|currently|latest|now|right\s+now|today|live)\b", lower))
     question_cue = bool(re.search(r"^(?:what|how much|give|show|get|check|tell me|where)\b", lower) or raw.endswith("?"))
     return bool(explicit_price and (current_cue or question_cue))
