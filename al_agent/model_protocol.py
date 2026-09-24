@@ -208,6 +208,8 @@ def consume_chat_stream(
                 "eval_count": getattr(chunk, "eval_count", None),
                 "eval_duration": getattr(chunk, "eval_duration", None),
                 "load_duration": getattr(chunk, "load_duration", None),
+                "total_duration": getattr(chunk, "total_duration", None),
+                "done_reason": getattr(chunk, "done_reason", None),
             }
             chunk_msg = getattr(chunk, "message", {})
 

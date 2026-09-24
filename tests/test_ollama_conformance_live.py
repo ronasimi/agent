@@ -44,9 +44,10 @@ def test_live_ollama_supports_harness_chat_metrics_and_tools():
 def test_live_ollama_reasoning_recovery_mode_reaches_visible_content():
     """Catch reasoning-only completions that look successful at the API layer.
 
-    The configured Qwen3.8-Distill roles may reason before answering.  The
-    harness has a bounded recovery for that case, but the recovery mode itself
-    must be capable of reaching ``message.content`` on the target Ollama build.
+    The configured Qwen3.8-Distill roles may reason before answering. The
+    bounded recovery deliberately disables thinking because this GGUF template
+    only has a boolean thinking gate; string effort levels enter full reasoning.
+    The recovery mode must reach ``message.content`` on the target Ollama build.
     """
     from ollama import Client
     from tools.config import load_config
@@ -62,7 +63,7 @@ def test_live_ollama_reasoning_recovery_mode_reaches_visible_content():
             "num_predict": int(recovery.get("final_num_predict", 2048)),
         },
         keep_alive=-1,
-        think=recovery.get("think_mode", "low"),
+        think=False,
         stream=False,
     )
     message = _field(response, "message", {})

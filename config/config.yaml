@@ -101,7 +101,8 @@ agent:
   reasoning_recovery:
     enabled: true
     max_attempts: 1
-    think_mode: "low"
+    # Recovery itself always uses literal think=false. Qwen3.8's template has
+    # a boolean thinking gate; string effort levels enter full reasoning.
     tool_num_predict: 1024
     final_num_predict: 2048
   max_validator_calls_per_turn: 2

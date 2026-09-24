@@ -104,6 +104,8 @@ def handle_user_turn(
     model_no_progress_retries = 0
     reasoning_recovery_attempts = 0
     reasoning_recovery_pending = False
+    zero_tool_recovery_attempts = 0
+    zero_tool_recovery_pending = False
     inference_lock = None
     model_lock_requested_at: float | None = None
     model_lock_acquired_at: float | None = None
@@ -4096,6 +4098,8 @@ def handle_user_turn(
             current_model_request: dict[str, Any] = {}
             reasoning_recovery_for_call = bool(reasoning_recovery_pending)
             reasoning_recovery_pending = False
+            zero_tool_recovery_for_call = bool(zero_tool_recovery_pending)
+            zero_tool_recovery_pending = False
 
             try:
                 if has_images(active) and VISION_MODEL != MODEL and VISION_SIDECAR_WHEN_DISTINCT:
@@ -4147,15 +4151,18 @@ def handle_user_turn(
                             max(normal_predict, REASONING_RECOVERY_FINAL_NUM_PREDICT)
                             if reasoning_recovery_for_call else normal_predict
                         )
-                    # The frontend Think checkbox is the authoritative per-turn
-                    # switch during normal operation. A reasoning-only recovery
-                    # may temporarily request the configured short-reasoning mode
-                    # when Think is off; this is strictly to make the model reach
-                    # user-visible content/tool output and never exposes its hidden
-                    # reasoning text.
+                    # The frontend Think checkbox controls normal per-turn
+                    # reasoning. A reasoning-only recovery deliberately forces
+                    # think=false so this Qwen template leaves <think> immediately
+                    # and produces a user-visible conclusion/tool call.
                     effective_thinking: Any = bool(thinking_enabled)
-                    if reasoning_recovery_for_call and not thinking_enabled:
-                        effective_thinking = REASONING_RECOVERY_THINK_MODE
+                    if reasoning_recovery_for_call or zero_tool_recovery_for_call:
+                        # Qwen3.8's embedded template treats only literal false as
+                        # no-thinking; string levels such as "low" still enter the
+                        # full <think> branch. Recovery calls exist specifically to
+                        # force a direct conclusion rather than another reasoning or
+                        # malformed tool-call attempt.
+                        effective_thinking = False
                     wire_messages = ollama_wire_messages(vision_route.messages)
                     wire_tools = wire_tool_schemas()
                     current_model_request = {
@@ -4168,6 +4175,7 @@ def handle_user_turn(
                         "purpose": "tool_selection" if wire_tools else "final_answer",
                         "thinking": effective_thinking,
                         "reasoning_recovery": reasoning_recovery_for_call,
+                        "zero_tool_recovery": zero_tool_recovery_for_call,
                     }
                     return _ollama_client.chat(
                         model=vision_route.model,
@@ -4200,7 +4208,12 @@ def handle_user_turn(
                         # A newline/normal stdout buffering is sufficient for traces
                         # and avoids slowing the model loop on container log I/O.
                         print(text, end="")
-                    emit_event("thinking_delta", content=text)
+                    # Reasoning is user-visible only when the per-turn Think
+                    # toggle is enabled. Some Ollama/model combinations may still
+                    # emit a thinking field even with think=false; keep that data
+                    # internal rather than creating a reasoning bubble unexpectedly.
+                    if thinking_enabled:
+                        emit_event("thinking_delta", content=text)
 
                 stream = stream_with_preflight_retry(
                     _model_stream,
@@ -4265,7 +4278,17 @@ def handle_user_turn(
                     pending_stall_signal = signal
                 model_no_progress_retries += 1
                 if model_no_progress_retries >= MODEL_NO_PROGRESS_MAX_RETRIES:
-                    emit_no_progress_partial(f"repeated main-model inference errors: {exc}")
+                    error_text = str(exc or "")
+                    timeout_like = isinstance(exc, TimeoutError) or "timeout" in error_text.lower() or "timed out" in error_text.lower()
+                    public_reason = (
+                        "The Ollama request timed out or stopped making transport progress; this points to model/runtime latency or availability rather than an empty model answer."
+                        if timeout_like else
+                        "The Ollama request failed before the harness received a usable completion; inspect the model-call trace for the underlying runtime error."
+                    )
+                    emit_no_progress_partial(
+                        f"repeated main-model inference errors: {exc}",
+                        public_reason=public_reason,
+                    )
                     break
                 if iteration < iteration_limit:
                     time.sleep(0.2)
@@ -4383,7 +4406,7 @@ def handle_user_turn(
                         "reasoning_recovery",
                         attempt=reasoning_recovery_attempts,
                         max_attempts=REASONING_RECOVERY_MAX_ATTEMPTS,
-                        think_mode=(True if thinking_enabled else REASONING_RECOVERY_THINK_MODE),
+                        think_mode=False,
                         tool_num_predict=REASONING_RECOVERY_TOOL_NUM_PREDICT,
                         final_num_predict=REASONING_RECOVERY_FINAL_NUM_PREDICT,
                     )
@@ -4420,6 +4443,26 @@ def handle_user_turn(
                 tool_calls, requirement_ledger, successful_readonly_signatures, user_input
             )
             control_notes = [*parse_errors, *batch_notes, *repeat_notes]
+
+            # A zero-tool turn is a direct-answer contract. Small local models can
+            # still emit stale/native tool-call artifacts because the stable system
+            # prompt discusses tool policy or because prior history contained tool
+            # traffic. Do not send such a turn through the ordinary tool-loop
+            # correction, which misleadingly tells the model to issue a "corrected"
+            # tool call even though no tools are available. If usable prose arrived
+            # alongside the stray artifact, keep the prose and ignore only the
+            # unsupported call. Otherwise one bounded retry is forced through
+            # think=false with an explicit direct-answer-only instruction.
+            zero_tool_protocol_artifact = bool((raw_tool_calls or control_notes) and not supplied_tool_names)
+            if zero_tool_protocol_artifact and str(full_content or "").strip() and "<tool_call>" not in str(full_content).lower():
+                emit_event(
+                    "zero_tool_protocol_artifact_ignored",
+                    raw_tool_calls=len(raw_tool_calls or []),
+                    notes=control_notes[:4],
+                )
+                raw_tool_calls = []
+                control_notes = []
+
             if stall_enforce_once and stall_validation is not None:
                 emitted_count = len(tool_calls)
                 tool_calls = select_stall_recovery_tool_calls(tool_calls, stall_validation, seen_tool_calls)
@@ -4657,11 +4700,53 @@ def handle_user_turn(
                     break
 
                 if raw_tool_calls or control_notes:
-                    tracker.record_model_failure("invalid_tool_call", "; ".join(control_notes)[:240])
                     note = "; ".join(control_notes[:4]) or "the emitted call could not be used"
+                    tracker.record_model_failure("invalid_tool_call", note[:240])
                     model_no_progress_retries += 1
+
+                    if not supplied_tool_names:
+                        zero_tool_recovery_attempts += 1
+                        emit_event(
+                            "model_no_progress",
+                            kind="zero_tool_protocol_violation",
+                            retry=model_no_progress_retries,
+                            retry_limit=MODEL_NO_PROGRESS_MAX_RETRIES,
+                            raw_tool_calls=len(raw_tool_calls or []),
+                            notes=control_notes[:4],
+                            recovery_call=zero_tool_recovery_for_call,
+                        )
+                        if model_no_progress_retries >= MODEL_NO_PROGRESS_MAX_RETRIES:
+                            emit_no_progress_partial(
+                                f"repeated tool-call output on a zero-tool turn: {note}",
+                                public_reason=(
+                                    "The model repeatedly emitted a tool-call artifact on a zero-tool turn even though no tools were exposed. "
+                                    "The direct-answer recovery also failed."
+                                ),
+                            )
+                            break
+                        zero_tool_recovery_pending = True
+                        append_control_note(
+                            "[Harness direct-answer correction] No tools are available or required for this turn. "
+                            "Answer the user's current request directly in ordinary prose. Do not emit XML, JSON, "
+                            "a tool call, or a description of a tool call."
+                        )
+                        emit_event(
+                            "zero_tool_recovery",
+                            attempt=zero_tool_recovery_attempts,
+                            think_mode=False,
+                        )
+                        signal = tracker.consume_signal()
+                        if signal:
+                            pending_stall_signal = signal
+                        continue
+
                     if model_no_progress_retries >= MODEL_NO_PROGRESS_MAX_RETRIES:
-                        emit_no_progress_partial(f"repeated invalid/unusable model tool calls: {note}")
+                        emit_no_progress_partial(
+                            f"repeated invalid/unusable model tool calls: {note}",
+                            public_reason=(
+                                "The model repeatedly emitted a tool call that did not match the tools supplied for this turn."
+                            ),
+                        )
                         break
                     append_control_note(
                         "[Harness tool-call correction] The previous tool call was rejected: "
@@ -4677,7 +4762,19 @@ def handle_user_turn(
                     tracker.record_model_failure("empty_response", "main model emitted neither content nor a valid tool call")
                     model_no_progress_retries += 1
                     if model_no_progress_retries >= MODEL_NO_PROGRESS_MAX_RETRIES:
-                        emit_no_progress_partial("repeated empty main-model responses")
+                        done_reason = str(perf_stats.get("done_reason") or perf_stats.get("done_reason_text") or "unknown")
+                        eval_count = int(perf_stats.get("eval_count") or 0)
+                        requested_predict = int((current_model_request.get("options") or {}).get("num_predict") or 0)
+                        length_exhausted = done_reason == "length" or (requested_predict > 0 and eval_count >= requested_predict)
+                        public_reason = (
+                            f"The model generated {eval_count} tokens and exhausted its {requested_predict}-token allowance without yielding visible content."
+                            if length_exhausted else
+                            f"Ollama completed the request with no visible content, no reasoning field, and no tool call (done_reason={done_reason}, eval_count={eval_count})."
+                        )
+                        emit_no_progress_partial(
+                            "repeated empty main-model responses",
+                            public_reason=public_reason,
+                        )
                         break
                     append_control_note(
                         "[Harness correction] Provide a final answer or issue one explicit valid tool call. "

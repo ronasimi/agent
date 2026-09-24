@@ -74,7 +74,6 @@ TOOL_TURN_TEMPERATURE = max(0.0, float(AGENT_CFG.get("tool_turn_temperature", 0.
 REASONING_RECOVERY_CFG = dict(AGENT_CFG.get("reasoning_recovery") or {})
 REASONING_RECOVERY_ENABLED = bool(REASONING_RECOVERY_CFG.get("enabled", True))
 REASONING_RECOVERY_MAX_ATTEMPTS = max(0, int(REASONING_RECOVERY_CFG.get("max_attempts", 1)))
-REASONING_RECOVERY_THINK_MODE = REASONING_RECOVERY_CFG.get("think_mode", "low")
 REASONING_RECOVERY_TOOL_NUM_PREDICT = max(
     TOOL_TURN_NUM_PREDICT,
     int(REASONING_RECOVERY_CFG.get("tool_num_predict", 1024)),
