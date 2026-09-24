@@ -150,13 +150,25 @@ _LEXICAL_TRIGGER_TOKENS = {
 }
 
 
-def select_tool_schemas(user_text: str, max_tools: int = 12, context_text: str = "") -> list[dict]:
-    """Select a tiny universal core, intent bundles, then relevant lexical matches."""
+def select_tool_schemas(
+    user_text: str,
+    max_tools: int = 12,
+    context_text: str = "",
+    *,
+    active_task: str | None = None,
+) -> list[dict]:
+    """Select schemas against one immediate task, never an entire future plan.
+
+    ``active_task`` is the deterministic scheduler isolation boundary. When it
+    is supplied, lexical and intent-bundle routing deliberately ignores the
+    broader ``user_text`` so future requirements cannot expand this schema set.
+    """
     max_tools = max(1, int(max_tools))
     if len(TOOL_SCHEMAS) <= max_tools:
         return list(TOOL_SCHEMAS)
 
-    current_tokens = _selection_tokens(user_text)
+    selection_text = str(active_task if active_task is not None else user_text)
+    current_tokens = _selection_tokens(selection_text)
     context_tokens = _selection_tokens(context_text)
     scored: list[tuple[int, str, dict]] = []
     for schema in TOOL_SCHEMAS:

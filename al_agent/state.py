@@ -34,6 +34,12 @@ if VISION_MODEL == MODEL:
         VISION_OPTIONS["num_ctx"] = MAIN_OPTIONS["num_ctx"]
 MAX_TOOLS_PER_TURN = max(8, int(AGENT_CFG.get("max_tools_per_turn", 12)))
 REQUIREMENT_LED_SCHEMA_ONLY = bool(AGENT_CFG.get("requirement_led_schema_only", True))
+STRUCTURED_PLAN_CFG = AGENT_CFG.get("structured_plan", {})
+STRUCTURED_PLAN_ENABLED = bool(STRUCTURED_PLAN_CFG.get("enabled", True))
+STRUCTURED_PLAN_MIN_CHARS = max(256, int(STRUCTURED_PLAN_CFG.get("min_chars", 900)))
+STRUCTURED_PLAN_MIN_COMMANDS = max(2, int(STRUCTURED_PLAN_CFG.get("min_commands", 3)))
+STRUCTURED_PLAN_MAX_STEPS = max(2, min(int(STRUCTURED_PLAN_CFG.get("max_steps", 32)), 64))
+STRUCTURED_PLAN_MAX_TOOLS = max(1, min(int(STRUCTURED_PLAN_CFG.get("max_tools_per_step", 3)), 6))
 OLLAMA_HOST = AGENT_CFG.get("host", "http://127.0.0.1:11434")
 os.environ["OLLAMA_HOST"] = OLLAMA_HOST
 MAX_CTX = int(AGENT_CFG.get("context", {}).get("num_ctx", MAIN_OPTIONS.get("num_ctx", 16384)))

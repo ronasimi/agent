@@ -132,6 +132,15 @@ agent:
   # deterministic fallback set. This prevents irrelevant schemas from bloating
   # prompt prefill and tempting small models into substitute tools.
   requirement_led_schema_only: true
+  # Complex multi-intent turns are compiled by the warm 2B role before the 4B
+  # tool loop. Only one atomic requirement and its tiny schema set are exposed
+  # to the main model at a time.
+  structured_plan:
+    enabled: true
+    min_chars: 900
+    min_commands: 3
+    max_steps: 32
+    max_tools_per_step: 3
   # Keep each small-model iteration narrow. Read-only calls may be batched, but
   # only one mutating side effect is allowed before the model sees its result.
   max_tool_calls_per_iteration: 3

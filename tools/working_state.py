@@ -64,6 +64,10 @@ _DEFAULT_LIMITS = {
     "failure_items": 8,
     "validator_items": 6,
     "plan_items": 6,
+    "scheduler_steps": 32,
+    "scheduler_task_chars": 1200,
+    "scheduler_result_chars": 900,
+    "scheduler_objective_chars": 24000,
     # Persist the complete operational ledger separately from the smaller
     # prompt-facing requirement window. Large deterministic plans (for example
     # 37-item tool/recipe audits) must remain fully inspectable/resumable without
@@ -178,6 +182,12 @@ def _empty_state() -> dict[str, Any]:
         "failed_approaches": [],
         "open_questions": [],
         "current_plan": [],
+        "scheduler": {
+            "enabled": False,
+            "overall_objective": "",
+            "active_index": 0,
+            "steps": [],
+        },
         "validator_history": [],
         "updated_at": utc_now(),
     }
@@ -212,6 +222,12 @@ def _load(conversation_id: str | None = None) -> dict[str, Any]:
     merged.setdefault("fact_requirements", [])
     merged.setdefault("requirements", [])
     merged.setdefault("persistent_goal", {})
+    merged.setdefault("scheduler", {
+        "enabled": False,
+        "overall_objective": "",
+        "active_index": 0,
+        "steps": [],
+    })
     _cache_state(cid, merged)
     return copy.deepcopy(merged)
 
@@ -424,6 +440,7 @@ class WorkingStateStore:
         task_frame: dict[str, Any] | None = None,
         fact_frames: dict[str, dict[str, Any]] | None = None,
         fact_requirements: list[dict[str, Any]] | None = None,
+        execution_plan: list[str] | None = None,
     ) -> dict[str, Any]:
         previous = _load(self._cid())
         state = _empty_state()
@@ -497,8 +514,137 @@ class WorkingStateStore:
             "requirements": state_requirements,
             "tool_capabilities": _tool_capabilities(tool_schemas),
         })
+        if execution_plan:
+            self._install_scheduler(state, objective, execution_plan)
         _save(state, self._cid())
         return state
+
+    def _install_scheduler(self, state: dict[str, Any], objective: str, steps: list[str]) -> None:
+        """Install a harness-owned sequential plan without exposing future steps.
+
+        The full plan is durable state used by the deterministic scheduler.  The
+        model-facing :meth:`render` projection deliberately includes only the
+        active step, so later requirements cannot contaminate tool selection or
+        tempt the main model to jump ahead.
+        """
+        clean_steps: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw in list(steps or [])[: self.limits["scheduler_steps"]]:
+            task = _clip(_normalize_space(raw), self.limits["scheduler_task_chars"])
+            marker = task.casefold()
+            if not task or marker in seen:
+                continue
+            seen.add(marker)
+            clean_steps.append({
+                "id": f"step-{len(clean_steps) + 1:03d}",
+                "task": task,
+                "status": "PENDING",
+                "reason": "",
+                "result": "",
+            })
+        state["scheduler"] = {
+            "enabled": len(clean_steps) >= 2,
+            "overall_objective": _clip(objective, self.limits["scheduler_objective_chars"]),
+            "active_index": 0,
+            "steps": clean_steps,
+        }
+
+    def set_execution_plan(self, objective: str, steps: list[str]) -> dict[str, Any]:
+        state = _load(self._cid())
+        self._install_scheduler(state, objective, steps)
+        _save(state, self._cid())
+        return copy.deepcopy(state.get("scheduler") or {})
+
+    def active_requirement(self, *, state: dict[str, Any] | None = None) -> str:
+        state = _load(self._cid()) if state is None else state
+        scheduler = dict(state.get("scheduler") or {})
+        if not scheduler.get("enabled"):
+            return ""
+        steps = list(scheduler.get("steps") or [])
+        index = int(scheduler.get("active_index") or 0)
+        if 0 <= index < len(steps) and isinstance(steps[index], dict):
+            return str(steps[index].get("task") or "")
+        return ""
+
+    def scheduler_snapshot(self) -> dict[str, Any]:
+        return copy.deepcopy(dict(_load(self._cid()).get("scheduler") or {}))
+
+    def mark_active_requirement(
+        self, status: str, *, reason: str = "", result: str = "",
+    ) -> dict[str, Any]:
+        """Close the active scheduled requirement and advance exactly one step.
+
+        Only terminal ``PASS``/``FAIL`` states are accepted.  Advancing is a
+        harness operation; model text cannot move the pointer directly.
+        """
+        normalized = str(status or "").upper()
+        if normalized not in {"PASS", "FAIL"}:
+            raise ValueError("scheduled requirement status must be PASS or FAIL")
+        state = _load(self._cid())
+        scheduler = dict(state.get("scheduler") or {})
+        if not scheduler.get("enabled"):
+            return scheduler
+        steps = [dict(item) for item in list(scheduler.get("steps") or []) if isinstance(item, dict)]
+        index = int(scheduler.get("active_index") or 0)
+        if not (0 <= index < len(steps)):
+            return scheduler
+        steps[index]["status"] = normalized
+        steps[index]["reason"] = _clip(reason, 180)
+        steps[index]["result"] = _clip(result, self.limits["scheduler_result_chars"])
+        if index + 1 < len(steps):
+            scheduler["active_index"] = index + 1
+        else:
+            scheduler["active_index"] = len(steps)
+        scheduler["steps"] = steps
+        state["scheduler"] = scheduler
+        _save(state, self._cid())
+        return copy.deepcopy(scheduler)
+
+    def scheduler_complete(self, *, state: dict[str, Any] | None = None) -> bool:
+        state = _load(self._cid()) if state is None else state
+        scheduler = dict(state.get("scheduler") or {})
+        if not scheduler.get("enabled"):
+            return True
+        steps = list(scheduler.get("steps") or [])
+        return bool(steps) and all(
+            isinstance(item, dict) and str(item.get("status") or "") in {"PASS", "FAIL"}
+            for item in steps
+        )
+
+    def render_scheduler_results(self, max_chars: int = 6000) -> str:
+        """Render completed scheduler results for the final synthesis pass.
+
+        This is intentionally separate from the normal canonical state so future
+        steps remain invisible during execution. It is used only after all steps
+        are terminal.
+        """
+        state = _load(self._cid())
+        scheduler = dict(state.get("scheduler") or {})
+        if not scheduler.get("enabled") or not self.scheduler_complete(state=state):
+            return "[]"
+        rows = []
+        for item in list(scheduler.get("steps") or []):
+            if not isinstance(item, dict):
+                continue
+            rows.append({
+                "id": str(item.get("id") or ""),
+                "task": _clip(item.get("task"), 360),
+                "status": str(item.get("status") or ""),
+                "reason": _clip(item.get("reason"), 160),
+                "result": _clip(item.get("result"), 520),
+            })
+        limit = max(800, int(max_chars))
+        text = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
+        while len(rows) > 1 and len(text) > limit:
+            for row in rows:
+                row["task"] = _clip(row.get("task"), 180)
+                row["result"] = _clip(row.get("result"), 260)
+            text = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
+            if len(text) <= limit:
+                break
+            rows.pop(0)
+            text = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
+        return text if len(text) <= limit else "[]"
 
     def update_tools(self, tool_schemas: list[dict[str, Any]]) -> None:
         state = _load(self._cid())
@@ -513,6 +659,31 @@ class WorkingStateStore:
     def update_fact_requirements(self, requirements: list[dict[str, Any]]) -> None:
         state = _load(self._cid())
         state["fact_requirements"] = [dict(item) for item in list(requirements or []) if isinstance(item, dict)][:16]
+        _save(state, self._cid())
+
+    def update_active_context(
+        self,
+        *,
+        task_frame: dict[str, Any] | None = None,
+        fact_frames: dict[str, dict[str, Any]] | None = None,
+        fact_requirements: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Atomically replace model-facing execution context for the active step.
+
+        Scheduler advancement and this projection update are harness-owned.  This
+        prevents a newly active requirement from being paired with stale frames
+        from the previous step in the next main-model prompt.
+        """
+        state = _load(self._cid())
+        state["task_frame"] = dict(task_frame or {})
+        state["fact_frames"] = {
+            str(key): dict(value or {})
+            for key, value in dict(fact_frames or {}).items()
+            if isinstance(value, dict)
+        }
+        state["fact_requirements"] = [
+            dict(item) for item in list(fact_requirements or []) if isinstance(item, dict)
+        ][:16]
         _save(state, self._cid())
 
     def set_plan(self, plan: list[dict[str, Any]] | list[str]) -> None:
@@ -688,6 +859,19 @@ class WorkingStateStore:
         the evidence block.
         """
         state = _load(self._cid()) if state is None else state
+        scheduler = dict(state.get("scheduler") or {})
+        scheduler_enabled = bool(scheduler.get("enabled"))
+        active_index = int(scheduler.get("active_index") or 0)
+        scheduler_steps = list(scheduler.get("steps") or [])
+        active_step = (
+            dict(scheduler_steps[active_index])
+            if scheduler_enabled and 0 <= active_index < len(scheduler_steps) and isinstance(scheduler_steps[active_index], dict)
+            else {}
+        )
+        completed_steps = sum(
+            1 for item in scheduler_steps
+            if isinstance(item, dict) and str(item.get("status") or "") in {"PASS", "FAIL"}
+        )
         compact = {
             "turn_id": state.get("turn_id", 0),
             "task_epoch": state.get("task_epoch", 0),
@@ -695,7 +879,17 @@ class WorkingStateStore:
             "fact_frames": {str(key): dict(value or {}) for key, value in dict(state.get("fact_frames", {}) or {}).items() if isinstance(value, dict)},
             "fact_requirements": [dict(item) for item in list(state.get("fact_requirements", []) or []) if isinstance(item, dict)],
             "status": state.get("status", "idle"),
-            "objective": state.get("objective", ""),
+            # The complete user objective remains persisted in scheduler state,
+            # but future task text is intentionally withheld from the main-model
+            # projection while a compiled plan is active.
+            "objective": active_step.get("task", "") if scheduler_enabled else state.get("objective", ""),
+            "active_requirement": active_step if scheduler_enabled else {},
+            "scheduler": ({
+                "enabled": True,
+                "active_index": active_index,
+                "step_count": len(scheduler_steps),
+                "completed_count": completed_steps,
+            } if scheduler_enabled else {"enabled": False}),
             "persistent_goal": dict(state.get("persistent_goal", {}) or {}),
             "background": dict(state.get("background", {}) or {}),
             "constraints": list(state.get("constraints", []) or []),
@@ -703,9 +897,12 @@ class WorkingStateStore:
             # auditability, but are intentionally omitted from the model-facing
             # canonical state. The model already receives a separately bounded
             # observation evidence block.
-            "requirements": _clean_requirements(
-                list(state.get("requirements", []) or []), self.limits["requirement_items"],
-                evidence_preview_chars=0,
+            # Full requirement rows remain durable for audit/finalization, but
+            # are hidden during scheduled execution because they may contain
+            # future task strings/tool names. The active requirement and native
+            # schema set are the only immediate execution contract.
+            "requirements": [] if scheduler_enabled else _clean_requirements(
+                list(state.get("requirements", []) or []), self.limits["requirement_items"], evidence_preview_chars=0,
             ),
             "tool_capabilities": list(state.get("tool_capabilities", []) or []) if include_tool_capabilities else [],
             "verified_observations": [
