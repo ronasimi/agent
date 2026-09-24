@@ -421,7 +421,7 @@ BUILTIN_MANIFEST = [{'module': 'memory',
                           'description': 'Report registered-tool availability, metadata, and known external '
                                          'dependencies without invoking the tools.',
                           'parameters': {'type': 'object',
-                                         'properties': {},
+                                         'properties': {'summary_only': {'type': 'boolean', 'default': False}},
                                          'required': [],
                                          'additionalProperties': False}}},
   'readonly': True,

@@ -127,8 +127,14 @@ def dependency_audit() -> str:
     }, ensure_ascii=False, indent=2)
 
 
-def tool_health() -> str:
-    """Report registered-tool availability, metadata, and known external dependencies without invoking the tools."""
+def tool_health(summary_only: bool = False) -> str:
+    """Report registered-tool availability, metadata, and known external dependencies without invoking the tools.
+
+    ``summary_only`` returns only aggregate counts.  Large structured scheduler
+    audits usually need counts, not a 200+ row registry dump; keeping that path
+    compact avoids observation truncation/recovery work and unnecessary model
+    prefill while preserving the full default response for interactive inspection.
+    """
     # Runtime import avoids circular registry initialization.
     from . import AVAILABLE_TOOLS_MAP, TOOL_METADATA
     binary_deps = {
@@ -151,4 +157,16 @@ def tool_health() -> str:
             "name": name, "status": status, "readonly": bool(TOOL_METADATA.get(name, {}).get("readonly", True)),
             "repeat_safe": bool(TOOL_METADATA.get(name, {}).get("repeat_safe", False)), "missing_dependencies": missing,
         })
-    return json.dumps({"registered": len(rows), "healthy": healthy, "degraded": degraded, "unavailable": unavailable, "tools": rows}, ensure_ascii=False, indent=2)
+    readonly = sum(1 for row in rows if bool(row.get("readonly")))
+    payload = {
+        "registered": len(rows),
+        "healthy": healthy,
+        "degraded": degraded,
+        "unavailable": unavailable,
+        "readonly": readonly,
+        "mutating": len(rows) - readonly,
+        "missing_dependency_tools": sum(1 for row in rows if row.get("missing_dependencies")),
+    }
+    if not summary_only:
+        payload["tools"] = rows
+    return json.dumps(payload, ensure_ascii=False, indent=2)

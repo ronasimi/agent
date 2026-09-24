@@ -196,3 +196,25 @@ def test_browser_tool_schema_exposes_p1_expansion_coordinate_and_screenshot_cont
     assert "screenshot" in props
     assert props["x"]["minimum"] == -1
     assert props["y"]["minimum"] == -1
+
+
+def test_semantic_ui_observation_routes_to_browser_not_semantic_memory():
+    import tools
+    tools.load_tools()
+    names = {schema["function"]["name"] for schema in tools.select_tool_schemas(
+        "Identify at least three interactive elements semantically. For each report stable reference, role, accessible name, and state.",
+        max_tools=8,
+        active_task="Identify at least three interactive elements semantically. For each report stable reference, role, accessible name, and state.",
+    )}
+    assert "browser_step" in names
+    assert "search_semantic_memory" not in names
+
+
+def test_explicit_memory_semantic_search_still_routes_to_semantic_memory():
+    import tools
+    tools.load_tools()
+    names = {schema["function"]["name"] for schema in tools.select_tool_schemas(
+        "Search semantic memory for prior notes about browser automation",
+        max_tools=8,
+    )}
+    assert "search_semantic_memory" in names

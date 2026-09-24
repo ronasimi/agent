@@ -147,6 +147,10 @@ _LEXICAL_TRIGGER_TOKENS = {
     "reload_tools": {"reload"},
     "execute_shell": {"shell"},
     "execute_python": {"python"},
+    # "semantic" is also a browser/accessibility term. Do not expose the
+    # memory-search primitive merely because an active UI requirement asks for
+    # semantic elements; require an explicit memory/recall concept.
+    "search_semantic_memory": {"memory", "memories", "remember", "recall"},
 }
 
 

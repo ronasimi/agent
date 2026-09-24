@@ -19,6 +19,14 @@ def test_tool_health_reports_registry():
     assert "dns_diagnose" in names
 
 
+def test_tool_health_summary_mode_avoids_full_registry_payload():
+    payload = json.loads(tool_health(summary_only=True))
+    assert payload["registered"] >= 70
+    assert payload["healthy"] + payload["degraded"] + payload["unavailable"] == payload["registered"]
+    assert payload["readonly"] + payload["mutating"] == payload["registered"]
+    assert "tools" not in payload
+
+
 def test_shell_nonzero_with_stdout_is_partial():
     result = execute_shell("printf useful; exit 1")
     assert result.startswith("Partial:")

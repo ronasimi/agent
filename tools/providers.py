@@ -35,7 +35,8 @@ TOOL_SELECTION_STOPWORDS = {'for', 'of', 'show', 'it', 'with', 'in', 'do', 'woul
 ALWAYS_TOOL_NAMES: set[str] = set()
 
 TOOL_BUNDLES = (
-    ({'browser', 'ui', 'click', 'button', 'form', 'dropdown', 'scroll', 'webpage', 'website interaction', 'fill'},
+    ({'browser', 'ui', 'click', 'button', 'form', 'dropdown', 'scroll', 'webpage', 'website interaction', 'fill',
+      'interactive', 'element', 'elements', 'accessible', 'accessibility', 'stable reference'},
      ('browser_step', 'take_web_screenshot', 'read_observation')),
     ({'jsonl', 'ndjson', 'newline'}, ('jsonl_summary', 'read_text', 'read_lines')),
     ({'repo', 'script', 'project', 'python', 'file', 'files', 'coding', 'code'},

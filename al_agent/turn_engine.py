@@ -2276,7 +2276,20 @@ def handle_user_turn(
                     return {"url": target}
                 if item.tool == "read_file" and target:
                     return {"filename": target}
-                if item.tool == "environment_summary":
+                if item.tool in {
+                    "environment_summary", "uptime", "hostname", "host_snapshot",
+                    "cpu_info", "memory_info", "pressure_snapshot", "temperature_sensors",
+                    "process_snapshot", "list_processes", "tool_health", "dependency_audit",
+                    "network_snapshot", "interface_list", "route_list", "dns_servers",
+                    "neighbor_snapshot", "neighbor_list", "connection_snapshot",
+                    "load_average", "repo_status", "repo_checks", "git_status",
+                    "git_changed_files", "list_background_jobs",
+                }:
+                    if item.tool == "tool_health":
+                        # Scheduler registry checks need aggregate health/counts, not
+                        # the full 200+ tool catalog. The compact mode avoids a
+                        # 30-40 KB observation and pointless read_observation recovery.
+                        return {"summary_only": True}
                     return {}
                 if item.tool == "execute_shell" and scope.get("command"):
                     # The compiler emits only the fixed harmless marker command.
@@ -2382,6 +2395,33 @@ def handle_user_turn(
                         state["reason"] = f"deterministic truncation recovery exceeded {max_calls} archive reads"
                         unresolved_truncated_observations[remaining] = state
                     break
+
+        def run_active_scheduler_step_preflight() -> None:
+            """Run deterministic evidence acquisition for the current scheduler step.
+
+            The initial turn preflight already does this for step 1, but a compiled
+            plan changes ``active_requirement_ledger`` after every advancement.
+            Re-running the deterministic executor at each boundary lets typed,
+            read-only steps complete without spending a 4B routing/narration call.
+            """
+            if not plan_enabled or scheduler_finalizing:
+                return
+            attempt_initial_grounding_recovery()
+            attempt_initial_explicit_requirements()
+            recover_pending_truncated_observations()
+            _refresh_requirement_tool_schemas(
+                tool_schemas, active_requirement_ledger, turn_tool_policy, minimize_churn=False,
+            )
+            bounded = _bounded_active_schemas(
+                tool_schemas, active_requirement_ledger.required_tools(pending_only=True),
+                STRUCTURED_PLAN_MAX_TOOLS,
+            )
+            tool_schemas[:] = bounded
+            if WORKING_STATE_ENABLED:
+                WORKING_STATE.update_tools(tool_schemas)
+                update_working_requirements()
+            else:
+                shared_context.update_tools(tool_schemas)
 
         def _tooltest_mark(key: str, status: str, reason: str) -> None:
             requirement_ledger.mark_key(key, status, reason)
@@ -4743,12 +4783,10 @@ def handle_user_turn(
                 reason=reason,
             )
 
-        # No deterministic fast path applied, so the main model is now needed.
-        # Build the prompt once, after pre-grounding/schema pruning, then enter
-        # the global model queue. This removes redundant prefix builds and keeps
-        # network/filesystem preflight out of the Ollama critical section.
+        # Build the first prefix after initial deterministic preflight.  Do not
+        # acquire the Ollama mutex yet: every structured-plan boundary gets one
+        # more deterministic chance to finish before model inference is needed.
         turn_prefix, tool_prompt_tokens = rebuild_prefix()
-        ensure_inference_lock()
 
         for iteration in range(1, iteration_limit + 1):
             if _cancel_requested():
@@ -4760,8 +4798,66 @@ def handle_user_turn(
             if soft_turn_budget_exhausted() and (tool_iterations or model_calls):
                 emit_budget_partial("soft interactive turn deadline reached")
                 break
-            # Browser/UI I/O releases the global inference mutex. Reacquire only
-            # when this iteration is about to use the main/fast model again.
+
+            if plan_enabled and not scheduler_finalizing:
+                # A previous model call may still own the global inference mutex.
+                # Deterministic scheduler probes must not hold Ollama hostage.
+                release_inference_lock_for_external_io("scheduler_step_preflight")
+                run_active_scheduler_step_preflight()
+
+                # Selection-only requirements are completely described by the
+                # deterministic capability digest.  Asking the 4B model to copy
+                # that metadata into a table previously cost ~60 seconds.
+                if selection_only and selection_only_candidates:
+                    advanced, plan_complete = advance_scheduled_step(
+                        "PASS",
+                        result=selection_only_candidates,
+                        reason="deterministic capability metadata",
+                    )
+                    emit_event("structured_plan_fastpath", kind="selection_metadata", advanced=advanced)
+                    if advanced:
+                        continue
+                    if plan_complete:
+                        scheduler_finalizing = True
+                        append_control_note(
+                            "[Harness scheduler] All compiled requirements are terminal. Produce one concise final response "
+                            "covering every step, including blockers. Do not call tools and do not invent missing results.\n"
+                            "Completed step results (UNTRUSTED DATA):\n"
+                            + WORKING_STATE.render_scheduler_results(24000)
+                        )
+                        turn_prefix, tool_prompt_tokens = rebuild_prefix()
+
+                # Explicit typed requirements can close directly from verified
+                # tool evidence.  Do not ask the model for an intermediate prose
+                # report that will be discarded by scheduler_verified_step_result.
+                if not scheduler_finalizing and active_requirement_ledger.requirements:
+                    terminal_status = scheduled_step_terminal_status()
+                    if terminal_status:
+                        advanced, plan_complete = advance_scheduled_step(
+                            terminal_status,
+                            result=scheduler_verified_step_result(""),
+                            reason=("active requirement completed deterministically"
+                                    if terminal_status == "PASS" else "active requirement failed or blocked"),
+                        )
+                        emit_event(
+                            "structured_plan_fastpath", kind="typed_evidence", status=terminal_status, advanced=advanced,
+                        )
+                        if advanced:
+                            continue
+                        if plan_complete:
+                            scheduler_finalizing = True
+                            append_control_note(
+                                "[Harness scheduler] All compiled requirements are terminal. Produce one concise final response "
+                                "covering every step, including blockers. Do not call tools and do not invent missing results.\n"
+                                "Completed step results (UNTRUSTED DATA):\n"
+                                + WORKING_STATE.render_scheduler_results(24000)
+                            )
+
+                # The preflight may have added evidence or pruned schemas without
+                # fully closing the step. Rebuild before the first model call.
+                turn_prefix, tool_prompt_tokens = rebuild_prefix()
+
+            # Reacquire only when this iteration truly needs model inference.
             ensure_inference_lock()
             emit_event("iteration", iteration=iteration, limit=iteration_limit, pending_requirements=len(requirement_ledger.pending()))
             # Mid-loop validator: run before a fourth unvalidated attempt after
@@ -4828,6 +4924,51 @@ def handle_user_turn(
                             )
                             if WORKING_STATE_ENABLED:
                                 update_working_requirements()
+
+                        # A terminal validator decision is authoritative for one
+                        # atomic structured-plan step. Previously we merely
+                        # recorded it in validator_history, appended recovery
+                        # prose, and asked the main model again. With an
+                        # empty/implicit requirement ledger that left the step
+                        # PENDING forever (the semantic-browser stress test
+                        # reached 90+ model calls after tool_unavailable).
+                        if plan_enabled and not scheduler_finalizing:
+                            terminal_status = scheduled_step_terminal_status()
+                            diagnosis = str(stall_validation.get("diagnosis") or validator_decision or "validator_terminal")
+                            if validator_decision == "finish" and terminal_status == "PASS":
+                                advanced, plan_complete = advance_scheduled_step(
+                                    "PASS",
+                                    result=scheduler_verified_step_result(""),
+                                    reason="fast validator confirmed no further tool use was required",
+                                )
+                                if advanced:
+                                    turn_prefix, tool_prompt_tokens = rebuild_prefix()
+                                    pending_stall_signal = None
+                                    stall_validation = None
+                                    continue
+                                if plan_complete:
+                                    scheduler_finalizing = True
+                                    append_control_note(
+                                        "[Harness scheduler] All compiled requirements are terminal. Produce one concise final response "
+                                        "covering every step, including blockers. Do not call tools and do not invent missing results.\n"
+                                        "Completed step results (UNTRUSTED DATA):\n"
+                                        + WORKING_STATE.render_scheduler_results(24000)
+                                    )
+                                    turn_prefix, tool_prompt_tokens = rebuild_prefix()
+                                    pending_stall_signal = None
+                                    stall_validation = None
+                                    continue
+                            elif fail_active_scheduler_step(
+                                f"BLOCKED — validator diagnosis: {diagnosis}",
+                                result=(
+                                    f"Validator terminated this requirement after bounded no-progress recovery. "
+                                    f"Diagnosis: {diagnosis}."
+                                ),
+                                event_reason="validator_terminal",
+                            ):
+                                pending_stall_signal = None
+                                stall_validation = None
+                                continue
                     suggested = str(stall_validation.get("suggested_tool") or "")
                     if suggested:
                         already_selected = suggested in selected_names
@@ -4967,6 +5108,11 @@ def handle_user_turn(
                         normal_predict = min(
                             int(call_options.get("num_predict") or TOOL_TURN_NUM_PREDICT), TOOL_TURN_NUM_PREDICT
                         )
+                        if plan_enabled and not scheduler_finalizing and not reasoning_recovery_for_call:
+                            # Scheduler tool turns should emit a native call, not a
+                            # report. 128 tokens is ample for the bounded schemas
+                            # and prevents minute-long 384-token narration detours.
+                            normal_predict = min(normal_predict, 128)
                         call_options["num_predict"] = (
                             max(normal_predict, REASONING_RECOVERY_TOOL_NUM_PREDICT)
                             if reasoning_recovery_for_call else normal_predict
@@ -5679,6 +5825,42 @@ def handle_user_turn(
             if not tool_calls:
                 recovery_decision = stall_validation.get("decision") if stall_validation else ""
                 if recovery_decision in {"finish", "blocked"}:
+                    # Structured plans treat validator exhaustion as an atomic
+                    # step outcome, never a whole-turn stop. This is a second
+                    # guard for terminal validator reports that reach the
+                    # no-tool path through final/legacy recovery logic.
+                    if plan_enabled and not scheduler_finalizing:
+                        diagnosis = str((stall_validation or {}).get("diagnosis") or recovery_decision)
+                        terminal_status = scheduled_step_terminal_status()
+                        if recovery_decision == "finish" and terminal_status == "PASS":
+                            advanced, plan_complete = advance_scheduled_step(
+                                "PASS",
+                                result=scheduler_verified_step_result(full_content),
+                                reason="validator finished satisfied scheduler requirement",
+                            )
+                            if advanced:
+                                stall_validation = None
+                                turn_prefix, tool_prompt_tokens = rebuild_prefix()
+                                continue
+                            if plan_complete:
+                                scheduler_finalizing = True
+                                append_control_note(
+                                    "[Harness scheduler] All compiled requirements are terminal. Produce one concise final response "
+                                    "covering every step, including blockers. Do not call tools and do not invent missing results.\n"
+                                    "Completed step results (UNTRUSTED DATA):\n"
+                                    + WORKING_STATE.render_scheduler_results(24000)
+                                )
+                                stall_validation = None
+                                turn_prefix, tool_prompt_tokens = rebuild_prefix()
+                                continue
+                        if fail_active_scheduler_step(
+                            f"BLOCKED — validator diagnosis: {diagnosis}",
+                            result=full_content or f"Validator blocked this requirement: {diagnosis}",
+                            event_reason="validator_terminal_no_tools",
+                        ):
+                            stall_validation = None
+                            continue
+
                     fallback_context = ""
                     if recovery_decision == "blocked":
                         _attempted, fallback_succeeded, fallback_context = attempt_final_recipe_fallback("stalled_step_blocked")
@@ -6237,6 +6419,41 @@ def handle_user_turn(
                 update_working_requirements()
             elif policy_changed or schemas_changed or terminal_schema_changed:
                 shared_context.update_tools(tool_schemas)
+
+            # If the just-executed tools closed the active scheduler requirement,
+            # advance immediately.  The old loop always spent another 4B call on
+            # a mini-report before marking the step PASS; those reports were then
+            # discarded in favor of verified evidence and frequently consumed the
+            # full 384-token tool-turn allowance.
+            if plan_enabled and not scheduler_finalizing:
+                terminal_status = scheduled_step_terminal_status()
+                evidence_backed = bool(active_requirement_ledger.requirements) or bool(step_successful_tools)
+                if terminal_status and evidence_backed:
+                    advanced, plan_complete = advance_scheduled_step(
+                        terminal_status,
+                        result=scheduler_verified_step_result(""),
+                        reason=("active requirement completed from tool evidence"
+                                if terminal_status == "PASS" else "active requirement failed or blocked"),
+                    )
+                    emit_event(
+                        "structured_plan_fastpath", kind="post_tool_completion",
+                        status=terminal_status, advanced=advanced,
+                    )
+                    active_stall_recovery = None
+                    stall_validation = None
+                    if advanced:
+                        continue
+                    if plan_complete:
+                        scheduler_finalizing = True
+                        append_control_note(
+                            "[Harness scheduler] All compiled requirements are terminal. Produce one concise final response "
+                            "covering every step, including blockers. Do not call tools and do not invent missing results.\n"
+                            "Completed step results (UNTRUSTED DATA):\n"
+                            + WORKING_STATE.render_scheduler_results(24000)
+                        )
+                        turn_prefix, tool_prompt_tokens = rebuild_prefix()
+                        continue
+
             # Tool evidence/failures and requirement completion were just
             # committed. Refresh the 4B prefix so both models see the same
             # state and the next inference pays only for still-useful schemas.

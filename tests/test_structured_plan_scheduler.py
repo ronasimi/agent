@@ -556,18 +556,9 @@ def test_structured_plan_pregrounding_does_not_end_turn_after_current_time(monke
 
         def chat(self, **kwargs):
             self.calls.append(kwargs)
-            index = len(self.calls)
-            if index == 1:
-                names = _tool_names(kwargs.get("tools") or [])
-                assert "hostname" in names
-                return iter([{"done": True, "message": {"content": "", "tool_calls": [
-                    {"id": "h1", "function": {"name": "hostname", "arguments": {}}}
-                ]}}])
-            if index == 2:
-                return iter([{"done": True, "message": {"content": "runtime identity verified", "tool_calls": []}}])
-            if index == 3:
-                assert kwargs.get("tools") == []
-                return iter([{"done": True, "message": {"content": "hostname is the appropriate primitive", "tool_calls": []}}])
+            # Both scheduler steps are deterministic; only final synthesis may
+            # reach the main model.
+            assert not kwargs.get("tools")
             return iter([{"done": True, "message": {"content": "all scheduled checks complete", "tool_calls": []}}])
 
     db = str(tmp_path / "onecall-regression.db")
@@ -630,7 +621,7 @@ Summarize all completed requirements.
 
     assert [name for name, _ in calls].count("current_time") >= 1
     assert [name for name, _ in calls].count("hostname") == 1
-    assert len(model.calls) >= 4
+    assert len(model.calls) == 1
     assert store.scheduler_complete()
     assert store.load()["status"] == "complete"
     assert messages[-1]["content"] == "all scheduled checks complete"
@@ -687,14 +678,14 @@ def test_structured_plan_model_timeout_fails_one_step_and_continues(monkeypatch,
     prompt = """# Timeout isolation regression
 Treat every numbered requirement below as independent.
 
-## 1. Tool Selection
-Identify the appropriate primitive for current time without executing it yet.
+## 1. Explanation
+Summarize the literal token ALPHA in one short sentence.
 
-## 2. Tool Selection
-Identify the appropriate primitive for CPU information without executing it yet.
+## 2. Explanation
+Summarize the literal token BETA in one short sentence.
 
-## 3. Tool Selection
-Identify the appropriate primitive for memory usage without executing it yet.
+## 3. Explanation
+Summarize the literal token GAMMA in one short sentence.
 
 # FINAL REPORT
 Summarize every requirement.
@@ -732,8 +723,9 @@ def test_scheduler_step_boundary_drops_prior_tool_protocol(monkeypatch, tmp_path
 
     def fake_execute(name, args):
         executed.append((name, dict(args or {})))
-        if name == "hostname":
-            return json.dumps({"host_hostname": "muninn", "runtime_hostname": "muninn", "same_hostname": True})
+        if name == "text_count":
+            text = str((args or {}).get("text") or "")
+            return json.dumps({"characters": len(text), "words": len(text.split()), "lines": 1})
         raise AssertionError((name, args))
 
     class MainClient:
@@ -745,19 +737,15 @@ def test_scheduler_step_boundary_drops_prior_tool_protocol(monkeypatch, tmp_path
             index = len(self.calls)
             if index == 1:
                 return iter([{"done": True, "message": {"content": "", "tool_calls": [
-                    {"id": "first-host", "function": {"name": "hostname", "arguments": {}}}
+                    {"id": "first-count", "function": {"name": "text_count", "arguments": {"text": "alpha beta"}}}
                 ]}}])
             if index == 2:
-                return iter([{"done": True, "message": {"content": "first hostname verified", "tool_calls": []}}])
-            if index == 3:
                 wire = json.dumps(kwargs.get("messages") or [], ensure_ascii=False)
-                assert "first-host" not in wire
-                assert "first hostname verified" not in wire
+                assert "first-count" not in wire
+                assert "alpha beta" not in wire
                 return iter([{"done": True, "message": {"content": "", "tool_calls": [
-                    {"id": "second-host", "function": {"name": "hostname", "arguments": {}}}
+                    {"id": "second-count", "function": {"name": "text_count", "arguments": {"text": "gamma delta epsilon"}}}
                 ]}}])
-            if index == 4:
-                return iter([{"done": True, "message": {"content": "second hostname verified", "tool_calls": []}}])
             return iter([{"done": True, "message": {"content": "final", "tool_calls": []}}])
 
     monkeypatch.setattr(working_state, "DB_PATH", str(tmp_path / "tail-reset.db"))
@@ -792,11 +780,11 @@ Treat every numbered requirement below as independent.
 This regression intentionally contains two independent scheduler requirements so the structured-plan path is exercised.
 The purpose is to verify that completed tool protocol from one atomic step is not replayed into the next atomic step.
 
-## 1. Hostname
-Check hostname using the hostname primitive.
+## 1. Text Count
+Count the words in a small sample using the text_count primitive.
 
-## 2. Hostname Cross-check
-Cross-check hostname using the hostname primitive.
+## 2. Text Count Cross-check
+Count a different small sample using the text_count primitive.
 
 # FINAL REPORT
 Summarize both checks.
@@ -819,7 +807,7 @@ Summarize both checks.
         },
     )
 
-    assert [name for name, _ in executed] == ["hostname", "hostname"]
+    assert [name for name, _ in executed] == ["text_count", "text_count"]
     assert store.scheduler_complete()
     assert messages[-1]["content"] == "final"
 
@@ -838,17 +826,7 @@ def test_operational_scheduler_result_persists_evidence_not_model_claims(monkeyp
 
         def chat(self, **kwargs):
             self.calls.append(kwargs)
-            index = len(self.calls)
-            if index == 1:
-                return iter([{"done": True, "message": {"content": "", "tool_calls": [
-                    {"id": "host-1", "function": {"name": "hostname", "arguments": {}}}
-                ]}}])
-            if index == 2:
-                return iter([{"done": True, "message": {
-                    "content": "Hostname muninn. Kernel 5.15.0-FAKE. All values verified.", "tool_calls": []
-                }}])
-            if index == 3:
-                return iter([{"done": True, "message": {"content": "hostname maps to hostname", "tool_calls": []}}])
+            assert not kwargs.get("tools")
             return iter([{"done": True, "message": {"content": "final synthesis", "tool_calls": []}}])
 
     monkeypatch.setattr(working_state, "DB_PATH", str(tmp_path / "verified-result.db"))
@@ -915,7 +893,9 @@ Summarize both requirements.
     assert "Verified scheduler evidence:" in result
     assert "muninn" in result
     assert "5.15.0-FAKE" not in result
-    assert scheduler["steps"][1]["result"] == "hostname maps to hostname"
+    assert "hostname" in scheduler["steps"][1]["result"]
+    assert "metadata only" in scheduler["steps"][1]["result"].lower()
+    assert len(model.calls) == 1
     assert store.scheduler_complete()
 
 
@@ -929,8 +909,7 @@ def test_many_selection_steps_keep_provider_prompt_bounded(monkeypatch, tmp_path
 
         def chat(self, **kwargs):
             self.calls.append(kwargs)
-            if len(self.calls) <= 20:
-                return iter([{"done": True, "message": {"content": f"selection {len(self.calls)} complete", "tool_calls": []}}])
+            assert not kwargs.get("tools")
             return iter([{"done": True, "message": {"content": "final bounded synthesis", "tool_calls": []}}])
 
     monkeypatch.setattr(working_state, "DB_PATH", str(tmp_path / "bounded-prompts.db"))
@@ -982,12 +961,11 @@ def test_many_selection_steps_keep_provider_prompt_bounded(monkeypatch, tmp_path
         },
     )
 
-    assert len(model.calls) == 21
-    payload_sizes = [len(json.dumps(call.get("messages") or [], ensure_ascii=False)) for call in model.calls[:20]]
-    # Step number/completed_count changes by a few bytes, but old step protocol
-    # must not accumulate linearly across the plan.
-    assert max(payload_sizes) - min(payload_sizes) < 1200
-    assert payload_sizes[-1] < payload_sizes[0] + 1200
+    # Selection-only scheduler steps are deterministic metadata lookups; none
+    # should spend a model call. Only the final synthesis reaches Ollama.
+    assert len(model.calls) == 1
+    final_payload = len(json.dumps(model.calls[0].get("messages") or [], ensure_ascii=False))
+    assert final_payload < 30000
     assert store.scheduler_complete()
 
 
@@ -1040,14 +1018,14 @@ def test_zero_tool_protocol_failures_only_fail_active_scheduler_step(monkeypatch
     prompt = """# Zero-tool failure isolation
 Treat every numbered requirement below as independent.
 
-## 1. Tool Selection
-Identify the time primitive without executing it yet.
+## 1. Explanation
+Summarize the literal token ALPHA in one short sentence.
 
-## 2. Tool Selection
-Identify the CPU primitive without executing it yet.
+## 2. Explanation
+Summarize the literal token BETA in one short sentence.
 
-## 3. Tool Selection
-Identify the memory primitive without executing it yet.
+## 3. Explanation
+Summarize the literal token GAMMA in one short sentence.
 
 # FINAL REPORT
 Summarize all requirements.
@@ -1131,3 +1109,288 @@ def test_fast_plan_compiler_requests_inference_slot_only_when_model_is_needed():
 
     assert plan == ["Check weather", "Read README"]
     assert order == ["lock", "chat"]
+
+
+def test_stress_first_nine_steps_complete_without_intermediate_model_calls(monkeypatch, tmp_path):
+    """Regression for the 15-minute/9-step scheduler throughput failure.
+
+    Runtime/tool-registry/host/CPU/memory/storage/pressure/temperature are all
+    typed read-only checks. They should execute from the deterministic ledger;
+    only the final synthesis is allowed to reach the main model.
+    """
+    from al_agent import turn_engine as te
+    from tools import working_state
+
+    executed = []
+
+    def fake_execute(name, args):
+        args = dict(args or {})
+        executed.append((name, args))
+        if name == "current_time":
+            return json.dumps({
+                "utc": "2026-09-24T18:24:11+00:00",
+                "local": "2026-09-24T14:24:11-04:00",
+                "date": "2026-09-24", "time": "14:24:11", "day_of_week": "Thursday",
+                "timezone": "America/Toronto", "timezone_abbreviation": "EDT",
+                "utc_offset": "-0400", "unix_timestamp": 1790274251,
+                "host_timezone": "Canada/Eastern", "system_local": "2026-09-24T14:24:11-04:00",
+            })
+        if name == "environment_summary":
+            return json.dumps({
+                "clock": {"timezone": "America/Toronto"}, "host_hostname": "muninn",
+                "runtime_hostname": "muninn", "platform": "Linux-7.2.6-arch2-1-x86_64-with-glibc2.44",
+                "kernel": "7.2.6-arch2-1", "architecture": "x86_64", "python": "3.14.7",
+                "main_model": "agent-main:4b", "fast_model": "agent-main:2b",
+                "context_tokens": 16384, "workspace_available": True,
+            })
+        if name == "uptime":
+            return json.dumps({"boot_time": "2026-09-20T20:28:46-04:00", "uptime_seconds": 324008.7})
+        if name == "hostname":
+            return json.dumps({"host_hostname": "muninn", "runtime_hostname": "muninn", "same_hostname": True})
+        if name == "tool_health":
+            assert args == {"summary_only": True}
+            return json.dumps({
+                "registered": 237, "healthy": 237, "degraded": 0, "unavailable": 0,
+                "readonly": 190, "mutating": 47, "missing_dependency_tools": 0,
+            })
+        if name == "host_snapshot":
+            return json.dumps({
+                "observed_at": "2026-09-24T18:28:54+00:00", "timezone": "America/Toronto",
+                "hostname": "muninn", "platform": "Linux-7.2.6-arch2-1-x86_64-with-glibc2.44",
+                "kernel": "7.2.6-arch2-1", "cpu_count": 12,
+                "load_average": [2.3, 1.8, 1.6], "uptime_seconds": 324008.7,
+                "memory": {"total_mb": 15200, "available_mb": 2636, "used_mb": 12564},
+                "disk": {"total_gb": 475.92, "free_gb": 54.73, "used_percent": 88.5},
+                "temperatures": {"k10temp": [{"label": "Tctl", "current": 80.5}]},
+            })
+        if name == "filesystem_snapshot":
+            return json.dumps({"source": "host", "filesystems": [
+                {"device": "/dev/mapper/root", "mountpoint": "/", "fstype": "btrfs",
+                 "readonly": False, "total_gb": 475.92, "free_gb": 54.73, "used_percent": 88.5}
+            ]})
+        if name == "cpu_info":
+            return json.dumps({
+                "logical_cpus": 12, "physical_cores": 6,
+                "frequency_mhz": {"current": 1400.0, "min": 1400.0, "max": 2100.0},
+                "models": ["AMD Ryzen 5 PRO 4650U with Radeon Graphics"], "source": "/host/proc/cpuinfo",
+            })
+        if name == "memory_info":
+            return json.dumps({
+                "memory": {"total": 15938121728, "available": 2955853824, "used": 12982267904},
+                "swap": {"total": 25148514304, "used": 3001720832, "free": 22146793472},
+            })
+        if name == "pressure_snapshot":
+            return json.dumps({
+                "source": "/host/proc/pressure",
+                "cpu": [{"scope": "some", "avg10": 0.0, "avg60": 0.0, "avg300": 0.0}],
+                "memory": [{"scope": "some", "avg10": 0.0, "avg60": 0.0, "avg300": 0.0}],
+                "io": [{"scope": "some", "avg10": 0.0, "avg60": 0.0, "avg300": 0.06}],
+            })
+        raise AssertionError((name, args))
+
+    class MainClient:
+        def __init__(self):
+            self.calls = []
+
+        def chat(self, **kwargs):
+            self.calls.append(kwargs)
+            assert not kwargs.get("tools")
+            return iter([{"done": True, "message": {"content": "final stress synthesis", "tool_calls": []}}])
+
+    monkeypatch.setattr(working_state, "DB_PATH", str(tmp_path / "first-nine-fastpath.db"))
+    store = working_state.WorkingStateStore(limits={"max_render_chars": 8000, "scheduler_steps": 96})
+    model = MainClient()
+    monkeypatch.setattr(te, "WORKING_STATE", store)
+    monkeypatch.setattr(te, "WORKING_STATE_ENABLED", True)
+    monkeypatch.setattr(te, "STRUCTURED_PLAN_ENABLED", True)
+    monkeypatch.setattr(te, "STRUCTURED_PLAN_MIN_CHARS", 10)
+    monkeypatch.setattr(te, "STRUCTURED_PLAN_MIN_COMMANDS", 2)
+    monkeypatch.setattr(te, "STRUCTURED_PLAN_MAX_TOOLS", 4)
+    monkeypatch.setattr(te, "GROUNDING_ENABLED", True)
+    monkeypatch.setattr(te, "RECIPES_ENABLED", False)
+    monkeypatch.setattr(te, "LOOP_VALIDATOR_ENABLED", False)
+    monkeypatch.setattr(te, "MODEL_TRACE_ENABLED", False)
+    monkeypatch.setattr(te, "get_conversation_summary", lambda: "")
+    monkeypatch.setattr(te, "build_memory_context", lambda *_: "")
+    monkeypatch.setattr(te, "get_relevant_user_prompt_context", lambda *_: "")
+    monkeypatch.setattr(te, "get_user_location", lambda: "")
+    monkeypatch.setattr(te, "build_historical_recall_context", lambda *a, **k: "")
+    monkeypatch.setattr(te, "render_relevant_skill_index", lambda *a, **k: "")
+    monkeypatch.setattr(te, "render_failure_lessons", lambda *a, **k: "")
+    monkeypatch.setattr(te, "render_relevant_reflections", lambda *a, **k: "")
+    monkeypatch.setattr(te, "evict_report_model_for_interactive", lambda: None)
+    monkeypatch.setattr(te, "_prune_compacted_history", lambda _messages: None)
+    monkeypatch.setattr(te, "log_perf_stats", lambda *a, **k: None)
+    monkeypatch.setattr(te, "_execute_registered_tool", fake_execute)
+
+    prompt = """# Al Agent Full Toolset Stress Test
+Treat every numbered requirement below as independent.
+
+## 1. Runtime Identity
+Determine using runtime/system tools: hostname, operating system, kernel version, architecture, uptime, current local time, and configured timezone. Verify each value from tool output.
+
+## 2. Tool Registry
+Inspect the available tool registry. Report total registered tools, healthy tools, degraded tools, unavailable tools, missing dependencies, and readonly versus mutating tool counts if available.
+
+## 3. Tool Selection
+For current time, CPU information, memory usage, network routes, DNS lookup, current weather, public webpage retrieval, repository status, reading a local file, parsing JSON, running a calculation, and historical conversation recall, identify the most appropriate primitive without executing it yet.
+
+## 4. Host Snapshot
+Collect a read-only host snapshot. Report CPU, load average, memory, uptime, filesystem usage, kernel, and hostname. Cross-check at least two values using a more specific primitive where available.
+
+## 5. CPU
+Use the dedicated CPU tool. Report model, architecture, logical CPU count, and relevant frequency/topology information where exposed. Do not infer missing hardware details.
+
+## 6. Memory
+Use the dedicated memory primitive. Report total memory, available memory, used memory, and swap if present. Compare against the general host snapshot.
+
+## 7. Storage
+Inspect mounted filesystems and disk usage. Report root filesystem usage, largest mounted filesystem, and mount types where available. Do not traverse the entire filesystem.
+
+## 8. Pressure / Load
+Inspect load average, CPU pressure if supported, memory pressure if supported, and I/O pressure if supported. Distinguish unavailable metrics from zero values.
+
+## 9. Temperature
+Read available hardware temperature sensors. Do not treat missing sensor data as an error. Report sensor source and values.
+
+# FINAL REPORT
+Summarize all completed requirements.
+"""
+    messages = [{"role": "system", "content": "system"}]
+    te.handle_user_turn(
+        messages, prompt, False,
+        runtime_overrides={
+            "OLLAMA": model, "LOOP_VALIDATOR_CLIENT": model,
+            "record_monitor_state": lambda *a, **k: None,
+            "append_and_save": lambda rows, item: rows.append(item),
+            "acquire_turn_lock": lambda: object(), "release_turn_lock": lambda _lock: None,
+            "acquire_inference_lock": lambda: object(), "release_inference_lock": lambda _lock: None,
+            "queue_compaction_if_needed": lambda *a, **k: None,
+        },
+    )
+
+    scheduler = store.scheduler_snapshot()
+    assert len(scheduler["steps"]) == 9
+    assert all(step["status"] == "PASS" for step in scheduler["steps"])
+    assert len(model.calls) == 1
+    assert messages[-1]["content"] == "final stress synthesis"
+    names = [name for name, _ in executed]
+    assert "tool_health" in names
+    assert "cpu_info" in names
+    assert "memory_info" in names
+    assert "pressure_snapshot" in names
+
+
+def test_validator_blocked_step_is_terminal_and_scheduler_advances(monkeypatch, tmp_path):
+    """Regression for the step-25 semantic-observation hang.
+
+    A terminal validator decision must close exactly the active scheduler step.
+    The main model must not be called again to narrate/retry the same blocker.
+    """
+    from al_agent import turn_engine as te
+    from tools import working_state
+
+    class MainClient:
+        def __init__(self):
+            self.calls = []
+
+        def chat(self, **kwargs):
+            self.calls.append(kwargs)
+            idx = len(self.calls)
+            if idx <= 3:
+                names = {x.get("function", {}).get("name") for x in (kwargs.get("tools") or [])}
+                assert "search_semantic_memory" in names
+                return iter([{"done": True, "message": {"content": "", "tool_calls": [
+                    {"id": f"mem-{idx}", "function": {
+                        "name": "search_semantic_memory",
+                        "arguments": {"query": f"impossible-memory-token-{idx}", "limit": 5},
+                    }}
+                ]}}])
+            # Step 2 is deterministic selection-only, so the only later model
+            # request is final synthesis. If the blocked step loops, this branch
+            # would be reached too early with scheduler tools still exposed.
+            assert not kwargs.get("tools")
+            return iter([{"done": True, "message": {"content": "final synthesis", "tool_calls": []}}])
+
+    monkeypatch.setattr(working_state, "DB_PATH", str(tmp_path / "validator-terminal.db"))
+    store = working_state.WorkingStateStore(limits={"max_render_chars": 8000})
+    model = MainClient()
+
+    monkeypatch.setattr(te, "WORKING_STATE", store)
+    monkeypatch.setattr(te, "WORKING_STATE_ENABLED", True)
+    monkeypatch.setattr(te, "STRUCTURED_PLAN_ENABLED", True)
+    monkeypatch.setattr(te, "STRUCTURED_PLAN_MIN_CHARS", 10)
+    monkeypatch.setattr(te, "STRUCTURED_PLAN_MIN_COMMANDS", 2)
+    monkeypatch.setattr(te, "STRUCTURED_PLAN_MAX_TOOLS", 3)
+    monkeypatch.setattr(te, "GROUNDING_ENABLED", False)
+    monkeypatch.setattr(te, "RECIPES_ENABLED", False)
+    monkeypatch.setattr(te, "LOOP_VALIDATOR_ENABLED", True)
+    monkeypatch.setattr(te, "STALL_VALIDATOR_AFTER", 3)
+    monkeypatch.setattr(te, "MODEL_TRACE_ENABLED", False)
+    monkeypatch.setattr(te, "get_conversation_summary", lambda: "")
+    monkeypatch.setattr(te, "build_memory_context", lambda *_: "")
+    monkeypatch.setattr(te, "get_relevant_user_prompt_context", lambda *_: "")
+    monkeypatch.setattr(te, "get_user_location", lambda: "")
+    monkeypatch.setattr(te, "build_historical_recall_context", lambda *a, **k: "")
+    monkeypatch.setattr(te, "render_relevant_skill_index", lambda *a, **k: "")
+    monkeypatch.setattr(te, "render_failure_lessons", lambda *a, **k: "")
+    monkeypatch.setattr(te, "render_relevant_reflections", lambda *a, **k: "")
+    monkeypatch.setattr(te, "evict_report_model_for_interactive", lambda: None)
+    monkeypatch.setattr(te, "_prune_compacted_history", lambda _messages: None)
+    monkeypatch.setattr(te, "log_perf_stats", lambda *a, **k: None)
+    monkeypatch.setattr(
+        te, "_execute_registered_tool",
+        lambda name, args: "No related memories found." if name == "search_semantic_memory" else "{}",
+    )
+    validator_calls = []
+
+    def blocked_validator(*args, **kwargs):
+        validator_calls.append((args, kwargs))
+        return {
+            "decision": "blocked",
+            "diagnosis": "tool_unavailable",
+            "suggested_tool": "",
+            "reason": "three no-progress attempts",
+        }
+
+    monkeypatch.setattr(te, "validate_stalled_step", blocked_validator)
+
+    prompt = """# Validator terminalization regression
+Treat every numbered requirement below as independent.
+
+## 1. Memory Probe
+Search semantic memory for an impossible token and report whether anything exists.
+
+## 2. Tool Selection
+Identify the primitive for current time without executing it yet.
+
+# FINAL REPORT
+Summarize both requirements.
+"""
+    messages = [{"role": "system", "content": "system"}]
+    te.handle_user_turn(
+        messages,
+        prompt,
+        False,
+        runtime_overrides={
+            "OLLAMA": model,
+            "LOOP_VALIDATOR_CLIENT": model,
+            "record_monitor_state": lambda *a, **k: None,
+            "append_and_save": lambda rows, item: rows.append(item),
+            "acquire_turn_lock": lambda: object(),
+            "release_turn_lock": lambda _lock: None,
+            "acquire_inference_lock": lambda: object(),
+            "release_inference_lock": lambda _lock: None,
+            "queue_compaction_if_needed": lambda *a, **k: None,
+        },
+    )
+
+    scheduler = store.scheduler_snapshot()
+    assert [step["status"] for step in scheduler["steps"]] == ["FAIL", "PASS"]
+    assert "BLOCKED" in scheduler["steps"][0]["reason"]
+    assert scheduler["steps"][1]["reason"] == "deterministic capability metadata"
+    assert len(validator_calls) == 1
+    assert len(model.calls) == 4  # exactly 3 failing attempts + final synthesis
+    assert store.scheduler_complete()
+    assert store.load()["status"] == "complete"
+    assert messages[-1]["content"] == "final synthesis"

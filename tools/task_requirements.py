@@ -151,6 +151,14 @@ _RULES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     ("market_quote", "market_quote", "current market/commodity quote", (r"\b(?:current|latest|live|today(?:'s)?|right now)\b.{0,64}\b(?:price|prices|quote|quotes|trading at)\b", r"\b(?:price|prices|quote|quotes)\b.{0,64}\b(?:wti|brent|crude oil|gold|silver|natural gas|copper)\b")),
     ("web_search", "web_search", "current web source discovery", (r"\bweb research\b", r"\bresearch the current\b", r"\bcurrent .*documentation\b", r"\blook up\b", r"\bsearch the web\b")),
     ("web_verify", "browse_url", "authoritative source content verification", (r"\bcurrent .*documentation\b", r"\bofficial .*documentation\b", r"\bsource urls?\b", r"\bverify .*source\b", r"\bweb research\b")),
+    ("browser_session", "browser_step", "live browser session observation", (
+        r"\bbrowser session\b", r"\bactive tab\b.{0,100}\bstate version\b",
+    )),
+    ("browser_semantic", "browser_step", "semantic interactive element observation", (
+        r"\bsemantic observation\b",
+        r"\binteractive elements?\b.{0,180}\b(?:stable reference|accessible name|role|state)\b",
+        r"\b(?:stable reference|accessible name)\b.{0,180}\binteractive elements?\b",
+    )),
     ("screenshot", "take_web_screenshot", "requested webpage screenshot", (r"\btake (?:a )?screenshot\b", r"\bscreenshot of\b", r"\bcapture .*page\b")),
     ("repo_status", "repo_status", "repository status", (r"\brepository status\b", r"\brepo status\b")),
     ("repo_checks", "repo_checks", "repository compile/config/lint/test checks", (r"\brepository health\b", r"\brepo checks?\b", r"\bcompile/config/lint/test\b", r"\b(?:compile|lint|pytest|tests?).*checks?\b")),
@@ -187,7 +195,7 @@ _EXPLICIT_TOOL_NAMES = {
     "service_health", "network_snapshot", "neighbor_snapshot", "connection_snapshot",
     "dns_diagnose", "network_path", "endpoint_probe", "http_probe", "tool_health",
     "dependency_audit", "news_search", "market_quote", "web_search", "browse_url", "take_web_screenshot", "geocode_location", "weather_forecast",
-    "repo_status", "repo_checks", "page_metadata", "page_links", "extract_document", "read_file",
+    "repo_status", "repo_checks", "page_metadata", "page_links", "extract_document", "read_file", "browser_step",
     "current_time", "hostname", "environment_summary", "uptime", "cpu_info", "memory_info", "local_subnets", "scan_subnet",
     "gmail_search_messages", "gmail_read_message", "google_calendar_list_events",
     "google_calendar_get_event", "google_calendar_list_calendars", "google_drive_list_files",

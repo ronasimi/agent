@@ -460,3 +460,16 @@ def test_cpu_architecture_request_requires_environment_evidence():
     ).required_tools())
     assert "cpu_info" in tools
     assert "environment_summary" in tools
+
+
+def test_browser_semantic_observation_requires_browser_step():
+    text = (
+        "Semantic Observation: Identify at least three interactive elements semantically. "
+        "For each report stable reference, role, accessible name, and state."
+    )
+    assert "browser_step" in TaskRequirementLedger.from_request(text).required_tools()
+
+
+def test_browser_session_requires_browser_step():
+    text = "Browser Session: Open a safe public demo page and report the active tab and state version."
+    assert "browser_step" in TaskRequirementLedger.from_request(text).required_tools()
