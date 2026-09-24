@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from tools.runtime import utc_now
 from tools.conversation_context import get_active_conversation_id, normalize_conversation_id
-from .state import INFERENCE_LOCK_PATH
+from .state import INFERENCE_LOCK_PATH, INFERENCE_LOCK_TIMEOUT_SECONDS
 
 _EVENT_SINK: contextvars.ContextVar[Callable[[dict[str, Any]], None] | None] = contextvars.ContextVar("agent_event_sink", default=None)
 _CANCEL_EVENT: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar("agent_cancel_event", default=None)
@@ -45,29 +45,50 @@ def cancel_requested() -> bool:
 
 
 
-def _acquire_file_lock(path: str, *, wait_event: str = "queue_wait", acquired_event: str = "queue_acquired"):
-    """Acquire one cancellable advisory file lock.
+def _acquire_file_lock(
+    path: str,
+    *,
+    wait_event: str = "queue_wait",
+    acquired_event: str = "queue_acquired",
+    timeout_seconds: float | None = None,
+):
+    """Acquire one cancellable advisory file lock with optional deadline.
 
     The helper is shared by the per-conversation turn lock and the global
-    inference lock so both queues have identical cancellation semantics.
+    inference lock. Foreground inference uses a finite deadline so a leaked or
+    unexpectedly long-held lock cannot leave a WebUI turn silently pending
+    forever before the first model trace is created.
     """
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, exist_ok=True)
     handle = open(path, "a+", encoding="utf-8")
     queued = False
+    started = time.monotonic()
+    last_progress_emit = started
+    deadline = None if timeout_seconds is None else started + max(0.0, float(timeout_seconds))
     while True:
         if cancel_requested():
             handle.close()
             raise RuntimeError("Turn cancelled while waiting for a harness lock")
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            emit_event(acquired_event, queued=queued)
+            emit_event(acquired_event, queued=queued, wait_ms=(time.monotonic() - started) * 1000.0)
             return handle
         except BlockingIOError:
+            now = time.monotonic()
             if not queued:
                 queued = True
-                emit_event(wait_event)
+                emit_event(wait_event, elapsed_ms=0.0, timeout_seconds=timeout_seconds)
+            elif now - last_progress_emit >= 5.0:
+                last_progress_emit = now
+                emit_event(f"{wait_event}_progress", elapsed_ms=(now - started) * 1000.0, timeout_seconds=timeout_seconds)
+            if deadline is not None and now >= deadline:
+                handle.close()
+                emit_event(f"{wait_event}_timeout", elapsed_ms=(now - started) * 1000.0, timeout_seconds=timeout_seconds)
+                raise TimeoutError(
+                    f"Timed out after {float(timeout_seconds):.1f}s waiting for the shared model inference slot"
+                )
             time.sleep(0.10)
 
 
@@ -93,7 +114,10 @@ def release_turn_lock(handle) -> None:
 
 
 def acquire_inference_lock():
-    return _acquire_file_lock(INFERENCE_LOCK_PATH)
+    return _acquire_file_lock(
+        INFERENCE_LOCK_PATH,
+        timeout_seconds=INFERENCE_LOCK_TIMEOUT_SECONDS,
+    )
 
 
 def release_inference_lock(handle) -> None:

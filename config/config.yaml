@@ -92,6 +92,9 @@ agent:
     # Upper bound for one Ollama HTTP request/read stall. Streaming generation
     # may continue normally as long as the transport continues making progress.
     timeout_seconds: 60
+    # Maximum foreground wait for the shared Ollama inference slot. A queue
+    # timeout surfaces as an explicit error instead of silently stalling a turn.
+    queue_timeout_seconds: 90
     preflight_retries: 1
     base_delay_seconds: 0.15
     max_delay_seconds: 0.75

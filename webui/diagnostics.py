@@ -26,7 +26,7 @@ from tools.memory import (
     get_compacted_through_id,
     get_conversation_summary,
 )
-from tools.runtime import DB_PATH, list_jobs, list_monitor_events
+from tools.runtime import DB_PATH, get_monitor_state, list_jobs, list_monitor_events
 from tools.working_state import WorkingStateStore
 
 _SECRET_KEY_RE = re.compile(
@@ -198,6 +198,7 @@ def _runtime_snapshot(conversation_id: str) -> dict[str, Any]:
             "tool_turn_num_predict": agent_runtime.TOOL_TURN_NUM_PREDICT,
             "final_num_predict": agent_runtime.FINAL_NUM_PREDICT,
             "model_transport_timeout": agent_runtime.MODEL_TRANSPORT_TIMEOUT,
+            "inference_queue_timeout": agent_runtime.INFERENCE_LOCK_TIMEOUT_SECONDS,
             "max_model_calls_per_turn": agent_runtime.MAX_MODEL_CALLS_PER_TURN,
             "structured_plan_max_model_calls": agent_runtime.STRUCTURED_PLAN_MAX_MODEL_CALLS,
             "structured_plan_max_iterations": agent_runtime.STRUCTURED_PLAN_MAX_ITERATIONS,
@@ -215,6 +216,11 @@ def _runtime_snapshot(conversation_id: str) -> dict[str, Any]:
         "model_capabilities": capability_profiles,
         "ollama_host": str(agent_runtime.OLLAMA_HOST),
         "model_trace_path": str(agent_runtime.MODEL_TRACE_PATH),
+        "interaction_state": {
+            "active": get_monitor_state("agent.interaction_active", False),
+            "waiting": get_monitor_state("agent.interaction_waiting", False),
+            "last_interaction": get_monitor_state("agent.last_interaction", ""),
+        },
     }
 
 

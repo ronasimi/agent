@@ -372,7 +372,14 @@ def handle_user_turn(
             min_chars=STRUCTURED_PLAN_MIN_CHARS,
             min_commands=STRUCTURED_PLAN_MIN_COMMANDS,
         ):
-            ensure_inference_lock()
+            plan_model_requested = False
+
+            def _before_plan_model_call() -> None:
+                nonlocal plan_model_requested, auxiliary_fast_calls
+                ensure_inference_lock()
+                plan_model_requested = True
+                auxiliary_fast_calls += 1
+
             compiled_steps = compile_structured_plan(
                 _validator_client,
                 model=FAST_MODEL,
@@ -382,13 +389,14 @@ def handle_user_turn(
                 min_chars=STRUCTURED_PLAN_MIN_CHARS,
                 min_commands=STRUCTURED_PLAN_MIN_COMMANDS,
                 max_steps=STRUCTURED_PLAN_MAX_STEPS,
+                before_model_call=_before_plan_model_call,
             )
-            auxiliary_fast_calls += 1
             emit_event(
                 "structured_plan",
                 compiled=bool(compiled_steps),
                 step_count=len(compiled_steps),
-                compiler_model=FAST_MODEL,
+                compiler_model=FAST_MODEL if plan_model_requested else "deterministic",
+                model_call=plan_model_requested,
             )
 
         plan_enabled = WORKING_STATE_ENABLED and len(compiled_steps) >= 2

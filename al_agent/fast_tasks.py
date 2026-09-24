@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Callable
 
 from .model_capabilities import capability_chat_overrides
 
@@ -221,6 +221,7 @@ def compile_structured_plan(
     min_chars: int = 900,
     min_commands: int = 3,
     max_steps: int = 32,
+    before_model_call: Callable[[], None] | None = None,
 ) -> list[str]:
     """Compile a complex request into validated atomic tasks using the fast role.
 
@@ -238,6 +239,12 @@ def compile_structured_plan(
     fast_options["temperature"] = 0.0
     fast_options["num_predict"] = min(max(128, int(fast_options.get("num_predict") or 384)), 768)
     try:
+        # Explicitly numbered suites are parsed above without model inference.
+        # Acquire scarce model/inference resources only when we actually fall
+        # through to the fast-model compiler. This prevents deterministic plan
+        # setup from queueing behind unrelated inference work.
+        if before_model_call is not None:
+            before_model_call()
         response = client.chat(
             model=model,
             messages=structured_plan_compiler_prompt(objective),

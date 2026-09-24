@@ -526,6 +526,8 @@ function connect(){
       if(e.ok===false)setStatus('Command failed','error');else setStatus('Ready');
       finishTurn();
     }else if(e.type==='queue_wait')setStatus('Queued for inference…','busy');
+    else if(e.type==='queue_wait_progress'){const seconds=Math.max(0,Math.round(Number(e.elapsed_ms||0)/1000));setStatus(`Queued for inference… ${seconds}s`,'busy');}
+    else if(e.type==='queue_wait_timeout')setStatus('Inference queue timed out','error');
     else if(e.type==='queue_acquired')setStatus(activeThinkingEnabled?'Thinking…':'Generating…','busy');
     else if(e.type==='recipe_check')setStatus(e.best_match?`Recipe checked: ${e.best_match}`:'Recipes checked','busy');
     else if(e.type==='thinking_delta')appendThinking(e.content||'');

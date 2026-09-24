@@ -1072,3 +1072,62 @@ Summarize all requirements.
     assert [step["status"] for step in scheduler["steps"]] == ["PASS", "FAIL", "PASS"]
     assert store.load()["status"] == "complete"
     assert messages[-1]["content"] == "final"
+
+
+def test_explicit_numbered_suite_does_not_request_inference_slot():
+    from al_agent.fast_tasks import compile_structured_plan
+
+    class CompilerMustNotRun:
+        def chat(self, **kwargs):  # pragma: no cover
+            raise AssertionError("explicit numbered requirements should bypass the model compiler")
+
+    prompt = """# Stress Test
+
+Complete the entire suite. Treat every numbered requirement below as independent.
+
+## 1. Runtime Identity
+Determine hostname and current time using runtime tools.
+
+## 2. Tool Registry
+Inspect registered tool health.
+
+## 3. Storage
+Inspect mounted filesystems.
+"""
+    lock_requests = []
+
+    plan = compile_structured_plan(
+        CompilerMustNotRun(),
+        model="agent-main:2b",
+        objective=prompt,
+        min_chars=10,
+        min_commands=2,
+        max_steps=96,
+        before_model_call=lambda: lock_requests.append("model-lock"),
+    )
+
+    assert len(plan) == 3
+    assert lock_requests == []
+
+
+def test_fast_plan_compiler_requests_inference_slot_only_when_model_is_needed():
+    from al_agent.fast_tasks import compile_structured_plan
+
+    order = []
+
+    class FakeClient:
+        def chat(self, **kwargs):
+            order.append("chat")
+            return {"message": {"content": '["Check weather", "Read README"]'}}
+
+    plan = compile_structured_plan(
+        FakeClient(),
+        model="agent-main:2b",
+        objective="Check weather, then read README. " + ("context " * 30),
+        min_chars=10,
+        min_commands=2,
+        before_model_call=lambda: order.append("lock"),
+    )
+
+    assert plan == ["Check weather", "Read README"]
+    assert order == ["lock", "chat"]

@@ -139,6 +139,10 @@ MODEL_PREFLIGHT_RETRIES = max(0, min(int(MODEL_TRANSPORT_CFG.get("preflight_retr
 MODEL_RETRY_BASE_DELAY = max(0.0, float(MODEL_TRANSPORT_CFG.get("base_delay_seconds", 0.15)))
 MODEL_RETRY_MAX_DELAY = max(MODEL_RETRY_BASE_DELAY, float(MODEL_TRANSPORT_CFG.get("max_delay_seconds", 0.75)))
 MODEL_TRANSPORT_TIMEOUT = max(1.0, float(MODEL_TRANSPORT_CFG.get("timeout_seconds", 120)))
+# A foreground request must never wait forever before its first model call.
+# Keep queueing distinct from HTTP transport timeout so diagnostics can identify
+# model contention separately from provider/network stalls.
+INFERENCE_LOCK_TIMEOUT_SECONDS = max(1.0, float(MODEL_TRANSPORT_CFG.get("queue_timeout_seconds", 90)))
 LOOP_VALIDATOR_CFG = AGENT_CFG.get("tool_loop_validator", {})
 LOOP_VALIDATOR_ENABLED = bool(LOOP_VALIDATOR_CFG.get("enabled", True))
 LOOP_VALIDATOR_OPTIONS = {**FAST_OPTIONS, **(LOOP_VALIDATOR_CFG.get("options") or {})}
