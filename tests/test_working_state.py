@@ -412,3 +412,31 @@ def test_stored_fact_evidence_pins_underlying_observation_tool():
     ]
     bounded = _bounded_observations(state, rows, 2)
     assert any(row.get("tool") == "recipe:weather.current_forecast" for row in bounded)
+
+
+def test_scheduler_evidence_digest_can_filter_to_active_tool_scope(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        store = _store(monkeypatch, td, evidence_render_chars=1200)
+        store.begin_turn(
+            turn_id=1, objective="inspect", rolling_summary="", recalled_context="", recent_messages=[],
+            policy_note="", tool_schemas=[_schema()],
+        )
+        store.record_tool_result(
+            tool_name="current_time", arguments={}, status="ok", reason="ok",
+            result_text='{"time":"10:00"}', fingerprint="time",
+        )
+        store.record_tool_result(
+            tool_name="hostname", arguments={}, status="ok", reason="ok",
+            result_text='{"host_hostname":"muninn"}', fingerprint="host",
+        )
+        store.record_tool_result(
+            tool_name="filesystem_snapshot", arguments={}, status="ok", reason="ok",
+            result_text='{"filesystems":[{"mountpoint":"/","used_percent":87.2}]}', fingerprint="fs",
+        )
+
+        digest = json.loads(store.render_evidence(
+            1200, tool_names={"filesystem_snapshot"}, fact_types=set(), include_recent=0,
+        ))
+        assert [row["tool"] for row in digest] == ["filesystem_snapshot"]
+        assert "current_time" not in json.dumps(digest)
+        assert "hostname" not in json.dumps(digest)

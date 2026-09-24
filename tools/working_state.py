@@ -874,18 +874,46 @@ class WorkingStateStore:
 
     def render_evidence(
         self, max_chars: int | None = None, *, state: dict[str, Any] | None = None,
+        tool_names: set[str] | None = None, fact_types: set[str] | None = None,
+        include_recent: int = 0,
     ) -> str:
         """Render bounded untrusted evidence excerpts for a user-role prompt block.
 
         Callers rebuilding one prompt may pass a snapshot so canonical state and
-        evidence are rendered from the same SQLite read.
+        evidence are rendered from the same SQLite read.  Structured-plan callers
+        should also pass the active step's tool/fact scope.  That keeps durable
+        evidence available without replaying unrelated observations from earlier
+        scheduler steps on every model request.  ``include_recent`` is a small
+        escape hatch for explicit cross-check/reuse steps that intentionally need
+        a little prior context.
         """
         state = _load(self._cid()) if state is None else state
         limit = max(400, int(max_chars or self.limits["evidence_render_chars"]))
+        wanted_tools = {str(name) for name in (tool_names or set()) if str(name)}
+        wanted_facts = {str(name) for name in (fact_types or set()) if str(name)}
+        observations = [
+            item for item in list(state.get("verified_observations") or [])[-self.limits["evidence_items"]:]
+            if isinstance(item, dict)
+        ]
+        if wanted_tools or wanted_facts:
+            selected: list[dict[str, Any]] = []
+            selected_ids: set[int] = set()
+            for item in observations:
+                item_facts = {str(value) for value in (item.get("fact_types") or []) if str(value)}
+                if str(item.get("tool") or "") in wanted_tools or bool(item_facts & wanted_facts):
+                    selected.append(item)
+                    selected_ids.add(id(item))
+            if include_recent > 0:
+                for item in observations[-max(0, int(include_recent)):]:
+                    if id(item) not in selected_ids:
+                        selected.append(item)
+                        selected_ids.add(id(item))
+            observations = selected
+        elif include_recent > 0:
+            observations = observations[-max(0, int(include_recent)):]
+
         rows: list[dict[str, Any]] = []
-        for item in list(state.get("verified_observations") or [])[-self.limits["evidence_items"]:]:
-            if not isinstance(item, dict):
-                continue
+        for item in observations:
             rows.append({
                 "tool": item.get("tool", ""),
                 "status": item.get("status", ""),

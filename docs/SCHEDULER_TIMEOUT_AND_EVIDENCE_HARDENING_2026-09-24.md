@@ -24,7 +24,7 @@ Read-only repeat/no-progress signatures are also reset per step. Mutating-call s
 
 On the first model transport/inference failure within a structured step, the retry is rebuilt from the compact durable state rather than replaying the expensive failed prompt.
 
-### Step-local timeout recovery
+### Step-local failure recovery
 
 After the configured bounded main-model retry count is exhausted:
 
@@ -32,7 +32,9 @@ After the configured bounded main-model retry count is exhausted:
 - the scheduler advances to the next independent requirement;
 - model no-progress counters are reset;
 - the plan continues;
-- only a failure during final synthesis or a non-structured turn uses the whole-turn blocked path.
+- only a failure during final synthesis or a genuinely fatal whole-runtime condition uses the whole-turn blocked path.
+
+The same scheduler-local handling now applies to repeated invalid/empty model output, policy-leak suppression exhaustion, grounding exhaustion, truncated-observation recovery exhaustion, and browser outcome-verification exhaustion. These errors can invalidate one independent requirement without silently cancelling the rest of a long plan.
 
 ### Stronger completion/evidence gate
 
@@ -65,7 +67,17 @@ For a structured numbered suite, global constraints are extracted only from the 
 
 ### Working-state prompt compaction
 
-In scheduler mode, `verified_observations` are no longer duplicated inside the canonical system-state JSON. Their excerpts are already delivered through the separately bounded evidence block. The durable state still retains all configured observations for audit/recovery.
+In scheduler mode, `verified_observations` are no longer duplicated inside the canonical system-state JSON. Their excerpts are delivered through the separately bounded evidence block. The durable state still retains all configured observations for audit/recovery.
+
+The evidence block is now **active-step scoped**: only observations matching the current requirement's tools/fact types are rendered. Explicit cross-check/reuse steps may receive at most two recent observations as context. Selection-only steps receive no observation digest. This prevents unrelated evidence from earlier requirements from rebuilding the same 4k-token prompt that caused the original timeout.
+
+### Evidence-backed scheduler results
+
+Operational scheduler PASS results no longer persist the model's prose as the durable factual result. Instead, the scheduler stores a compact representation of the explicit requirement ledger and its concrete evidence references/previews. Model-authored summaries remain appropriate for non-executing selection/explanation steps, but runtime facts cannot become authoritative merely because the model wrote a plausible table.
+
+This directly prevents the incident's fabricated kernel/uptime/tool-count values from contaminating final synthesis.
+
+CPU steps that explicitly request architecture now also require `environment_summary`, because `cpu_info` may expose CPU model/topology without a machine-architecture field.
 
 ## Regression coverage
 
@@ -77,6 +89,11 @@ Tests now cover:
 - scheduler canonical state not duplicating observation metadata;
 - broad host state rejecting filesystem/process/pressure-only observations;
 - runtime identity, tool registry, host snapshot, CPU, and memory requirement derivation;
-- existing prompt isolation and one-tool-call continuation behavior.
+- existing prompt isolation and one-tool-call continuation behavior;
+- active-step evidence filtering;
+- 20-step provider-prompt boundedness;
+- zero-tool protocol failure isolation;
+- evidence-backed operational scheduler results that reject fabricated model claims;
+- CPU architecture requiring environment evidence.
 
-Validation: `668 passed, 3 skipped` in the complete offline test suite. The skipped tests require live external runtime integration.
+Validation: `673 passed, 3 skipped` in the complete test suite. The skipped tests require live external runtime integration.

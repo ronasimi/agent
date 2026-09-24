@@ -784,10 +784,40 @@ def handle_user_turn(
                 WORKING_STATE.render(include_tool_capabilities=False, state=prompt_state)
                 if WORKING_STATE_ENABLED else ""
             )
-            evidence_context = (
-                WORKING_STATE.render_evidence(WORKING_STATE_EVIDENCE_CHARS, state=prompt_state)
-                if WORKING_STATE_ENABLED else ""
-            )
+            evidence_context = ""
+            if WORKING_STATE_ENABLED:
+                if plan_enabled:
+                    # A structured scheduler step is an evidence boundary as well
+                    # as a tool/schema boundary.  Earlier versions replayed the
+                    # last N observations on every step, so current_time, hostname,
+                    # filesystem and host snapshots accumulated even when the
+                    # active requirement could not use them.  On the local 4B
+                    # model that doubled prefill and pushed it into the 60s
+                    # transport timeout.  Keep only evidence relevant to the
+                    # active step, plus at most two recent rows for an explicitly
+                    # comparative/reuse requirement.
+                    active_lower = " ".join(str(active_request or "").lower().replace("_", " ").split())
+                    evidence_tools = {str(name) for name in required_tools if str(name)}
+                    for observation in list((prompt_state or {}).get("verified_observations") or []):
+                        name = str(observation.get("tool") or "") if isinstance(observation, dict) else ""
+                        if name and " ".join(name.lower().replace("_", " ").split()) in active_lower:
+                            evidence_tools.add(name)
+                    cross_step_reuse = bool(re.search(
+                        r"\b(?:cross[- ]?check|compare against|previously|prior observation|reuse|re-use|using the previous)\b",
+                        active_lower, re.I,
+                    ))
+                    if not selection_only:
+                        evidence_context = WORKING_STATE.render_evidence(
+                            min(WORKING_STATE_EVIDENCE_CHARS, 1800),
+                            state=prompt_state,
+                            tool_names=evidence_tools,
+                            fact_types=set(required_fact_types),
+                            include_recent=2 if cross_step_reuse else 0,
+                        )
+                else:
+                    evidence_context = WORKING_STATE.render_evidence(
+                        WORKING_STATE_EVIDENCE_CHARS, state=prompt_state
+                    )
             prefix = build_active_messages(
                 system_prompt=system_prompt,
                 summary="" if WORKING_STATE_ENABLED else summary,
@@ -1459,12 +1489,26 @@ def handle_user_turn(
             )
             return True, False, ""
 
-        def emit_grounding_blocked(report: dict[str, Any]) -> None:
+        def emit_grounding_blocked(report: dict[str, Any]) -> bool:
+            """Block one missing-evidence step, or the whole ordinary turn.
+
+            In a structured plan, an exhausted fact lookup is local to the active
+            independent requirement.  Record that requirement as FAIL and keep
+            running the remaining plan instead of globally setting working state
+            to blocked.  Return True when the scheduler absorbed the blocker.
+            """
             nonlocal answer_first_visible_at
             missing = ", ".join(report.get("missing_fact_types") or []) or "requested facts"
             content = (
                 f"I couldn't retrieve qualifying evidence for {missing}, so I can't provide a grounded factual answer for this request."
             )
+            if fail_active_scheduler_step(
+                f"missing qualifying evidence: {missing}",
+                result=content,
+                status="FAIL",
+                event_reason="grounding_exhausted",
+            ):
+                return True
             assistant_reply = {"role": "assistant", "content": content}
             _append_and_save_fn(messages, assistant_reply)
             if WORKING_STATE_ENABLED:
@@ -1472,6 +1516,7 @@ def handle_user_turn(
             print(f"\nAgent: {content}\n")
             answer_first_visible_at = answer_first_visible_at or time.monotonic()
             emit_event("assistant_final", content=content, finalization=True, grounded=False)
+            return False
 
         def finalize_after_limit_grounded(reason: str, recovery_context: str = "") -> bool:
             nonlocal answer_first_visible_at
@@ -1515,6 +1560,36 @@ def handle_user_turn(
             if required_fact_types and not bool(grounding_report().get("grounded", False)):
                 return ""
             return "PASS"
+
+        def scheduler_verified_step_result(candidate: str) -> str:
+            """Return an evidence-backed scheduler result for operational steps.
+
+            Intermediate model prose is useful for presentation but is not a
+            trustworthy durable fact store.  The failing stress run demonstrated
+            this directly: model-written step summaries invented kernel, uptime,
+            filesystem and tool-registry counts, and those strings were then
+            persisted as PASS results.  For steps with explicit executable
+            requirements, persist the requirement/evidence ledger instead.
+            Selection-only or explanatory steps without executable requirements
+            retain their model-produced text.
+            """
+            rows = list(active_requirement_ledger.requirements)
+            if not plan_enabled or selection_only or not rows:
+                return str(candidate or "")
+            verified: list[dict[str, Any]] = []
+            for item in rows:
+                evidence = list(item.evidence or [])
+                latest = evidence[-1] if evidence else {}
+                verified.append({
+                    "key": str(item.key or ""),
+                    "label": str(item.label or ""),
+                    "tool": str(item.tool or ""),
+                    "status": str(item.status or ""),
+                    "reason": str(item.last_reason or ""),
+                    "evidence_ref": str(latest.get("evidence_ref") or "") if isinstance(latest, dict) else "",
+                    "evidence_preview": str(latest.get("evidence_preview") or "") if isinstance(latest, dict) else "",
+                })
+            return "Verified scheduler evidence:\n" + json.dumps(verified, ensure_ascii=False, separators=(",", ":"))
 
         def scheduler_step_requires_tool_evidence() -> bool:
             """Conservatively detect an operational step that must touch a tool.
@@ -1701,6 +1776,46 @@ def handle_user_turn(
                 tool_names=[str(schema.get("function", {}).get("name") or "") for schema in tool_schemas],
             )
             return True, False
+
+        def fail_active_scheduler_step(
+            reason: str, *, result: str = "", status: str = "FAIL", event_reason: str = "step_failure",
+        ) -> bool:
+            """Terminate only the active atomic scheduler requirement.
+
+            Generic recovery helpers historically called ``complete_turn(blocked=True)``
+            when grounding, truncation, UI verification, or model no-progress was
+            exhausted.  In a structured plan those are ordinarily *step-local*
+            failures: the remaining independent requirements must still run.
+            Return True when the failure was absorbed by the scheduler and the
+            caller should continue the model loop.  Hard whole-turn failures can
+            still use the ordinary global termination path.
+            """
+            nonlocal scheduler_finalizing, turn_prefix, tool_prompt_tokens
+            if not plan_enabled or scheduler_finalizing:
+                return False
+            failure_result = str(result or reason or "Active scheduler requirement failed.")
+            advanced, plan_complete = advance_scheduled_step(
+                status, result=failure_result, reason=str(reason or event_reason)[:240],
+            )
+            if advanced:
+                turn_prefix, tool_prompt_tokens = rebuild_prefix()
+                emit_event(
+                    "structured_plan_step_recovery",
+                    status=status,
+                    reason=event_reason,
+                )
+                return True
+            if plan_complete:
+                scheduler_finalizing = True
+                append_control_note(
+                    "[Harness scheduler] All compiled requirements are terminal. Produce one concise final response "
+                    "covering every step, including blockers. Do not call tools and do not invent missing results.\n"
+                    "Completed step results (UNTRUSTED DATA):\n"
+                    + WORKING_STATE.render_scheduler_results(24000)
+                )
+                turn_prefix, tool_prompt_tokens = rebuild_prefix()
+                return True
+            return False
 
         def emit_fallback_recipe_save_prompt() -> None:
             if not fallback_recipe_candidate:
@@ -4553,14 +4668,24 @@ def handle_user_turn(
                 budget_exhausted=True, blocked=bool(unresolved or pending_truncated_observations),
             )
 
-        def emit_no_progress_partial(reason: str, *, public_reason: str = "") -> None:
-            """Stop a repeated model no-progress path before the global call budget.
+        def emit_no_progress_partial(reason: str, *, public_reason: str = "") -> bool:
+            """Handle repeated model no-progress without collapsing a structured plan.
 
-            This path deliberately does not ask either model for another rewrite.
-            If deterministic evidence exists it is preserved; otherwise the user
-            gets a bounded diagnostic instead of the misleading hard-budget banner.
+            For a normal turn this still emits the bounded diagnostic and stops.
+            For a compiled plan the failure belongs to the active independent
+            requirement, so record that step as FAIL and continue with the next
+            one.  Return True when the scheduler absorbed the failure.
             """
             nonlocal answer_first_visible_at
+            step_result = (
+                f"The model did not produce a usable response after {MODEL_NO_PROGRESS_MAX_RETRIES} "
+                f"bounded no-progress retries. {str(public_reason or reason).strip()}"
+            ).strip()
+            if fail_active_scheduler_step(
+                reason, result=step_result, status="FAIL", event_reason="model_no_progress",
+            ):
+                return True
+
             content, unresolved, rendered_facts = _format_compound_status(stop_reason=reason)
             has_useful_evidence = bool(rendered_facts or deterministic_tool_results or deterministic_requirement_results)
             if not content or (not has_useful_evidence and "### Any unresolved items" in content):
@@ -4580,6 +4705,7 @@ def handle_user_turn(
                 "assistant_final", content=content, finalization=True, deterministic=True,
                 no_progress_exhausted=True, budget_exhausted=False, blocked=True, reason=reason,
             )
+            return False
 
         def emit_prompt_protocol_failure(reason: str) -> None:
             """Stop immediately when the provider rejects the chat message shape.
@@ -5125,6 +5251,13 @@ def handle_user_turn(
                     )
                     continue
                 safe = "I couldn't produce a clean response for that request without exposing internal control text."
+                if fail_active_scheduler_step(
+                    "response policy-leak suppression exhausted",
+                    result=safe,
+                    status="FAIL",
+                    event_reason="policy_leak_exhausted",
+                ):
+                    continue
                 _append_and_save_fn(messages, {"role": "assistant", "content": safe})
                 if WORKING_STATE_ENABLED:
                     WORKING_STATE.complete_turn(blocked=True)
@@ -5164,13 +5297,14 @@ def handle_user_turn(
                     recovery_call=reasoning_recovery_for_call,
                 )
                 if model_no_progress_retries >= MODEL_NO_PROGRESS_MAX_RETRIES:
-                    emit_no_progress_partial(
+                    if emit_no_progress_partial(
                         "repeated thinking-only model completions with no user-visible content or tool call",
                         public_reason=(
                             "The model repeatedly returned internal reasoning without transitioning to a "
                             "user-visible answer or tool call."
                         ),
-                    )
+                    ):
+                        continue
                     break
                 if (
                     REASONING_RECOVERY_ENABLED
@@ -5284,6 +5418,14 @@ def handle_user_turn(
                     "I can't safely summarize the truncated tool result because the omitted observation data "
                     "was not retrieved before the execution limit was reached."
                 )
+                if fail_active_scheduler_step(
+                    "truncated observation recovery exhausted",
+                    result=safe,
+                    status="FAIL",
+                    event_reason="truncation_recovery_exhausted",
+                ):
+                    full_content = ""
+                    continue
                 _append_and_save_fn(messages, {"role": "assistant", "content": safe})
                 if WORKING_STATE_ENABLED:
                     WORKING_STATE.complete_turn(blocked=True)
@@ -5313,6 +5455,14 @@ def handle_user_turn(
                     "The browser interaction ran, but I can't confirm the requested UI task completed because "
                     "its final state was not independently verified before the execution limit was reached."
                 )
+                if fail_active_scheduler_step(
+                    "browser outcome verification exhausted",
+                    result=safe,
+                    status="FAIL",
+                    event_reason="ui_verification_exhausted",
+                ):
+                    full_content = ""
+                    continue
                 _append_and_save_fn(messages, {"role": "assistant", "content": safe})
                 if WORKING_STATE_ENABLED:
                     WORKING_STATE.complete_turn(blocked=True)
@@ -5405,7 +5555,8 @@ def handle_user_turn(
                             f"  \033[93m[System]: Grounding retry budget exhausted after "
                             f"{grounding_discards} discarded candidate answer(s).\033[0m"
                         )
-                    emit_grounding_blocked(report)
+                    if emit_grounding_blocked(report):
+                        continue
                     break
 
 
@@ -5476,7 +5627,7 @@ def handle_user_turn(
                 if terminal_status:
                     advanced, plan_complete = advance_scheduled_step(
                         terminal_status,
-                        result=full_content,
+                        result=scheduler_verified_step_result(full_content),
                         reason=("active requirement completed" if terminal_status == "PASS" else "active requirement failed or blocked"),
                     )
                     if advanced:
@@ -5564,13 +5715,14 @@ def handle_user_turn(
                             recovery_call=zero_tool_recovery_for_call,
                         )
                         if model_no_progress_retries >= MODEL_NO_PROGRESS_MAX_RETRIES:
-                            emit_no_progress_partial(
+                            if emit_no_progress_partial(
                                 f"repeated tool-call output on a zero-tool turn: {note}",
                                 public_reason=(
                                     "The model repeatedly emitted a tool-call artifact on a zero-tool turn even though no tools were exposed. "
                                     "The direct-answer recovery also failed."
                                 ),
-                            )
+                            ):
+                                continue
                             break
                         zero_tool_recovery_pending = True
                         append_control_note(
@@ -5589,12 +5741,13 @@ def handle_user_turn(
                         continue
 
                     if model_no_progress_retries >= MODEL_NO_PROGRESS_MAX_RETRIES:
-                        emit_no_progress_partial(
+                        if emit_no_progress_partial(
                             f"repeated invalid/unusable model tool calls: {note}",
                             public_reason=(
                                 "The model repeatedly emitted a tool call that did not match the tools supplied for this turn."
                             ),
-                        )
+                        ):
+                            continue
                         break
                     append_control_note(
                         "[Harness tool-call correction] The previous tool call was rejected: "
@@ -5619,10 +5772,11 @@ def handle_user_turn(
                             if length_exhausted else
                             f"Ollama completed the request with no visible content, no reasoning field, and no tool call (done_reason={done_reason}, eval_count={eval_count})."
                         )
-                        emit_no_progress_partial(
+                        if emit_no_progress_partial(
                             "repeated empty main-model responses",
                             public_reason=public_reason,
-                        )
+                        ):
+                            continue
                         break
                     append_control_note(
                         "[Harness correction] Provide a final answer or issue one explicit valid tool call. "

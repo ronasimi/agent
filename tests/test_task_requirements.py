@@ -452,3 +452,11 @@ def test_target_extraction_rejects_instruction_prose_and_strips_markdown():
     assert _extract_target("dns_diagnose", "Resolve example.com using the DNS primitive.") == "example.com"
     assert _extract_target("network_path", "Use the network path to example.com and report the hops.") == "example.com"
     assert _extract_target("browse_url", "Fetch `https://example.com` and report the title.") == "https://example.com"
+
+
+def test_cpu_architecture_request_requires_environment_evidence():
+    tools = set(TaskRequirementLedger.from_request(
+        "Use the dedicated CPU tool. Report model, architecture, logical CPU count, and frequency."
+    ).required_tools())
+    assert "cpu_info" in tools
+    assert "environment_summary" in tools

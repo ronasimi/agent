@@ -101,7 +101,7 @@ _RULES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     # explicit prevents a single hostname/time observation from closing a step
     # that also requested OS/kernel/architecture/uptime.
     ("runtime_environment", "environment_summary", "operating-system/kernel/architecture identity", (
-        r"\boperating system\b", r"\bkernel version\b",
+        r"\boperating system\b", r"\bkernel version\b", r"\barchitecture\b",
     )),
     ("uptime", "uptime", "host uptime", (r"\buptime\b",)),
     ("hostname", "hostname", "host hostname", (r"\bhostname\b",)),
