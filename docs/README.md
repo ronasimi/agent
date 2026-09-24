@@ -15,6 +15,7 @@ The repository root README is intentionally user-facing. This directory contains
 - [4B prompt optimization](PROMPT_OPTIMIZATION_2026-09-23.md)
 - [Prompt routing and fallthrough review](PROMPT_ROUTING_AND_FALLTHROUGH_REVIEW.md)
 - [Qwen3.8 single-runner hardening](QWEN38_SINGLE_RUNNER_HARDENING_2026-09-22.md)
+- [Model capability/conformance layer](MODEL_CAPABILITY_CONFORMANCE.md)
 - [Reasoning completion recovery](REASONING_COMPLETION_RECOVERY_2026-09-23.md)
 - [Stress-prompt parser fix](STRESS_PROMPT_PARSER_FIX_2026-09-22.md)
 - [TTFT refactor](TTFT_REFACTOR_2026-09-22.md)

@@ -520,7 +520,7 @@ def test_fast_recipe_parameter_classifier_returns_bounded_json_hints():
 
     class FakeClient:
         def chat(self, **kwargs):
-            assert kwargs["tools"] == []
+            assert "tools" not in kwargs
             assert kwargs["think"] is False
             return {"message": {"content": '{"parameters":[{"name":"hostname","value":"example.com"}]}'}}
 

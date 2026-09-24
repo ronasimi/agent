@@ -43,14 +43,23 @@ COMPACT_AT = int(AGENT_CFG.get("context", {}).get("compact_at_tokens", max(8000,
 SUMMARY_KEEP_MESSAGES = int(AGENT_CFG.get("context", {}).get("summary_keep_messages", 8))
 MAX_TOOL_OUTPUT = int(AGENT_CFG.get("context", {}).get("max_tool_output_chars", 5000))
 TOOL_LOOP_RESERVE = int(AGENT_CFG.get("context", {}).get("tool_loop_reserve_tokens", 4096))
-# Volatile harness blocks (working state, evidence digest) are placed after the
-# stable history so a changed block does not invalidate the server-side prompt
-# prefix cache for the system prompt and conversation history.
-VOLATILE_CONTEXT_LAST = bool(AGENT_CFG.get("context", {}).get("volatile_blocks_last", True))
+# Kept as a compatibility knob for older configs/callers.  Context assembly no
+# longer allows this setting to move harness system state after user history:
+# strict Qwen/Ollama templates require one leading system message.  Default to
+# false so any older call path that still consults the flag chooses safety over
+# the former volatile-prefix optimization.
+VOLATILE_CONTEXT_LAST = bool(AGENT_CFG.get("context", {}).get("volatile_blocks_last", False))
 WARMUP_CFG = AGENT_CFG.get("warmup", {})
 WARMUP_ENABLED = bool(WARMUP_CFG.get("enabled", True))
 WARMUP_FAST_MODEL = WARMUP_ENABLED and bool(WARMUP_CFG.get("fast_model_prewarm", True))
 WARMUP_PRIME_PREFIX = WARMUP_ENABLED and bool(WARMUP_CFG.get("prime_system_prefix", True))
+MODEL_CAPABILITY_CFG = dict(AGENT_CFG.get("model_capabilities") or {})
+MODEL_CAPABILITY_PROBE_ENABLED = bool(MODEL_CAPABILITY_CFG.get("enabled", True))
+MODEL_CAPABILITY_PROBE_MAIN = MODEL_CAPABILITY_PROBE_ENABLED and bool(MODEL_CAPABILITY_CFG.get("probe_main_on_startup", True))
+MODEL_CAPABILITY_PROBE_FAST = MODEL_CAPABILITY_PROBE_ENABLED and bool(MODEL_CAPABILITY_CFG.get("probe_fast_when_warmed", True))
+MODEL_CAPABILITY_CACHE_PATH = str(MODEL_CAPABILITY_CFG.get("cache_path") or "/app/memory/model_capabilities.json")
+MODEL_CAPABILITY_FORCE_PROBE = bool(MODEL_CAPABILITY_CFG.get("force_probe", False))
+MODEL_CAPABILITY_IDLE_DELAY_SECONDS = max(0.0, float(MODEL_CAPABILITY_CFG.get("idle_delay_seconds", 3.0)))
 MAX_ITERATIONS = int(AGENT_CFG.get("max_iterations", 12))
 MAX_ITERATIONS_HARD = max(MAX_ITERATIONS, int(AGENT_CFG.get("max_iterations_hard", 32)))
 

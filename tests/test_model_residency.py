@@ -60,6 +60,7 @@ def test_fast_prewarm_skips_matching_resident_runner(monkeypatch):
     monkeypatch.setattr(residency, "_fast_prewarm_thread", object())
     monkeypatch.setattr(residency, "model_maintenance_slot", lambda **kwargs: nullcontext())
     monkeypatch.setattr("al_agent.background.resources._interactive_busy", lambda: False)
+    monkeypatch.setattr("al_agent.state.MODEL_CAPABILITY_PROBE_FAST", False)
 
     residency._prewarm_fast_when_idle("test")
 

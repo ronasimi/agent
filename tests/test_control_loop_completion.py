@@ -75,4 +75,5 @@ def test_fallback_finalizer_preserves_latest_media(monkeypatch):
         {"role": "user", "content": "actual media", "images": ["base64-image"]},
     ]
     agent._finalize_after_limit(messages, tail)
+    assert [i for i, message in enumerate(captured["messages"]) if message.get("role") == "system"] == [0]
     assert any(message.get("images") == ["base64-image"] for message in captured["messages"])

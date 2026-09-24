@@ -12,6 +12,7 @@ from .config import (
     COMPACTION_TIMEOUT_SECONDS, MONITOR_CFG, OLLAMA_HOST,
 )
 from .resources import _ensure_interactive_idle, _notify
+from ..model_capabilities import capability_chat_overrides
 
 def run_context_compaction_job(job_id: str) -> str:
     """Summarize a fixed history prefix and advance its durable watermark."""
@@ -45,7 +46,7 @@ def run_context_compaction_job(job_id: str) -> str:
         prompt=prompt,
         options=COMPACTION_OPTIONS,
         keep_alive=COMPACTION_KEEP_ALIVE,
-        think=False,
+        **capability_chat_overrides(COMPACTION_MODEL, think=False),
     )
     summary = re.sub(r"<think>.*?</think>", "", response.get("response", ""), flags=re.DOTALL).strip()
     if not summary:

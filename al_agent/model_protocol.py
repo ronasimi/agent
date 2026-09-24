@@ -289,15 +289,89 @@ def tool_result_message(tool_name: str, content: str, *, tool_call_id: str = "")
     return message
 
 
+def canonicalize_system_messages(messages: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return a provider-safe chat sequence with at most one leading system message.
+
+    Some Ollama chat templates (including the Qwen3.8 template used by the
+    interactive 4B model) reject any ``system`` message that appears after the
+    beginning of the conversation.  Harness-owned context used to be emitted as
+    a second system message after the current user turn for KV-prefix reuse,
+    which made those requests fail before inference.
+
+    Preserve the semantic priority of every harness/system block by merging
+    their textual contents, in original order, into one leading system message.
+    Non-system messages retain their relative order exactly, so native
+    assistant/tool transactions are not disturbed.
+    """
+    normalized = [dict(message) for message in messages if isinstance(message, dict)]
+    system_contents: list[str] = []
+    non_system: list[dict[str, Any]] = []
+    for message in normalized:
+        if str(message.get("role") or "") == "system":
+            content = str(message.get("content") or "").strip()
+            if content:
+                system_contents.append(content)
+            continue
+        non_system.append(message)
+
+    if not system_contents:
+        return non_system
+    return [
+        {"role": "system", "content": "\n\n".join(system_contents)},
+        *non_system,
+    ]
+
+
+def validate_system_message_order(messages: Iterable[dict[str, Any]]) -> None:
+    """Raise when a chat sequence contains a non-leading/multiple system role."""
+    system_indexes = [
+        index
+        for index, message in enumerate(messages)
+        if isinstance(message, dict) and str(message.get("role") or "") == "system"
+    ]
+    if system_indexes and system_indexes != [0]:
+        raise ValueError(
+            "invalid chat protocol: exactly one system message is allowed and it must be first; "
+            f"system_indexes={system_indexes}"
+        )
+
+
 def ollama_wire_messages(messages: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return messages containing only fields accepted by Ollama's chat API.
 
     The harness keeps ``tool_call_id`` for local transaction pairing, but the
     native Ollama Python ``Message`` type currently identifies tool results via
-    ``tool_name`` and has no ``tool_call_id`` field.
+    ``tool_name`` and has no ``tool_call_id`` field.  System-role placement is
+    canonicalized here as a final provider-boundary invariant so future call
+    sites cannot accidentally reintroduce a late system message.
     """
     allowed = {"role", "content", "thinking", "images", "tool_name", "tool_calls"}
-    return [{key: value for key, value in message.items() if key in allowed} for message in messages]
+    wire = [
+        {key: value for key, value in message.items() if key in allowed}
+        for message in canonicalize_system_messages(messages)
+    ]
+    validate_system_message_order(wire)
+    return wire
+
+
+def is_prompt_protocol_error(exc: Exception) -> bool:
+    """Return whether an Ollama error is a deterministic prompt/template failure.
+
+    Ollama can surface chat-template/Jinja failures as HTTP 500 responses.  They
+    are not transient transport failures and replaying the identical request
+    only burns latency and the no-progress budget.
+    """
+    text = str(exc or "").lower()
+    markers = (
+        "system message must be at the beginning",
+        "system message must be first",
+        "chat template",
+        "jinja exception",
+        "invalid chat protocol",
+        "invalid role",
+        "roles must alternate",
+    )
+    return any(marker in text for marker in markers)
 
 
 def is_retryable_transport_error(exc: Exception) -> bool:
@@ -308,6 +382,8 @@ def is_retryable_transport_error(exc: Exception) -> bool:
     replaying deterministic 4xx request/schema errors; retry timeouts, rate
     limits, and server-side failures.
     """
+    if is_prompt_protocol_error(exc):
+        return False
     if isinstance(exc, (ConnectionError, TimeoutError)):
         return True
     status = getattr(exc, "status_code", None)
@@ -388,7 +464,6 @@ def warm_model(
                 messages=[{"role": "system", "content": str(system_prompt)}],
                 options=prime_options,
                 keep_alive=keep_alive,
-                think=False,
                 stream=False,
             )
         return True

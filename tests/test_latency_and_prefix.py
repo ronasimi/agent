@@ -21,7 +21,7 @@ def _render(messages):
     return "\n".join(f"{m.get('role')}:{m.get('content', '')}" for m in messages)
 
 
-def test_volatile_blocks_are_placed_after_stable_history_by_default():
+def test_working_state_is_merged_into_single_leading_system_message():
     result = build_active_messages(
         system_prompt="stable-system",
         summary="",
@@ -33,15 +33,18 @@ def test_volatile_blocks_are_placed_after_stable_history_by_default():
     )
     roles = [m["role"] for m in result]
     assert roles[0] == "system"
+    assert [i for i, role in enumerate(roles) if role == "system"] == [0]
     contents = [str(m.get("content") or "") for m in result]
     history_index = next(i for i, c in enumerate(contents) if "CURRENT REQUEST" == c)
     state_index = next(i for i, c in enumerate(contents) if "Harness working state" in c)
     evidence_index = next(i for i, c in enumerate(contents) if "evidence digest" in c)
-    assert history_index < state_index < evidence_index
+    assert state_index == 0
+    assert history_index < evidence_index
+    assert "stable-system" in result[0]["content"]
 
 
-def test_changed_working_state_preserves_the_system_and_history_prefix():
-    """The reusable prefix is what Ollama does not have to prefill again."""
+def test_changed_working_state_preserves_non_system_history_order():
+    """Dynamic state may invalidate KV prefix but must never alter chat chronology."""
     first = build_active_messages(
         system_prompt="stable-system",
         summary="",
@@ -58,16 +61,13 @@ def test_changed_working_state_preserves_the_system_and_history_prefix():
         reserve_tokens=500,
         working_state='{"step":2,"evidence":["new observation"]}',
     )
-    shared = 0
-    for left, right in zip(_render(first), _render(second)):
-        if left != right:
-            break
-        shared += 1
-    assert shared >= len("system:stable-system")
-    assert "STABLE EARLIER ANSWER" in _render(first)[:shared]
+    assert first[0]["role"] == second[0]["role"] == "system"
+    assert first[0]["content"] != second[0]["content"]
+    assert first[1:] == second[1:]
+    assert all(message["role"] != "system" for message in first[1:])
 
 
-def test_legacy_ordering_remains_available():
+def test_volatile_last_flag_cannot_create_a_late_system_message():
     result = build_active_messages(
         system_prompt="stable-system",
         summary="",
@@ -77,7 +77,8 @@ def test_legacy_ordering_remains_available():
         working_state='{"objective":"CURRENT REQUEST"}',
         volatile_last=False,
     )
-    assert "Harness working state" in result[1]["content"]
+    assert [i for i, message in enumerate(result) if message["role"] == "system"] == [0]
+    assert "Harness working state" in result[0]["content"]
 
 
 def test_volatile_blocks_are_counted_against_the_token_budget():
@@ -262,6 +263,7 @@ def test_finalization_strips_local_only_fields_from_the_wire():
 
     assert captured["stream"] is True
     assert all("tool_call_id" not in message for message in captured["messages"])
+    assert [i for i, message in enumerate(captured["messages"]) if message.get("role") == "system"] == [0]
     assert messages[-1]["content"] == "final"
 
 
@@ -272,7 +274,7 @@ def test_config_exposes_the_latency_knobs():
         config = yaml.safe_load(handle)
     agent_cfg = config["agent"]
     assert agent_cfg["warmup"]["enabled"] is True
-    assert agent_cfg["context"]["volatile_blocks_last"] is True
+    assert agent_cfg["context"]["volatile_blocks_last"] is False
     assert agent_cfg["working_state"]["minimize_schema_churn"] is True
     assert int(agent_cfg["grounding"]["max_candidate_discards"]) >= 1
 

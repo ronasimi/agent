@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .model_protocol import ollama_wire_messages
+from .model_capabilities import capability_chat_overrides
 
 
 @dataclass(frozen=True)
@@ -69,11 +70,10 @@ def _analyze_image_message(
             "content": prompt,
             "images": list(message.get("images") or []),
         }]),
-        tools=[],
         options=dict(vision_options or {}),
-        think=False,
         stream=False,
         keep_alive=keep_alive,
+        **capability_chat_overrides(vision_model, think=False, tools=[]),
     )
     content = _message_content(response)
     if not content:

@@ -10,6 +10,7 @@ from tools.reflection import store_reflection_notes
 from tools.runtime import complete_job, get_job
 from .config import FAST_MODEL, FAST_MODEL_KEEP_ALIVE, FAST_OPTIONS, OLLAMA_HOST
 from .resources import _ensure_interactive_idle
+from ..model_capabilities import capability_chat_overrides
 
 
 def _parse_json_object(text: str) -> dict:
@@ -55,7 +56,7 @@ def run_rethink_job(job_id: str) -> str:
         prompt=prompt,
         options=options,
         keep_alive=FAST_MODEL_KEEP_ALIVE,
-        think=False,
+        **capability_chat_overrides(FAST_MODEL, think=False),
     )
     parsed = _parse_json_object(response.get("response", "") if isinstance(response, dict) else getattr(response, "response", ""))
     stored = store_reflection_notes(conversation_id, parsed.get("notes") if isinstance(parsed.get("notes"), list) else [])

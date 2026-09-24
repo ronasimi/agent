@@ -71,18 +71,38 @@ SOURCE_ROOT = _DEFAULT_SOURCE_ROOT
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    """Load and prefix-prime the main model so the first browser turn is fast.
+    """Warm/probe configured models without blocking frontend startup.
 
-    Best effort and non-blocking: the UI serves normally when the Ollama server
-    is unreachable, and the first real turn simply pays the load itself.
+    Conformance results are cached by model identity. A cold/new model is
+    probed only after the normal main-model warm-up completes so capability
+    checks do not race the fast-model prewarm or contend with a foreground turn.
     """
+    from al_agent.model_capabilities import schedule_model_capability_probe
+    from al_agent.model_residency import schedule_fast_model_prewarm
+
+    def _schedule_fast() -> None:
+        if agent_runtime.WARMUP_FAST_MODEL:
+            schedule_fast_model_prewarm("startup")
+
+    def _probe_main_then_fast() -> None:
+        if agent_runtime.MODEL_CAPABILITY_PROBE_MAIN:
+            from al_agent.background.resources import _interactive_busy
+            schedule_model_capability_probe(
+                agent_runtime.OLLAMA,
+                agent_runtime.MODEL,
+                options=agent_runtime.MAIN_OPTIONS,
+                keep_alive=-1,
+                cache_path=agent_runtime.MODEL_CAPABILITY_CACHE_PATH,
+                force=agent_runtime.MODEL_CAPABILITY_FORCE_PROBE,
+                on_complete=lambda _profile: _schedule_fast(),
+                busy_check=_interactive_busy,
+                idle_delay_seconds=agent_runtime.MODEL_CAPABILITY_IDLE_DELAY_SECONDS,
+            )
+        else:
+            _schedule_fast()
+
     if agent_runtime.WARMUP_ENABLED:
         from al_agent.model_protocol import warm_model_async
-        from al_agent.model_residency import schedule_fast_model_prewarm
-
-        def _main_warm_complete() -> None:
-            if agent_runtime.WARMUP_FAST_MODEL:
-                schedule_fast_model_prewarm("startup")
 
         warm_model_async(
             agent_runtime.OLLAMA,
@@ -92,9 +112,14 @@ async def _lifespan(_app: FastAPI):
             system_prompt=(
                 agent_runtime.build_system_prompt() if agent_runtime.WARMUP_PRIME_PREFIX else ""
             ),
-            on_success=_main_warm_complete,
+            on_success=_probe_main_then_fast,
             on_error=lambda exc: print(f"[webui]: main-model warm-up skipped: {exc}"),
         )
+    else:
+        # Capability probing is independently configurable. It is still
+        # asynchronous; the UI is already serving while a cold/new model is
+        # characterized. Cached profiles usually complete after metadata only.
+        _probe_main_then_fast()
     yield
 
 

@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 from ollama import Client
+from al_agent.model_capabilities import capability_chat_overrides
 
 from .config import load_config
 
@@ -167,7 +168,7 @@ def create_or_update_tool(tool_name: str, specification: str) -> str:
                 prompt=f"{system_prompt}\n\n{prompt}",
                 options=options,
                 keep_alive=FAST_KEEP_ALIVE,
-                think=False,
+                **capability_chat_overrides(FAST_MODEL, think=False),
             )
             raw_text = response.get("response", "")
 

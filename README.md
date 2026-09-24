@@ -13,6 +13,7 @@ Al Agent is a local-first AI assistant for Ollama. It combines a browser chat in
 - Persistent conversations and timestamp-aware historical recall
 - Four-tier context and memory system optimized for small local models
 - Tool calling, reusable recipes, grounding, and bounded recovery
+- Cached startup model-conformance detection for tool calling, thinking, and streaming
 - Browser/UI automation with state tracking and verification
 - Background jobs, reminders, research, and report generation
 - Workspace file browser with uploads, previews, downloads, and inline media
@@ -166,6 +167,7 @@ Useful starting points:
 - [Architecture](docs/ARCHITECTURE.md)
 - [Current state](docs/CURRENT_STATE.md)
 - [Context and memory tiers](docs/CONTEXT_TIERS_2026-09-23.md)
+- [Model capability/conformance layer](docs/MODEL_CAPABILITY_CONFORMANCE.md)
 - [Bug reports](docs/BUG_REPORTS.md)
 
 ## Security

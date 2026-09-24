@@ -15,6 +15,7 @@ from tools.research_factuality import (
 from tools.runtime import complete_job, get_job, heartbeat_job, save_checkpoint
 from .config import OLLAMA_HOST, POLL_SECONDS, REPORT_MODEL, REPORT_MODEL_KEEP_ALIVE, REPORT_OPTIONS, RESEARCH_CFG
 from ..model_residency import background_inference_slot, enter_report_model_stage, exit_report_model_stage
+from ..model_capabilities import capability_chat_overrides
 from .resources import InferenceDeferred, _ensure_interactive_idle, _interactive_busy, _notify, resources_available
 
 def _safe_filename(topic: str) -> str:
@@ -40,7 +41,7 @@ def _report_text(system: str, user: str, *, num_predict: int | None = None) -> s
             options=options,
             keep_alive=REPORT_MODEL_KEEP_ALIVE,
             stream=True,
-            think=False,
+            **capability_chat_overrides(REPORT_MODEL, think=False),
         )
         output = []
         for chunk in stream:
@@ -69,7 +70,7 @@ def _report_json(system: str, user: str, schema: dict, *, num_predict: int | Non
             options=options,
             keep_alive=REPORT_MODEL_KEEP_ALIVE,
             stream=False,
-            think=False,
+            **capability_chat_overrides(REPORT_MODEL, think=False),
         )
     msg = response.get("message", {}) if isinstance(response, dict) else getattr(response, "message", {})
     content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")

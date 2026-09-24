@@ -64,7 +64,14 @@ from .events import (
     release_inference_lock as _release_inference_lock, release_turn_lock as _release_turn_lock,
 )
 from .prompts import IMAGE_REGEX, append_and_save, build_memory_context, build_system_prompt, build_turn_capability_context, encode_image
-from .model_protocol import consume_chat_stream, ollama_wire_messages, stream_with_preflight_retry, tool_result_message
+from .model_protocol import (
+    consume_chat_stream,
+    is_prompt_protocol_error,
+    ollama_wire_messages,
+    stream_with_preflight_retry,
+    tool_result_message,
+)
+from .model_capabilities import ModelCapabilityError, capability_chat_overrides, get_active_model_capabilities
 from .model_residency import evict_report_model_for_interactive
 from .model_traces import record_model_trace
 from .vision import has_images, route_multimodal_messages
@@ -3963,6 +3970,34 @@ def handle_user_turn(
                 no_progress_exhausted=True, budget_exhausted=False, blocked=True, reason=reason,
             )
 
+        def emit_prompt_protocol_failure(reason: str) -> None:
+            """Stop immediately when the provider rejects the chat message shape.
+
+            Template/role errors happen before inference. Replaying the same
+            malformed request as ordinary model no-progress cannot help and used
+            to hide the real defect behind the generic two-retry banner.
+            """
+            nonlocal answer_first_visible_at
+            content = (
+                "The model runtime rejected the assembled chat-message protocol before inference. "
+                "The harness stopped without spending the ordinary no-progress retry budget. "
+                "Generate a bug report and inspect the recorded model-call message roles."
+            )
+            _append_and_save_fn(messages, {"role": "assistant", "content": content})
+            if WORKING_STATE_ENABLED:
+                WORKING_STATE.complete_turn(blocked=True)
+            answer_first_visible_at = answer_first_visible_at or time.monotonic()
+            print(f"\nAgent: {content}\n")
+            emit_event(
+                "assistant_final",
+                content=content,
+                finalization=True,
+                deterministic=True,
+                prompt_protocol_error=True,
+                blocked=True,
+                reason=reason,
+            )
+
         # No deterministic fast path applied, so the main model is now needed.
         # Build the prompt once, after pre-grounding/schema pruning, then enter
         # the global model queue. This removes redundant prefix builds and keeps
@@ -4208,6 +4243,10 @@ def handle_user_turn(
                         effective_thinking = False
                     wire_messages = ollama_wire_messages(vision_route.messages)
                     wire_tools = wire_tool_schemas()
+                    capability_profile = get_active_model_capabilities(vision_route.model)
+                    provider_optional = capability_chat_overrides(
+                        vision_route.model, think=effective_thinking, tools=wire_tools,
+                    )
                     current_model_request = {
                         "call_index": model_calls,
                         "messages": wire_messages,
@@ -4219,16 +4258,24 @@ def handle_user_turn(
                         "thinking": effective_thinking,
                         "reasoning_recovery": reasoning_recovery_for_call,
                         "zero_tool_recovery": zero_tool_recovery_for_call,
+                        "capability_identity": (capability_profile.identity if capability_profile else ""),
                     }
-                    return _ollama_client.chat(
+                    use_stream = not (capability_profile is not None and capability_profile.content_streaming is False)
+                    response = _ollama_client.chat(
                         model=vision_route.model,
                         messages=wire_messages,
-                        tools=wire_tools,
                         options=call_options,
-                        think=effective_thinking,
-                        stream=True,
+                        stream=use_stream,
                         keep_alive=vision_route.keep_alive,
+                        **provider_optional,
                     )
+                    # Some OpenAI/Ollama-compatible backends ignore stream=True
+                    # and return one completed response object. Normalize that
+                    # shape so the control loop remains functional; the profile
+                    # simply records that live token/reasoning streaming is absent.
+                    if isinstance(response, dict) or hasattr(response, "message"):
+                        return iter([response])
+                    return response
 
                 def _on_transport_retry(attempt: int, exc: Exception, delay: float) -> None:
                     emit_event(
@@ -4315,6 +4362,34 @@ def handle_user_turn(
                         error=str(exc),
                     )
                 print(f"\n\033[91m[!] Ollama error: {exc}\033[0m")
+                if isinstance(exc, ModelCapabilityError):
+                    emit_event(
+                        "model_capability_error",
+                        error=str(exc)[:1200],
+                        model=str((current_model_request or {}).get("model") or MODEL),
+                    )
+                    safe = (
+                        "The configured model does not support the tool-calling capability required for this task. "
+                        "A deterministic recipe may still work, but model-directed tool use is unavailable for this model."
+                    )
+                    _append_and_save_fn(messages, {"role": "assistant", "content": safe})
+                    if WORKING_STATE_ENABLED:
+                        WORKING_STATE.complete_turn(blocked=True)
+                    emit_event("assistant_final", content=safe, finalization=True, blocked=True)
+                    break
+                if is_prompt_protocol_error(exc):
+                    # ``ollama_wire_messages`` canonicalizes late/multiple system
+                    # messages before every request. If a template still rejects
+                    # the provider-bound sequence, the error is deterministic;
+                    # do not replay it as a transient HTTP 500 or semantic
+                    # no-progress completion.
+                    emit_event(
+                        "prompt_protocol_error",
+                        error=str(exc)[:1200],
+                        model=str((current_model_request or {}).get("model") or MODEL),
+                    )
+                    emit_prompt_protocol_failure(f"prompt protocol rejected by Ollama: {exc}")
+                    break
                 tracker.record_model_failure("main_inference", str(exc))
                 signal = tracker.consume_signal()
                 if signal:

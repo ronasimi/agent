@@ -145,6 +145,23 @@ def _prewarm_fast_when_idle(reason: str) -> None:
                     client = _client()
                     if not _fast_runner_resident(client):
                         _warm(client, FAST_MODEL, FAST_OPTIONS, FAST_MODEL_KEEP_ALIVE)
+                    # Probe a distinct fast model only while it is already
+                    # resident and the system is idle. This adds no foreground
+                    # queueing and avoids an extra model swap on constrained GPUs.
+                    try:
+                        from . import state as _state
+                        if _state.MODEL_CAPABILITY_PROBE_FAST and FAST_MODEL != MODEL:
+                            from .model_capabilities import probe_model_capabilities
+                            probe_model_capabilities(
+                                client, FAST_MODEL, options=dict(FAST_OPTIONS or {}),
+                                keep_alive=FAST_MODEL_KEEP_ALIVE,
+                                cache_path=_state.MODEL_CAPABILITY_CACHE_PATH,
+                                force=_state.MODEL_CAPABILITY_FORCE_PROBE,
+                            )
+                    except Exception:
+                        # Best effort only; validator behavior remains unchanged
+                        # when probing is unavailable or inconclusive.
+                        pass
                     break
             except BlockingIOError:
                 time.sleep(0.1)

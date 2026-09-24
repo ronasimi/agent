@@ -59,7 +59,7 @@ def test_distinct_vision_model_becomes_no_tools_sidecar_and_main_gets_text_only(
     assert len(client.calls) == 1
     call = client.calls[0]
     assert call["model"] == "vision:latest"
-    assert call["tools"] == []
+    assert "tools" not in call
     assert call["think"] is False
     assert call["stream"] is False
     assert call["messages"][0]["images"] == ["abc123"]

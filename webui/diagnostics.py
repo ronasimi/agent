@@ -167,6 +167,15 @@ def _recent_model_traces(conversation_id: str, *, limit: int = 12, scan_lines: i
 
 
 def _runtime_snapshot(conversation_id: str) -> dict[str, Any]:
+    try:
+        from al_agent.model_capabilities import get_active_model_capabilities
+        capability_profiles = {}
+        for role, model in (("main", agent_runtime.MODEL), ("fast", agent_runtime.FAST_MODEL), ("vision", agent_runtime.VISION_MODEL)):
+            profile = get_active_model_capabilities(model)
+            if profile is not None:
+                capability_profiles[role] = profile.to_dict()
+    except Exception:
+        capability_profiles = {}
     return {
         "conversation_id": conversation_id,
         "models": {
@@ -199,6 +208,7 @@ def _runtime_snapshot(conversation_id: str) -> dict[str, Any]:
             "model_traces": agent_runtime.MODEL_TRACE_ENABLED,
             "shared_model_context": agent_runtime.SHARED_CTX_ENABLED,
         },
+        "model_capabilities": capability_profiles,
         "ollama_host": str(agent_runtime.OLLAMA_HOST),
         "model_trace_path": str(agent_runtime.MODEL_TRACE_PATH),
     }

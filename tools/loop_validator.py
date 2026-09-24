@@ -1,6 +1,7 @@
 """Fast-model validation and deterministic stall detection for tool loops."""
 from __future__ import annotations
 
+from al_agent.model_capabilities import capability_chat_overrides
 import hashlib
 import json
 import re
@@ -613,7 +614,7 @@ def suggest_recovery_recipe(
             format=_recipe_recovery_schema(allowed_names, max_stages),
             options=options,
             keep_alive=keep_alive,
-            think=False,
+            **capability_chat_overrides(model, think=False),
         )
         raw = response.get("response", "{}") if isinstance(response, dict) else getattr(response, "response", "{}")
         payload = _parse_structured_payload(raw)
@@ -729,7 +730,7 @@ def validate_tool_loop(
             format=_schema(tool_names),
             options=options,
             keep_alive=keep_alive,
-            think=False,
+            **capability_chat_overrides(model, think=False),
         )
         raw = response.get("response", "{}") if isinstance(response, dict) else getattr(response, "response", "{}")
         payload = _parse_structured_payload(raw)
@@ -793,7 +794,7 @@ def validate_stalled_step(
             format=_stall_schema(tool_names),
             options=options,
             keep_alive=keep_alive,
-            think=False,
+            **capability_chat_overrides(model, think=False),
         )
         raw = response.get("response", "{}") if isinstance(response, dict) else getattr(response, "response", "{}")
         payload = _parse_structured_payload(raw)

@@ -294,7 +294,7 @@ def test_zero_tool_invalid_call_gets_direct_no_think_recovery(monkeypatch):
     te.handle_user_turn(messages, "Hello?", True, runtime_overrides=_zero_tool_runtime(client))
 
     assert len(client.calls) == 2
-    assert client.calls[0]["tools"] == []
+    assert "tools" not in client.calls[0]
     assert client.calls[0]["think"] is True
     assert client.calls[1]["think"] is False
     assert any(
@@ -362,3 +362,69 @@ def test_repeated_zero_tool_protocol_violation_reports_specific_failure(monkeypa
     assert client.calls[1]["think"] is False
     assert "zero-tool turn" in messages[-1]["content"]
     assert "direct-answer recovery also failed" in messages[-1]["content"]
+
+
+def test_prompt_protocol_error_stops_without_transport_or_no_progress_retries(monkeypatch):
+    from al_agent import turn_engine as te
+
+    class ResponseError(Exception):
+        status_code = 500
+
+    class ProtocolRejectingClient:
+        def __init__(self):
+            self.calls = 0
+
+        def chat(self, **kwargs):
+            self.calls += 1
+            raise ResponseError("Jinja Exception: System message must be at the beginning.")
+
+    client = ProtocolRejectingClient()
+    _configure_zero_tool_turn_test(monkeypatch, te)
+    messages = [{"role": "system", "content": "system"}]
+    te.handle_user_turn(messages, "Hello?", False, runtime_overrides=_zero_tool_runtime(client))
+
+    assert client.calls == 1
+    assert "rejected the assembled chat-message protocol before inference" in messages[-1]["content"]
+    assert "2 bounded no-progress retries" not in messages[-1]["content"]
+
+
+def test_profile_can_disable_optional_think_and_live_stream_without_breaking_chat(monkeypatch):
+    from al_agent import model_capabilities as caps
+    from al_agent import turn_engine as te
+
+    class CompleteResponseClient:
+        def __init__(self):
+            self.calls = []
+
+        def chat(self, **kwargs):
+            self.calls.append(kwargs)
+            return {
+                "message": {"role": "assistant", "content": "Hello from a non-streaming model."},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 1,
+                "eval_count": 8,
+            }
+
+    _configure_zero_tool_turn_test(monkeypatch, te)
+    profile = caps.ModelCapabilityProfile(
+        model=te.MODEL,
+        identity=f"v1:{te.MODEL}:test",
+        plain_chat=True,
+        content_streaming=False,
+        think_parameter=False,
+        reasoning_streaming=False,
+        tools_parameter=True,
+        tool_call_mode="accepted_unverified",
+    )
+    monkeypatch.setattr(caps, "_ACTIVE", {te.MODEL: profile})
+
+    client = CompleteResponseClient()
+    messages = [{"role": "system", "content": "system"}]
+    te.handle_user_turn(messages, "Hello", False, runtime_overrides=_zero_tool_runtime(client))
+
+    assert len(client.calls) == 1
+    assert client.calls[0]["stream"] is False
+    assert "think" not in client.calls[0]
+    assert "tools" not in client.calls[0]
+    assert messages[-1]["content"] == "Hello from a non-streaming model."

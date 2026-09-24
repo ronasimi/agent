@@ -73,3 +73,25 @@ def test_live_ollama_reasoning_recovery_mode_reaches_visible_content():
         "Configured reasoning-recovery mode still returned no visible content "
         f"(thinking_chars={len(thinking)}, done_reason={_field(response, 'done_reason', 'unknown')!r})."
     )
+
+
+def test_live_startup_capability_probe_produces_usable_profile(tmp_path):
+    """Exercise the same safe profile used by startup model adaptation."""
+    from ollama import Client
+    from tools.config import load_config
+    from al_agent.model_capabilities import probe_model_capabilities
+
+    cfg = load_config()["agent"]
+    client = Client(host=cfg.get("host", "http://127.0.0.1:11434"))
+    profile = probe_model_capabilities(
+        client,
+        cfg["model"],
+        options=cfg.get("main_options") or {},
+        keep_alive=-1,
+        cache_path=str(tmp_path / "model_capabilities.json"),
+        force=True,
+    )
+    assert profile.plain_chat is True
+    assert profile.think_parameter in {True, False}
+    assert profile.tools_parameter in {True, False}
+    assert profile.tool_call_mode in {"native", "qwen_xml", "accepted_unverified", "unsupported", "unknown"}

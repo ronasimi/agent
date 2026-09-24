@@ -16,6 +16,7 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 from ddgs import DDGS
 from ollama import Client
+from al_agent.model_capabilities import capability_chat_overrides
 
 from .config import load_config
 from .netutil import fetch_bytes, fetch_text
@@ -182,7 +183,7 @@ def plan_research_queries(
             format=_PLAN_SCHEMA,
             options=FAST_OPTIONS,
             keep_alive=FAST_KEEP_ALIVE,
-            think=False,
+            **capability_chat_overrides(FAST_MODEL, think=False),
         )
         payload = _clean_json(response.get("response", "{}"))
         queries = payload.get("queries", []) if isinstance(payload, dict) else []
@@ -290,7 +291,7 @@ def _distill(
             format=_DISTILL_SCHEMA,
             options=FAST_OPTIONS,
             keep_alive=FAST_KEEP_ALIVE,
-            think=False,
+            **capability_chat_overrides(FAST_MODEL, think=False),
         )
         parsed = _clean_json(response.get("response", "{}"))
         if isinstance(parsed, dict) and parsed.get("findings"):
@@ -509,7 +510,7 @@ def build_report_plan(
             format=_REPORT_PLAN_SCHEMA,
             options=FAST_OPTIONS,
             keep_alive=FAST_KEEP_ALIVE,
-            think=False,
+            **capability_chat_overrides(FAST_MODEL, think=False),
         )
         parsed = _clean_json(response.get("response", "{}"))
         raw_sections = parsed.get("sections", []) if isinstance(parsed, dict) else []
@@ -672,7 +673,7 @@ def evaluate_research(
             format=_EVAL_SCHEMA,
             options=FAST_OPTIONS,
             keep_alive=FAST_KEEP_ALIVE,
-            think=False,
+            **capability_chat_overrides(FAST_MODEL, think=False),
         )
         result = _clean_json(response.get("response", "{}"))
         if result.get("status") in {"complete", "gap", "contradiction", "insufficient"}:

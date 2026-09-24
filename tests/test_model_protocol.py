@@ -1,5 +1,7 @@
 from al_agent.model_protocol import (
+    canonicalize_system_messages,
     consume_chat_stream,
+    is_prompt_protocol_error,
     is_retryable_transport_error,
     merge_stream_tool_calls,
     ollama_wire_messages,
@@ -42,6 +44,31 @@ def test_tool_result_uses_native_ollama_tool_name():
 def test_legacy_tool_name_is_upgraded_for_model_context():
     wire = model_message({"role": "tool", "name": "host_snapshot", "content": "ok"})
     assert wire == {"role": "tool", "tool_name": "host_snapshot", "content": "ok"}
+
+
+def test_wire_messages_merge_all_system_blocks_into_one_leading_message():
+    wire = ollama_wire_messages([
+        {"role": "system", "content": "base policy"},
+        {"role": "user", "content": "hello"},
+        {"role": "system", "content": "working state"},
+        {"role": "user", "content": "evidence"},
+    ])
+    assert [index for index, message in enumerate(wire) if message["role"] == "system"] == [0]
+    assert "base policy" in wire[0]["content"]
+    assert "working state" in wire[0]["content"]
+    assert [message["content"] for message in wire[1:]] == ["hello", "evidence"]
+
+
+def test_system_canonicalization_preserves_non_system_transaction_order():
+    messages = canonicalize_system_messages([
+        {"role": "system", "content": "base"},
+        {"role": "assistant", "content": "", "tool_calls": [_call("demo", 1, "c1")]},
+        {"role": "system", "content": "state"},
+        {"role": "tool", "tool_name": "demo", "content": "ok", "tool_call_id": "c1"},
+    ])
+    assert [message["role"] for message in messages] == ["system", "assistant", "tool"]
+    assert messages[1]["tool_calls"][0]["id"] == "c1"
+    assert messages[2]["tool_call_id"] == "c1"
 
 
 def test_transport_retry_only_happens_before_first_chunk():
@@ -108,6 +135,29 @@ def test_retryable_transport_error_classifies_server_and_rate_limit_errors():
     assert is_retryable_transport_error(ResponseError(429))
     assert is_retryable_transport_error(ResponseError(503))
     assert not is_retryable_transport_error(ResponseError(404))
+
+
+def test_prompt_template_errors_are_deterministic_even_when_server_returns_500():
+    class ResponseError(Exception):
+        status_code = 500
+
+    exc = ResponseError("Jinja Exception: System message must be at the beginning.")
+    assert is_prompt_protocol_error(exc)
+    assert not is_retryable_transport_error(exc)
+
+    attempts = {"count": 0}
+
+    def factory():
+        attempts["count"] += 1
+        raise exc
+
+    try:
+        list(stream_with_preflight_retry(factory, retries=3, base_delay=0, sleep_fn=lambda _: None))
+    except ResponseError:
+        pass
+    else:
+        raise AssertionError("expected deterministic prompt protocol error to propagate")
+    assert attempts["count"] == 1
 
 
 def test_textual_readonly_tool_call_can_be_repaired(monkeypatch):

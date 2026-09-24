@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from ollama import Client
+from al_agent.model_capabilities import capability_chat_overrides
 
 from .config import load_config
 from .repo_map import build_repo_map, is_allowed_relative, iter_source_files, source_root
@@ -302,7 +303,7 @@ def _model_generate(
         format=schema,
         options=options,
         keep_alive=0,
-        think=False,
+        **capability_chat_overrides(model, think=False),
     )
     return _parse_json_response(response.get("response", "{}"))
 

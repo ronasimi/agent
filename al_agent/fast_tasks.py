@@ -10,6 +10,8 @@ import json
 import re
 from typing import Any
 
+from .model_capabilities import capability_chat_overrides
+
 
 def _message_content(response: Any) -> str:
     if isinstance(response, dict):
@@ -80,9 +82,10 @@ def infer_recipe_parameter_hints(
         response = client.chat(
             model=model,
             messages=[{"role": "user", "content": prompt}],
-            tools=[], think=False, stream=False,
+            stream=False,
             options=fast_options,
             keep_alive=keep_alive,
+            **capability_chat_overrides(model, think=False, tools=[]),
         )
     except Exception:
         return []

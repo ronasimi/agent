@@ -6,6 +6,7 @@ import os
 import re
 
 from ollama import Client
+from al_agent.model_capabilities import capability_chat_overrides
 
 from .config import load_config
 from .job_tools import enqueue_research
@@ -27,7 +28,7 @@ def decompose_research_goal(research_goal: str) -> list[str]:
     prompt = f"Break this research goal into 3-5 complementary web searches. Goal: {research_goal}"
     try:
         client = Client(host=os.environ.get("OLLAMA_HOST", CONFIG.get("agent", {}).get("host", "http://localhost:11434")))
-        response = client.generate(model=FAST_MODEL, prompt=prompt, format=schema, options=FAST_OPTIONS, keep_alive=FAST_KEEP_ALIVE, think=False)
+        response = client.generate(model=FAST_MODEL, prompt=prompt, format=schema, options=FAST_OPTIONS, keep_alive=FAST_KEEP_ALIVE, **capability_chat_overrides(FAST_MODEL, think=False))
         
         raw = response.get("response", "{}").strip()
         raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.MULTILINE).strip()

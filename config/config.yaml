@@ -70,6 +70,21 @@ agent:
     # use diagnostics/benchmarks/benchmark_warmup.py and model_stats.cache_hit_pct to verify before enabling.
     prime_system_prefix: false
 
+  # Small best-effort conformance probe. Results are cached by model digest/template
+  # so normal restarts do not repeat generation. Probes run in background/idle
+  # paths and never block the WebUI from serving.
+  model_capabilities:
+    enabled: true
+    probe_main_on_startup: true
+    probe_fast_when_warmed: true
+    cache_path: "/app/memory/model_capabilities.json"
+    # Let the UI become interactive before a cold/new-model probe starts. Any
+    # active/recent user turn restarts this idle window.
+    idle_delay_seconds: 3
+    # Set true only when validating probe logic; normal model rebuilds invalidate
+    # the cache automatically because the identity contains the model digest.
+    force_probe: false
+
   # Transport failures before the first streamed chunk are safe to retry and
   # should not consume a semantic/tool-loop iteration. Once streaming begins,
   # the request is never replayed because that could duplicate output/actions.
@@ -277,10 +292,11 @@ agent:
     historical_recall_chars: 7000
     max_tool_output_chars: 4000
     tool_loop_reserve_tokens: 3072
-    # Place the harness working-state/evidence blocks after the stable history.
-    # Those blocks are rewritten every iteration; keeping them last preserves a
-    # reusable KV prefix (system prompt + history) across tool-loop steps.
-    volatile_blocks_last: true
+    # Deprecated compatibility switch. System/working-state blocks are always
+    # canonicalized into one leading system message for strict Qwen/Ollama
+    # templates; correctness takes precedence over the old volatile-prefix
+    # caching optimization.
+    volatile_blocks_last: false
 
   main_options:
     num_ctx: 16384

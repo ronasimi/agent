@@ -15,6 +15,7 @@ from tools.conversation_context import get_active_conversation_id
 from tools.executor import execute_registered_tool
 from .events import emit_event
 from .model_protocol import extract_qwen_xml_tool_calls, ollama_wire_messages
+from .model_capabilities import capability_chat_overrides
 from .vision import route_multimodal_messages
 from .prompts import append_and_save, build_system_prompt
 from .state import (
@@ -571,22 +572,23 @@ def _finalize_after_limit(
     if WORKING_STATE_ENABLED:
         last_user = next((model_message(item) for item in reversed(history) if item.get("role") == "user"), None)
         history = [last_user] if last_user else []
-    prompt = [
-        {"role": "system", "content": build_system_prompt()},
-        *build_active_messages(
-            system_prompt="",
-            summary="" if WORKING_STATE_ENABLED else get_conversation_summary(),
-            history=history,
-            max_ctx_tokens=MAX_CTX,
-            reserve_tokens=RESERVE_TOKENS,
-            recent_messages=RECENT_MESSAGES,
-            extra_prompt_tokens=0,
-            working_state=WORKING_STATE.render(include_tool_capabilities=False) if WORKING_STATE_ENABLED else "",
-            evidence_context=WORKING_STATE.render_evidence(WORKING_STATE_EVIDENCE_CHARS) if WORKING_STATE_ENABLED else "",
-            max_history_turns=WORKING_STATE_HISTORY_TURNS if WORKING_STATE_ENABLED else None,
-            volatile_last=VOLATILE_CONTEXT_LAST,
-        )[1:],
-    ]
+    # Build the fallback prompt through the same canonical context path as the
+    # normal interactive loop.  Do not prepend a separate system message and
+    # splice away build_active_messages()[0]: working state is now merged into
+    # the single leading system role for strict Qwen/Ollama templates.
+    prompt = build_active_messages(
+        system_prompt=build_system_prompt(),
+        summary="" if WORKING_STATE_ENABLED else get_conversation_summary(),
+        history=history,
+        max_ctx_tokens=MAX_CTX,
+        reserve_tokens=RESERVE_TOKENS,
+        recent_messages=RECENT_MESSAGES,
+        extra_prompt_tokens=0,
+        working_state=WORKING_STATE.render(include_tool_capabilities=False) if WORKING_STATE_ENABLED else "",
+        evidence_context=WORKING_STATE.render_evidence(WORKING_STATE_EVIDENCE_CHARS) if WORKING_STATE_ENABLED else "",
+        max_history_turns=WORKING_STATE_HISTORY_TURNS if WORKING_STATE_ENABLED else None,
+        volatile_last=VOLATILE_CONTEXT_LAST,
+    )
     latest_media = next(
         (model_message(item) for item in reversed(turn_tail or []) if item.get("images")),
         None,
@@ -627,7 +629,8 @@ def _finalize_after_limit(
         )
         response = model_client.chat(
             model=route.model, messages=ollama_wire_messages(route.messages), options=final_options,
-            tools=[], think=False, keep_alive=route.keep_alive, stream=True,
+            keep_alive=route.keep_alive, stream=True,
+            **capability_chat_overrides(route.model, think=False, tools=[]),
         )
         # A client that ignores ``stream`` returns one complete response object.
         chunks = [response] if isinstance(response, dict) or hasattr(response, "message") else response
