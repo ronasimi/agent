@@ -1,15 +1,17 @@
 # One model for interactive and background inference. No intent routing.
 agent:
   host: http://127.0.0.1:11434
-  model: agent-main:4b
-  model_source: hf.co/empero-ai/Qwen3.8-4B-Distill-GGUF:Q4_K_M
+  model: agent-main:9b
+  model_source: hf.co/empero-ai/Qwen3.8-9B-Distill-GGUF:Q4_K_M
   keep_alive: -1
-  tool_protocol: json
+  # Qwen3.8's Ollama template accepts native tool definitions but emits tool
+  # invocations using its XML-style <tool_call>/<function>/<parameter> grammar.
+  tool_protocol: qwen_xml
   timezone: America/Toronto
   thinking_default: false
-  supports_thinking: false
+  supports_thinking: true
   main_options:
-    num_ctx: 16384
+    num_ctx: 32768
     temperature: 0.2
     top_p: 0.9
     top_k: 20
@@ -30,7 +32,9 @@ agent:
     recent_messages: 100
   warmup:
     enabled: true
-    prime_system_prefix: false
+    # Prime the exact initial tool-schema/system prefix used by real turns.
+    prime_system_prefix: true
+    prime_tool_schemas: true
   vision:
     supports_images: false
     max_image_bytes: 4194304
@@ -131,7 +135,7 @@ self_optimization:
   require_test_sandbox: true
   test_memory_limit_mb: 1536
   model_options:
-    num_ctx: 16384
+    num_ctx: 32768
     temperature: 0.6
     top_p: 0.95
     top_k: 20

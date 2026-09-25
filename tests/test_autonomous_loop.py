@@ -45,7 +45,8 @@ WRITE = {
     },
 }
 CFG = LoopConfig(
-    model="original-distilled-4b", options={"num_ctx": 16384, "num_predict": 2048}
+    model="original-distilled-4b", options={"num_ctx": 16384, "num_predict": 2048},
+    protocol="json",
 )
 
 
@@ -191,6 +192,41 @@ def test_no_native_schema_or_think_parameter_in_default_json_mode():
     *_, client, session = run([final()])
     assert "format" in client.requests[0] and "tools" not in client.requests[0]
     assert "think" not in client.requests[0]
+
+
+def test_qwen_xml_mode_uses_tools_parses_xml_and_injects_exact_tool_response():
+    config = replace(CFG, protocol="qwen_xml")
+    xml_load = """<tool_call>\n<function=load_tools>\n<parameter=names>\n[\"put\"]\n</parameter>\n</function>\n</tool_call>"""
+    xml_put = """<tool_call>\n<function=put>\n<parameter=key>\nx\n</parameter>\n<parameter=value>\n7\n</parameter>\n</function>\n</tool_call>"""
+    result, calls, _saved, _events, client, _session = run(
+        [xml_load, xml_put, "Done"], config=config
+    )
+    assert result == "Done"
+    assert calls == [("put", {"key": "x", "value": 7})]
+    assert "tools" in client.requests[0] and "format" not in client.requests[0]
+    assert any(
+        message.get("role") == "user"
+        and message.get("content", "").startswith("<tool_response>\n")
+        and message.get("content", "").endswith("\n</tool_response>")
+        for message in client.requests[-1]["messages"]
+    )
+
+
+def test_qwen_xml_no_think_request_is_explicit_when_supported():
+    config = replace(CFG, protocol="qwen_xml")
+    session = ToolSession([], lambda *args: None)
+    client = FakeClient(["OK"])
+    run_loop(
+        [{"role": "system", "content": "policy"}, {"role": "user", "content": "hello"}],
+        client=client,
+        tools=session,
+        config=config,
+        append=lambda _m: None,
+        emit=lambda *_a, **_k: None,
+        thinking=False,
+        think_supported=True,
+    )
+    assert client.requests[0]["think"] is False
 
 
 def test_oversized_schema_activation_is_atomic_and_evicts_only_older_tools():

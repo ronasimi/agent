@@ -17,7 +17,9 @@ from typing import Any
 
 from .model_protocol import (
     consume_chat_stream,
+    extract_qwen_xml_tool_calls,
     ollama_wire_messages,
+    qwen_xml_tool_prelude,
     tool_result_message,
 )
 from .tool_session import ToolSession
@@ -31,7 +33,7 @@ class LoopStopped(RuntimeError):
 class LoopConfig:
     model: str
     options: dict
-    protocol: str = "json"
+    protocol: str = "qwen_xml"
     keep_alive: Any = -1
     max_model_calls: int = 24
     max_tool_calls: int = 48
@@ -42,8 +44,8 @@ class LoopConfig:
     reserve_tokens: int = 2048
 
     def __post_init__(self):
-        if self.protocol not in {"json", "native"}:
-            raise ValueError("tool_protocol must be json or native")
+        if self.protocol not in {"qwen_xml", "native", "json"}:
+            raise ValueError("tool_protocol must be qwen_xml, native, or legacy json")
         if not self.model.strip():
             raise ValueError("model must be nonempty")
         for value in (
@@ -134,6 +136,25 @@ def decode_response(
         if not isinstance(fn.get("name"), str) or not isinstance(args, dict):
             raise TypeError("Native tool call needs a string name and object arguments")
         calls.append({"name": fn["name"], "arguments": args})
+    if protocol == "qwen_xml":
+        xml_calls, xml_errors = extract_qwen_xml_tool_calls(content)
+        if xml_errors:
+            raise ValueError("; ".join(xml_errors))
+        parsed_xml = [
+            {
+                "name": item["function"]["name"],
+                "arguments": item["function"].get("arguments", {}),
+            }
+            for item in xml_calls
+        ]
+        if calls and parsed_xml:
+            if len(calls) != len(parsed_xml) or [c["name"] for c in calls] != [c["name"] for c in parsed_xml]:
+                raise ValueError("Ollama native tool calls disagree with Qwen XML tool calls")
+            # Some Ollama builds parse the XML into message.tool_calls while also
+            # preserving the textual envelope. Execute the structured copy once.
+            return qwen_xml_tool_prelude(content), calls
+        if parsed_xml:
+            return qwen_xml_tool_prelude(content), parsed_xml
     if not calls and not content.strip():
         raise ValueError("Model returned no answer or tool call")
     return content, calls
@@ -178,7 +199,7 @@ def fit_context(
     """Drop complete older turns only; never cut the current request or a call/result pair."""
     raw = copy.deepcopy(messages)
     wire = ollama_wire_messages(raw)
-    budget = int(config.options.get("num_ctx", 16384)) - config.reserve_tokens
+    budget = int(config.options.get("num_ctx", 32768)) - config.reserve_tokens
 
     # Conservative estimate, including wire JSON and tool definitions. Ollama's
     # tokenizer is model-specific; this margin avoids relying on silent truncation.
@@ -285,7 +306,7 @@ def run_loop(
                 + json.dumps(schemas, ensure_ascii=False, separators=(",", ":"))
             )
         wire = fit_context(
-            current, schemas if config.protocol == "native" else [], config
+            current, schemas if config.protocol in {"native", "qwen_xml"} else [], config
         )
         request = {
             "model": config.model,
@@ -309,12 +330,30 @@ def run_loop(
                 try:
                     capture = consume_chat_stream(
                         stream,
-                        content_stream_allowed=False,
-                        leak_detector=lambda _: False,
+                        # Final-answer prose should reach the Web UI as soon as it
+                        # is generated.  The short protocol guard keeps a leading
+                        # Qwen <tool_call> envelope off the visible stream; if a
+                        # non-conforming response emits prose before a later tool
+                        # call, the completed decode below sends assistant_reset
+                        # before any tool is executed.
+                        content_stream_allowed=True,
+                        leak_detector=(
+                            (lambda text: "<tool_call" in str(text).lower())
+                            if config.protocol == "qwen_xml"
+                            else (lambda _: False)
+                        ),
                         cancel_requested=lambda: cancel() or clock() >= deadline,
                         on_thinking=(lambda text: emit("thinking_delta", content=text))
                         if thinking
                         else None,
+                        on_visible_content=lambda text: emit(
+                            "assistant_delta", content=text
+                        ),
+                        # Qwen's opening <tool_call> marker is only 11 chars.
+                        # A 16-char guard prevents XML leakage while keeping the
+                        # first visible prose latency close to native streaming.
+                        guard_chars=16,
+                        guard_line_chars=8,
                     )
                 finally:
                     close = getattr(stream, "close", None)
@@ -355,6 +394,12 @@ def run_loop(
             )
             raise LoopStopped(f"Model request failed: {exc}") from exc
         trace(call_index=call_index, request=request, capture=capture, error="")
+        if calls and capture is not None and capture.first_visible_at is not None:
+            # A strict Qwen tool turn should contain only XML tool-call blocks,
+            # so normally nothing was made visible.  If the model violated that
+            # rule and emitted prose before a tool call, retract the provisional
+            # stream before showing tool activity.
+            emit("assistant_reset")
         if not calls:
             record({"role": "assistant", "content": answer})
             emit("assistant_final", content=answer, finalization=False)
@@ -370,7 +415,7 @@ def run_loop(
         # it, but the harness never substitutes another tool or guesses arguments.
         try:
             for call in calls:
-                tools.validate(call["name"], call["arguments"])
+                call["arguments"] = tools.validate(call["name"], call["arguments"])
         except (ValueError, TypeError) as exc:
             no_progress += 1
             if no_progress >= config.max_no_progress:

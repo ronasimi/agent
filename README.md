@@ -1,12 +1,12 @@
 # Al Agent
 
-A local assistant for Ollama with autonomous tool selection and one all-purpose model. The default is your original distilled 4B model, exposed as `agent-main:4b`.
+A local assistant for Ollama with autonomous tool selection and one all-purpose model. The default is the distilled Qwen3.8 9B GGUF, exposed as `agent-main:9b`.
 
 ## Features
 
 - Browser chat, saved conversations, files, and generated artifacts.
 - Model-selected tools, arguments, execution order, and final answers.
-- Schema-constrained JSON actions by default; optional native tool calling.
+- Qwen3.8 XML-style tool calls using the model template’s `<tool_call>/<function>/<parameter>` grammar.
 - Searchable tool catalog with bounded, dynamically loaded schemas.
 - Conversation-scoped memory and tool observations.
 - Research, reminders, browser automation, and durable background jobs.
@@ -18,7 +18,7 @@ A local assistant for Ollama with autonomous tool selection and one all-purpose 
 
 - Linux and Docker with the Compose plugin.
 - Ollama running on the host, normally at http://127.0.0.1:11434.
-- Enough RAM or VRAM for the distilled 4B model with a 16,384-token context.
+- Enough RAM or VRAM for the distilled 9B Q4_K_M model with a 32,768-token context.
 - Python 3.11 or newer for development outside Docker.
 
 ## Quick start
@@ -30,7 +30,7 @@ Extract the repository and open a terminal in its root directory.
 docker compose up -d --build
 ```
 
-The alias script pulls `hf.co/empero-ai/Qwen3.8-4B-Distill-GGUF:Q4_K_M` and creates `agent-main:4b`. It creates one alias. To select an existing deployment's model, set AGENT_MODEL_SOURCE and AGENT_MODEL when running the script; keep the same AGENT_MODEL value when starting Compose.
+The alias script pulls `hf.co/empero-ai/Qwen3.8-9B-Distill-GGUF:Q4_K_M` and creates `agent-main:9b`. It creates one alias. To select an existing deployment's model, set AGENT_MODEL_SOURCE and AGENT_MODEL when running the script; keep the same AGENT_MODEL value when starting Compose.
 
 Open http://127.0.0.1:8080. Stop the services with:
 
@@ -44,9 +44,13 @@ The supplied ollama.env.example contains settings for the host Ollama service, i
 
 Each turn presents the model with the tool-name inventory and the schemas for tool_search and load_tools. The model can answer immediately, inspect tool descriptions, load schemas, execute a tool, read its result, and select the next action.
 
-The default JSON protocol constrains the model to one typed tool action or final answer per response. The harness validates the completed response and arguments, executes the selected registered function, and supplies its result to the same model. No user-prompt keywords select a tool, recipe, workflow, or different model.
+The harness sends tool definitions through Ollama’s native `tools` field because the Qwen3.8 Jinja template renders those schemas into its own `<tools>` block. The model emits XML-style `<tool_call>` blocks; the harness parses and validates them, executes the selected registered function, and returns observations in exact `<tool_response>` user-message envelopes. No user-prompt keywords select a tool, recipe, workflow, or different model.
 
-Tool progress appears during execution. Final answer text is buffered until a complete, valid response arrives, so partial action JSON never appears as a chat answer. Thinking is optional and requires both an explicitly compatible model and supports_thinking enabled in configuration.
+Tool progress appears during execution. Tool-call envelopes are buffered until complete and validated before execution. Thinking is opt-in: the default request sends `think: false`, which the supplied template converts into an empty `<think>
+
+</think>
+
+` generation prefix; the Web UI Think checkbox sends `think: true`.
 
 ## Configuration
 
@@ -54,9 +58,9 @@ Edit config/config.yaml. The primary settings are:
 
 | Setting | Default | Purpose |
 |---|---|---|
-| agent.model | agent-main:4b | Every inference workload uses this model |
-| agent.tool_protocol | json | Set native only for a compatible tool-calling template |
-| agent.main_options.num_ctx | 16384 | Shared context size |
+| agent.model | agent-main:9b | Every inference workload uses this model |
+| agent.tool_protocol | qwen_xml | Use the supplied Qwen3.8 XML tool-call template |
+| agent.main_options.num_ctx | 32768 | Shared context size |
 | agent.main_options.num_predict | 2048 | Per-response output limit |
 | agent.max_model_calls_per_turn | 24 | Model-call budget |
 | agent.max_tool_calls_per_turn | 48 | Tool-call budget, including discovery |
@@ -66,7 +70,7 @@ Edit config/config.yaml. The primary settings are:
 
 AGENT_MODEL and OLLAMA_HOST override the corresponding configuration values. Legacy role settings are normalized to the same model and options; different role overrides are ignored with a warning.
 
-The default distilled model is text-only. Image display, downloads, and document tools remain available; pixel understanding is unavailable. The harness never loads a vision model.
+The configured distilled GGUF is text-only. Image display, downloads, and document tools remain available; pixel understanding is unavailable. The harness never loads a vision model.
 
 ## Files and existing installations
 

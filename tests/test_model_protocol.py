@@ -35,9 +35,10 @@ def test_tool_result_uses_native_ollama_tool_name():
     message = tool_result_message("current_time", "12:34", tool_call_id="call-1")
     normalized = model_message(message)
     wire = ollama_wire_messages([normalized])[0]
-    assert wire["tool_name"] == "current_time"
-    assert "name" not in wire
-    assert "tool_call_id" not in wire
+    assert wire == {
+        "role": "user",
+        "content": "<tool_response>\n12:34\n</tool_response>",
+    }
     assert normalized["tool_call_id"] == "call-1"
 
 
@@ -245,3 +246,16 @@ def test_qwen_xml_tool_call_parser_handles_multiline_and_multiple_calls():
     assert [c["function"]["name"] for c in calls] == ["web_search", "read_lines"]
     assert calls[0]["function"]["arguments"] == {"query": "London Ontario weather"}
     assert calls[1]["function"]["arguments"]["start_line"] == "10"
+
+
+def test_qwen_xml_parser_preserves_multiline_parameter_content_and_rejects_suffix():
+    from al_agent.model_protocol import extract_qwen_xml_tool_calls
+
+    text = """<tool_call>\n<function=write_file>\n<parameter=content>\nline one\n  line two\n</parameter>\n</function>\n</tool_call>"""
+    calls, errors = extract_qwen_xml_tool_calls(text)
+    assert errors == []
+    assert calls[0]["function"]["arguments"]["content"] == "line one\n  line two"
+
+    calls, errors = extract_qwen_xml_tool_calls(text + "\nnot allowed after tool call")
+    assert calls == []
+    assert errors == ["unexpected text after final Qwen XML tool call"]

@@ -130,15 +130,19 @@ def test_warm_model_loads_weights_and_primes_the_system_prefix():
     assert warm_model(
         Client(), "main:4b", options={"num_ctx": 16384, "temperature": 0.2},
         keep_alive=-1, system_prompt="stable-system",
+        tools=[{"type": "function", "function": {"name": "tool_search", "parameters": {"type": "object"}}}],
+        think=False,
     ) is True
-    assert calls[0]["messages"] == []
+    assert len(calls) == 1
     assert calls[0]["keep_alive"] == -1
     # The runner is keyed by context size: warming with a different num_ctx
     # would reload the model on the first real turn.
     assert calls[0]["options"]["num_ctx"] == 16384
-    assert calls[1]["options"]["num_ctx"] == 16384
-    assert calls[1]["options"]["num_predict"] == 1
-    assert calls[1]["messages"][0]["role"] == "system"
+    assert calls[0]["options"]["num_predict"] == 1
+    assert calls[0]["messages"][0]["role"] == "system"
+    assert calls[0]["messages"][1]["role"] == "user"
+    assert calls[0]["think"] is False
+    assert calls[0]["tools"][0]["function"]["name"] == "tool_search"
 
 
 def test_warm_model_failure_is_reported_and_never_raises():

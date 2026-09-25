@@ -273,5 +273,86 @@
     return intro+renderEmailCard(parsed.email);
   }
 
-  return {esc,inlineMd,renderMarkdown,renderEmailCard,parseEmailContent,extractWorkspaceAttachments,splitTableRow,separatorAlignment,weatherIcon,weatherLineMeta,tableHeaderIcon};
+  function streamingMarkdownSnapshot(value,{final=false}={}){
+    const src=String(value??'').replace(/\r\n/g,'\n');
+    if(final||!src)return{visible:src,pending:'',kind:''};
+    const starts=[0];
+    for(let i=0;i<src.length;i++)if(src[i]==='\n')starts.push(i+1);
+    const lines=src.split('\n');
+    const candidates=[];
+    const add=(line,kind)=>{
+      const start=starts[Math.max(0,Math.min(line,starts.length-1))]??src.length;
+      candidates.push({start,kind});
+    };
+
+    // Fenced blocks are atomic while streaming: never expose a half code block
+    // (or a JSON/email block carried in a fence).
+    let openFence=-1;
+    for(let i=0;i<lines.length;i++){
+      if(/^\s*```/.test(lines[i]))openFence=openFence<0?i:-1;
+    }
+    if(openFence>=0)add(openFence,'fence');
+
+    // Email previews have no explicit closing delimiter.  Once an email header
+    // starts, hold the whole card until assistant_final supplies the complete
+    // body so metadata/body never flicker through partial layouts.
+    const emailHeader=/^\s{0,3}(?:#{1,3}\s+)?(?:\*\*)?(?:To|From|Cc|Bcc|Subject)(?:\*\*)?\s*:/i;
+    for(let i=0;i<lines.length;i++){
+      if(emailHeader.test(lines[i])){add(i,'email');break;}
+    }
+
+    // A Markdown table is complete only after a non-row/blank line arrives.
+    // Until then buffer the header + separator + every streamed row.
+    for(let i=0;i+1<lines.length;i++){
+      const header=splitTableRow(lines[i]);
+      const sep=splitTableRow(lines[i+1]);
+      if(!header||!sep||header.length!==sep.length)continue;
+      const align=sep.map(separatorAlignment);
+      if(align.some(v=>v===null))continue;
+      let cursor=i+2;
+      while(cursor<lines.length&&splitTableRow(lines[cursor]))cursor++;
+      if(cursor>=lines.length){add(i,'table');break;}
+      i=Math.max(i,cursor-1);
+    }
+
+    // Hold a trailing pipe-delimited line for one line of look-ahead; it may be
+    // the header of a table whose separator has not arrived yet.
+    const last=lines.length-1;
+    if(last>=0&&splitTableRow(lines[last]))add(last,'table-candidate');
+
+    // Lists and block quotes are multi-line formatted blocks.  Keep the whole
+    // trailing block hidden until a blank/non-member line closes it.
+    const listLine=line=>/^\s*(?:[-*]\s+|\d+[.)]\s+)/.test(String(line||''));
+    const quoteLine=line=>/^\s*>\s?/.test(String(line||''));
+    for(const [matcher,kind] of [[listLine,'list'],[quoteLine,'blockquote']]){
+      let start=-1;
+      const singleTrailingNewline=src.endsWith('\n')&&!src.endsWith('\n\n');
+      const limit=lines.length-(singleTrailingNewline?1:0);
+      for(let i=0;i<limit;i++){
+        if(matcher(lines[i])){if(start<0)start=i;continue;}
+        if(start>=0)start=-1;
+      }
+      if(start>=0)add(start,kind);
+    }
+
+    // Single-line formatted constructs are atomic until their terminating
+    // newline arrives. Ordinary prose continues to stream character by
+    // character. Weather lines are included because the renderer decorates
+    // them as specialized status/forecast rows.
+    if(last>=0&&!src.endsWith('\n')){
+      const tail=lines[last]||'';
+      if(/^\s{0,3}#{1,3}\s+/.test(tail))add(last,'heading');
+      if(weatherLineMeta(tail).isWeather)add(last,'weather');
+      const ticks=(tail.match(/`/g)||[]).length;
+      const bold=(tail.match(/\*\*/g)||[]).length;
+      if(ticks%2===1||bold%2===1||/\[[^\]]*$/.test(tail)||/\[[^\]]+\]\([^)]*$/.test(tail))add(last,'inline-markdown');
+    }
+
+    if(!candidates.length)return{visible:src,pending:'',kind:''};
+    candidates.sort((a,b)=>a.start-b.start);
+    const first=candidates[0];
+    return{visible:src.slice(0,first.start),pending:src.slice(first.start),kind:first.kind};
+  }
+
+  return {esc,inlineMd,renderMarkdown,renderEmailCard,parseEmailContent,extractWorkspaceAttachments,splitTableRow,separatorAlignment,weatherIcon,weatherLineMeta,tableHeaderIcon,streamingMarkdownSnapshot};
 });

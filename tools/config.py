@@ -25,7 +25,7 @@ def load_config() -> dict:
     return normalize_config(raw)
 
 
-DEFAULT_MODEL = "agent-main:4b"
+DEFAULT_MODEL = "agent-main:9b"
 
 
 def normalize_config(raw: dict) -> dict:
@@ -51,12 +51,26 @@ def normalize_config(raw: dict) -> dict:
         raise ValueError("agent.model must be nonempty")
     options = dict(
         agent.get("main_options")
-        or {"num_ctx": 16384, "temperature": 0.2, "num_predict": 2048}
+        or {"num_ctx": 32768, "temperature": 0.2, "num_predict": 2048}
     )
-    options.setdefault("num_ctx", 16384)
+    options.setdefault("num_ctx", 32768)
     if int(options["num_ctx"]) < 2048:
         raise ValueError("agent.main_options.num_ctx must be at least 2048")
     agent.update(model=model, main_options=options)
+    requested_protocol = str(agent.get("tool_protocol") or "qwen_xml").strip().lower()
+    if requested_protocol not in {"qwen_xml", "native"}:
+        warnings.warn(
+            f"The configured Qwen3.8 model does not use the legacy {requested_protocol!r} tool protocol; "
+            "using qwen_xml instead.",
+            stacklevel=2,
+        )
+        requested_protocol = "qwen_xml"
+    agent["tool_protocol"] = requested_protocol
+    agent.setdefault("thinking_default", False)
+    # The configured Qwen3.8 template exposes Ollama's thinking toggle.  Keeping
+    # this enabled is what makes ``think: false`` reach ``enable_thinking=false``
+    # and therefore emit the template's empty <think></think> generation prefix.
+    agent["supports_thinking"] = True
     keep_alive = agent.get("keep_alive", -1)
     roles = (
         "executor",
@@ -97,6 +111,7 @@ def normalize_config(raw: dict) -> dict:
         "fast_model_prewarm": False,
         "decision_model_prewarm": False,
     }
+    agent["warmup"].setdefault("prime_tool_schemas", True)
     agent["host"] = os.environ.get("OLLAMA_HOST") or agent.get(
         "host", "http://127.0.0.1:11434"
     )

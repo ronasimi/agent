@@ -75,11 +75,26 @@ async def _lifespan(_app: FastAPI):
     import threading
     from al_agent.model_residency import background_inference_slot
     from al_agent.model_protocol import warm_model
+    from al_agent.tool_session import ToolSession
+    from tools.catalog import catalog_snapshot
     def warm():
         try:
             with background_inference_slot():
+                schemas, _functions, metadata = catalog_snapshot()
+                session = ToolSession(
+                    schemas,
+                    lambda _name, _arguments: None,
+                    metadata,
+                    max_active=int(agent_runtime.AGENT_CFG.get("max_active_tools", 16)),
+                    max_schema_chars=int(agent_runtime.AGENT_CFG.get("max_tool_schema_chars", 20000)),
+                )
+                prime_prefix = bool(agent_runtime.WARMUP_PRIME_PREFIX)
+                prime_tools = bool(agent_runtime.WARMUP_CFG.get("prime_tool_schemas", True))
                 warm_model(agent_runtime.OLLAMA, agent_runtime.MODEL,
-                           options=agent_runtime.MAIN_OPTIONS, keep_alive=-1)
+                           options=agent_runtime.MAIN_OPTIONS, keep_alive=-1,
+                           system_prompt=(agent_runtime.turn_engine.build_session_system_prompt(session) if prime_prefix else ""),
+                           tools=(session.schemas if prime_tools else None),
+                           think=False)
         except Exception:
             pass  # A foreground request can load the same model on demand.
     if agent_runtime.WARMUP_ENABLED:
@@ -177,7 +192,7 @@ def commands() -> list[dict[str, Any]]:
 def health() -> dict[str, Any]:
     """Return the one configured model and its context size."""
     return {"ok": True, "model": agent_runtime.MODEL, "main_model": agent_runtime.MODEL,
-            "context": agent_runtime.MAX_CTX, "tool_protocol": agent_runtime.AGENT_CFG.get("tool_protocol", "json"),
+            "context": agent_runtime.MAX_CTX, "tool_protocol": agent_runtime.AGENT_CFG.get("tool_protocol", "qwen_xml"),
             "working_state": agent_runtime.WORKING_STATE_ENABLED}
 
 

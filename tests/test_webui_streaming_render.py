@@ -13,9 +13,11 @@ def test_streamed_assistant_unhides_empty_placeholder() -> None:
     assert "assistantNode.classList.remove('attachment-only');" in APP_JS
 
 
-def test_stream_updates_are_frame_batched_and_finalized_as_markdown() -> None:
+def test_stream_updates_are_hybrid_buffered_and_finalized_as_markdown() -> None:
     assert "requestAnimationFrame(paintAssistantStream)" in APP_JS
-    assert "shell.answer.textContent=assistantStreamBuffer;" in APP_JS
+    assert "RichOutput.streamingMarkdownSnapshot(assistantStreamBuffer)" in APP_JS
+    assert "shell.answer.innerHTML=renderMarkdown(snapshot.visible);" in APP_JS
+    assert "shell.answer.dataset.pendingFormat=snapshot.kind||'';" in APP_JS
     assert "function finalizeAssistantStream(content='')" in APP_JS
     assert "shell.answer.innerHTML=renderMarkdown(parsed.text);" in APP_JS
     assert "else if(e.type==='assistant_final'){finalizeThinkingStream({label:'done'});finalizeAssistantStream(e.content||'');" in APP_JS
@@ -67,3 +69,10 @@ def test_reasoning_paints_do_not_schedule_transcript_scroll_work() -> None:
     implementation = APP_JS[start:end]
     assert "scrollBottom" not in implementation
     assert "pre.scrollTop=pre.scrollHeight" in implementation
+
+
+def test_backend_foreground_loop_emits_assistant_deltas() -> None:
+    loop_py = (ROOT / "al_agent" / "agent_loop.py").read_text(encoding="utf-8")
+    assert "content_stream_allowed=True" in loop_py
+    assert '"assistant_delta", content=text' in loop_py
+    assert 'emit("assistant_reset")' in loop_py

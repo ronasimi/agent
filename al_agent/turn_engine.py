@@ -90,6 +90,16 @@ def _history_for_protocol(messages: list[dict], protocol: str) -> list[dict]:
     return output
 
 
+def build_session_system_prompt(session: ToolSession) -> str:
+    """Build the exact stable system prefix used for foreground and warmup turns."""
+    prompt = build_system_prompt() + "\n" + session.inventory()
+    if not state.VISION_SUPPORTS_IMAGES:
+        prompt += (
+            "\nThis model cannot inspect image pixels. Use file metadata or available text extraction when useful, and state this limit."
+        )
+    return prompt
+
+
 def handle_user_turn(
     messages: list[dict],
     user_input: str,
@@ -111,7 +121,7 @@ def handle_user_turn(
     cid = get_active_conversation_id()
     success = False
     cfg = state.AGENT_CFG
-    protocol = str(cfg.get("tool_protocol", "json"))
+    protocol = str(cfg.get("tool_protocol", "qwen_xml"))
     set_foreground_turn(
         token, {"pid": os.getpid(), "conversation_id": cid, "started_at": utc_now()}
     )
@@ -153,12 +163,7 @@ def handle_user_turn(
             max_active=int(cfg.get("max_active_tools", 16)),
             max_schema_chars=int(cfg.get("max_tool_schema_chars", 20000)),
         )
-        messages[0]["content"] += "\n" + session.inventory()
-        # The selected distilled model is text-only; never load a vision sidecar.
-        if not state.VISION_SUPPORTS_IMAGES:
-            messages[0]["content"] += (
-                "\nThis model cannot inspect image pixels. Use file metadata or available text extraction when useful, and state this limit."
-            )
+        messages[0]["content"] = build_session_system_prompt(session)
         work_state = WorkingStateStore(
             limits=state.WORKING_STATE_CFG, conversation_id=cid
         )

@@ -79,6 +79,24 @@ _QWEN_PARAMETER_RE = re.compile(
 )
 
 
+def _qwen_parameter_value(raw: str) -> str:
+    """Remove only the template's structural boundary newline(s).
+
+    ``str.strip()`` is intentionally avoided: leading/trailing spaces can be
+    meaningful for shell snippets, source text, or other string parameters.
+    """
+    value = str(raw or "")
+    if value.startswith("\r\n"):
+        value = value[2:]
+    elif value.startswith("\n"):
+        value = value[1:]
+    if value.endswith("\r\n"):
+        value = value[:-2]
+    elif value.endswith("\n"):
+        value = value[:-1]
+    return value
+
+
 def extract_qwen_xml_tool_calls(content: str) -> tuple[list[dict[str, Any]], list[str]]:
     """Parse Qwen3.x's native textual XML tool-call envelope.
 
@@ -104,6 +122,14 @@ def extract_qwen_xml_tool_calls(content: str) -> tuple[list[dict[str, Any]], lis
     matches = list(_QWEN_TOOL_CALL_RE.finditer(text))
     if not matches:
         return [], ["malformed Qwen XML tool call envelope"]
+    opening_count = len(re.findall(r"<tool_call\s*>", text, flags=re.I))
+    if opening_count != len(matches):
+        return [], ["malformed or incomplete Qwen XML tool call envelope"]
+    for left, right in zip(matches, matches[1:]):
+        if text[left.end() : right.start()].strip():
+            return [], ["unexpected text between Qwen XML tool calls"]
+    if text[matches[-1].end() :].strip():
+        return [], ["unexpected text after final Qwen XML tool call"]
     for index, match in enumerate(matches, start=1):
         name = match.group(1).strip().strip('"\'')
         body = match.group(2)
@@ -115,7 +141,7 @@ def extract_qwen_xml_tool_calls(content: str) -> tuple[list[dict[str, Any]], lis
             if key in params:
                 duplicate = key
                 break
-            params[key] = param.group(2).strip()
+            params[key] = _qwen_parameter_value(param.group(2))
             spans.append(param.span())
         if duplicate:
             errors.append(f"call {index} ({name or '[missing]'}): duplicate parameter '{duplicate}'")
@@ -138,6 +164,13 @@ def extract_qwen_xml_tool_calls(content: str) -> tuple[list[dict[str, Any]], lis
             "function": {"name": name, "arguments": params},
         })
     return calls, errors
+
+
+def qwen_xml_tool_prelude(content: str) -> str:
+    """Return optional prose before the first XML tool call, never the XML itself."""
+    text = str(content or "")
+    match = _QWEN_TOOL_CALL_RE.search(text)
+    return text[: match.start()].strip() if match else text.strip()
 
 
 @dataclass
@@ -274,10 +307,12 @@ def consume_chat_stream(
 
 
 def tool_result_message(tool_name: str, content: str, *, tool_call_id: str = "") -> dict[str, Any]:
-    """Build a native Ollama tool-result message plus a local correlation id.
+    """Build the logical tool-result record plus a local correlation id.
 
-    ``tool_name`` is the Ollama-native field.  ``tool_call_id`` is retained for
-    local history/compaction pairing and for servers/clients that expose it.
+    Storage keeps a real ``tool`` role for transaction pairing.  At the provider
+    boundary :func:`ollama_wire_messages` converts consecutive tool records into
+    the exact Qwen user-message ``<tool_response>`` envelope required by the
+    supplied Jinja template. ``tool_call_id`` never crosses that boundary.
     """
     message: dict[str, Any] = {
         "role": "tool",
@@ -292,8 +327,8 @@ def tool_result_message(tool_name: str, content: str, *, tool_call_id: str = "")
 def canonicalize_system_messages(messages: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return a provider-safe chat sequence with at most one leading system message.
 
-    Some Ollama chat templates (including the Qwen3.8 template used by the
-    interactive 4B model) reject any ``system`` message that appears after the
+    Some Ollama chat templates (including the configured Qwen3.8 template)
+    reject any ``system`` message that appears after the
     beginning of the conversation.  Harness-owned context used to be emitted as
     a second system message after the current user turn for KV-prefix reuse,
     which made those requests fail before inference.
@@ -339,17 +374,37 @@ def validate_system_message_order(messages: Iterable[dict[str, Any]]) -> None:
 def ollama_wire_messages(messages: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return messages containing only fields accepted by Ollama's chat API.
 
-    The harness keeps ``tool_call_id`` for local transaction pairing, but the
-    native Ollama Python ``Message`` type currently identifies tool results via
-    ``tool_name`` and has no ``tool_call_id`` field.  System-role placement is
-    canonicalized here as a final provider-boundary invariant so future call
-    sites cannot accidentally reintroduce a late system message.
+    The harness keeps logical ``tool`` records and ``tool_call_id`` values for
+    local transaction pairing.  The Qwen3.8 template, however, consumes tool
+    feedback as user content wrapped in ``<tool_response>`` tags.  Translate
+    that representation here so every provider-bound request follows the model
+    contract regardless of how history is stored. System-role placement is also
+    canonicalized here as a final provider-boundary invariant.
     """
-    allowed = {"role", "content", "thinking", "images", "tool_name", "tool_calls"}
-    wire = [
-        {key: value for key, value in message.items() if key in allowed}
-        for message in canonicalize_system_messages(messages)
-    ]
+    allowed = {"role", "content", "thinking", "images", "tool_calls"}
+    wire: list[dict[str, Any]] = []
+    pending_tool_results: list[str] = []
+
+    def flush_tool_results() -> None:
+        if not pending_tool_results:
+            return
+        # This is the exact user-message envelope recognized by the supplied
+        # Qwen3.8 Jinja template. Group consecutive results exactly as the
+        # template's native ``role == 'tool'`` branch would do.
+        content = "\n".join(
+            f"<tool_response>\n{value}\n</tool_response>"
+            for value in pending_tool_results
+        )
+        wire.append({"role": "user", "content": content})
+        pending_tool_results.clear()
+
+    for message in canonicalize_system_messages(messages):
+        if str(message.get("role") or "") == "tool":
+            pending_tool_results.append(str(message.get("content", "")))
+            continue
+        flush_tool_results()
+        wire.append({key: value for key, value in message.items() if key in allowed})
+    flush_tool_results()
     validate_system_message_order(wire)
     return wire
 
@@ -439,33 +494,44 @@ def warm_model(
     options: dict[str, Any] | None = None,
     keep_alive: Any = -1,
     system_prompt: str = "",
+    tools: list[dict[str, Any]] | None = None,
+    think: bool = False,
     on_error: Callable[[Exception], None] | None = None,
 ) -> bool:
-    """Load the model and optionally attempt to prime a stable prompt prefix.
+    """Load the model and prime the same Qwen chat-template prefix as real turns.
 
-    The empty-message request is the reliable part: it asks Ollama to load and
-    keep the model resident. Prefix priming is deliberately optional because a
-    tool-capable chat template may serialize dynamic tool schemas before normal
-    messages; in that case a system-only request is not the common byte prefix
-    of a real turn and may provide little or no KV-cache reuse. Measure
-    ``prompt_eval_cached_count`` with ``diagnostics/benchmarks/benchmark_warmup.py`` before
-    enabling it.
+    The supplied Qwen3.8 template rejects an empty ``messages`` list, so warmup
+    is itself a tiny valid chat turn.  When ``tools`` are provided, they are sent
+    through Ollama's native ``tools`` request field; the model template then
+    renders those definitions into its own ``<tools>`` block exactly as it does
+    for foreground requests.
 
     ``options`` must match interactive turns, especially ``num_ctx``, otherwise
     Ollama can select/reload a different runner and invalidate the measurement.
     """
     base_options = dict(options or {})
     try:
-        client.chat(model=model, messages=[], options=base_options, keep_alive=keep_alive)
+        prime_options = {**base_options, "num_predict": 1}
+        messages: list[dict[str, str]] = []
         if system_prompt:
-            prime_options = {**base_options, "num_predict": 1}
-            client.chat(
-                model=model,
-                messages=[{"role": "system", "content": str(system_prompt)}],
-                options=prime_options,
-                keep_alive=keep_alive,
-                stream=False,
-            )
+            messages.append({"role": "system", "content": str(system_prompt)})
+        messages.append(
+            {
+                "role": "user",
+                "content": "Protocol warmup. Reply with OK and do not call a tool.",
+            }
+        )
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "options": prime_options,
+            "keep_alive": keep_alive,
+            "stream": False,
+            "think": bool(think),
+        }
+        if tools:
+            kwargs["tools"] = list(tools)
+        client.chat(**kwargs)
         return True
     except Exception as exc:
         if on_error is not None:
@@ -480,6 +546,8 @@ def warm_model_async(
     options: dict[str, Any] | None = None,
     keep_alive: Any = -1,
     system_prompt: str = "",
+    tools: list[dict[str, Any]] | None = None,
+    think: bool = False,
     on_error: Callable[[Exception], None] | None = None,
     on_success: Callable[[], None] | None = None,
 ) -> threading.Thread:
@@ -488,7 +556,7 @@ def warm_model_async(
     def _run() -> None:
         if warm_model(
             client, model, options=options, keep_alive=keep_alive,
-            system_prompt=system_prompt, on_error=on_error,
+            system_prompt=system_prompt, tools=tools, think=think, on_error=on_error,
         ) and on_success is not None:
             on_success()
 

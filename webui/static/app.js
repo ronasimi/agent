@@ -149,11 +149,14 @@ function paintAssistantStream(){
   const shell=ensureAssistantComposite();
   assistantNode.dataset.raw=assistantStreamBuffer;
   shell.answer.classList.remove('attachment-only');
-  // Keep streaming paints intentionally cheap. Re-rendering the full Markdown
-  // document for every token is O(n^2)-ish work and can starve Chromium's
-  // paint loop when WebSocket deltas arrive in a burst. The canonical Markdown
-  // render happens once in finalizeAssistantStream().
-  shell.answer.textContent=assistantStreamBuffer;
+  // Hybrid streaming: conversational prose is rendered as it arrives, while
+  // incomplete structured Markdown (tables, fenced blocks, email cards) stays
+  // in the background buffer until its boundary is complete.  This avoids the
+  // distracting half-table/half-card states that token-by-token Markdown
+  // rendering produces while retaining low perceived latency for normal text.
+  const snapshot=RichOutput.streamingMarkdownSnapshot(assistantStreamBuffer);
+  shell.answer.innerHTML=renderMarkdown(snapshot.visible);
+  shell.answer.dataset.pendingFormat=snapshot.kind||'';
   shell.answer.classList.add('streaming');
   scrollBottom();
 }
@@ -224,6 +227,7 @@ function finalizeAssistantStream(content=''){
   assistantNode.dataset.raw=assistantStreamBuffer;
   const parsed=messageContent(assistantStreamBuffer);
   shell.answer.classList.remove('streaming');
+  shell.answer.removeAttribute('data-pending-format');
   shell.answer.innerHTML=renderMarkdown(parsed.text);
   renderMessageMedia(shell.answer,parsed.attachments);
   scrollBottom(true);

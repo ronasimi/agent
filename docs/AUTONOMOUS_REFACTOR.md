@@ -37,13 +37,13 @@ Ordinary tool implementations, explicit slash commands, durable job state machin
 
 The model starts with the complete tool-name inventory and discovery descriptions. It selects tool_search or load_tools to obtain schemas, selects a loaded tool and supplies arguments, then receives an observation. This repeats until it returns a final answer or the runtime reaches a configured bound.
 
-JSON mode uses an action schema derived from active tools and a final-answer variant. It is the default because it does not require a native function-calling chat template. Native mode uses the same model, tools, validation, and storage with provider-native tool messages.
+The configured Qwen3.8 runner uses `qwen_xml`: tool definitions are supplied through Ollama’s native `tools` field, while the model emits the XML-style tool-call grammar defined by its Jinja template. The harness parses those XML calls and injects tool observations as `<tool_response>` user messages.
 
 The harness never reads prose as an instruction to invoke a tool. Responses must be complete and structurally valid. Recovery decisions remain model-selected. Successful tool execution is reported separately from the model's final answer; the runtime does not manufacture success after an error.
 
 ## One model
 
-The original distilled 4B GGUF backs agent-main:4b. All consumers resolve configuration through tools.config, which normalizes legacy role names onto this model and its main options. Research, compaction, self-optimization proposals, and custom-tool generation use it too. Background report residency swapping was removed, and generation no longer unloads the shared model with keep_alive=0.
+The distilled Qwen3.8 9B GGUF backs agent-main:9b. All consumers resolve configuration through tools.config, which normalizes legacy role names onto this model and its main options. Research, compaction, self-optimization proposals, and custom-tool generation use it too. Background report residency swapping was removed, and generation no longer unloads the shared model with keep_alive=0.
 
 Semantic-memory compatibility tools use the existing lexical store, eliminating the embedding-model dependency. Text-only operation is explicit; image display remains supported but there is no visual inference sidecar. Model capability probes no longer choose runtime routes.
 
@@ -51,7 +51,7 @@ Semantic-memory compatibility tools use the existing lexical store, eliminating 
 
 1. Back up existing workspace and memory data and retain deployment-specific integration settings.
 2. Extract this complete source tree into the deployment source location.
-3. Merge the agent block from config/config.yaml. Keep tool_protocol=json for the supplied distilled model unless native support is confirmed.
+3. Merge the agent block from config/config.yaml. Keep `tool_protocol: qwen_xml` for the supplied Qwen3.8 template.
 4. Run scripts/create_ollama_aliases.sh to create the default alias, or configure AGENT_MODEL for an already installed equivalent model.
 5. Apply the host Ollama settings in ollama.env.example as needed.
 6. Rebuild with docker compose up -d --build.

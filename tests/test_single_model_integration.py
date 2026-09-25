@@ -261,7 +261,7 @@ def test_history_matches_results_by_id_when_first_result_is_missing():
     assert fixed[4]["role"] == "user"
 
 
-@pytest.mark.parametrize("protocol", ["json", "native"])
+@pytest.mark.parametrize("protocol", ["json", "native", "qwen_xml"])
 def test_real_ollama_sdk_serializes_actions_and_observations(protocol):
     import httpx
     from ollama import Client
@@ -279,6 +279,15 @@ def test_real_ollama_sdk_serializes_actions_and_observations(protocol):
         action = next(replies)
         if protocol == "json":
             message = {"role": "assistant", "content": json.dumps(action)}
+        elif protocol == "qwen_xml" and action["action"] == "tool":
+            args = "".join(
+                f"<parameter={key}>\n{json.dumps(value) if isinstance(value, (dict, list)) else value}\n</parameter>\n"
+                for key, value in action["arguments"].items()
+            )
+            message = {
+                "role": "assistant",
+                "content": f"<tool_call>\n<function={action['name']}>\n{args}</function>\n</tool_call>",
+            }
         elif action["action"] == "tool":
             message = {
                 "role": "assistant",
@@ -329,8 +338,9 @@ def test_real_ollama_sdk_serializes_actions_and_observations(protocol):
     assert answer == "42" and executed == [("lookup", {"key": "x"})]
     assert {r["model"] for r in requests} == {"one-4b"}
     assert "42" in json.dumps(requests[-1]["messages"])
-    if protocol == "native":
-        assert requests[-1]["messages"][-1]["role"] == "tool"
-        assert requests[-1]["messages"][-1]["tool_name"] == "lookup"
+    if protocol in {"native", "qwen_xml"}:
+        assert requests[-1]["messages"][-1]["role"] == "user"
+        assert requests[-1]["messages"][-1]["content"].startswith("<tool_response>\n")
+        assert requests[-1]["messages"][-1]["content"].endswith("\n</tool_response>")
     else:
         assert requests[-1]["format"]["oneOf"]

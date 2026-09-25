@@ -158,3 +158,86 @@ def test_safe_workspace_markdown_image_renders_inline():
     assert 'class="inline-markdown-media"' in html
     assert 'src="/api/files/reports/latency.png"' in html
     assert 'alt="Latency chart"' in html
+
+
+def _stream_snapshot(markdown: str, *, final: bool = False) -> dict:
+    root = Path(__file__).resolve().parents[1]
+    module = root / "webui" / "static" / "rich_output.js"
+    script = f"""
+const rich = require({json.dumps(str(module))});
+console.log(JSON.stringify(rich.streamingMarkdownSnapshot({json.dumps(markdown)}, {{final:{str(final).lower()}}})));
+"""
+    result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    return json.loads(result.stdout)
+
+
+def test_streaming_snapshot_leaves_conversational_text_live():
+    snap = _stream_snapshot("This is ordinary conversational text arriving now")
+    assert snap == {
+        "visible": "This is ordinary conversational text arriving now",
+        "pending": "",
+        "kind": "",
+    }
+
+
+def test_streaming_snapshot_buffers_incomplete_fenced_block():
+    snap = _stream_snapshot("Intro text.\n\n```python\nprint('half')")
+    assert snap["visible"] == "Intro text.\n\n"
+    assert snap["pending"].startswith("```python")
+    assert snap["kind"] == "fence"
+
+
+def test_streaming_snapshot_releases_completed_fenced_block():
+    text = "Intro text.\n\n```python\nprint('done')\n```\n"
+    snap = _stream_snapshot(text)
+    assert snap["visible"] == text
+    assert snap["pending"] == ""
+
+
+def test_streaming_snapshot_buffers_table_until_terminator_arrives():
+    partial = "Before\n\n| Name | Value |\n| --- | ---: |\n| A | 1 |"
+    snap = _stream_snapshot(partial)
+    assert snap["visible"] == "Before\n\n"
+    assert snap["pending"].startswith("| Name | Value |")
+    assert snap["kind"] == "table"
+
+    complete = partial + "\n\nAfter"
+    snap = _stream_snapshot(complete)
+    assert snap["visible"] == complete
+    assert snap["pending"] == ""
+
+
+def test_streaming_snapshot_buffers_email_card_until_final():
+    text = "Here is the draft:\n\nTo: user@example.com\nSubject: Hello\n\nBody is still streaming"
+    snap = _stream_snapshot(text)
+    assert snap["visible"] == "Here is the draft:\n\n"
+    assert snap["kind"] == "email"
+    final = _stream_snapshot(text, final=True)
+    assert final["visible"] == text
+    assert final["pending"] == ""
+
+
+def test_streaming_snapshot_buffers_trailing_list_until_block_closes():
+    partial = "Intro\n\n- first item\n- second item"
+    snap = _stream_snapshot(partial)
+    assert snap["visible"] == "Intro\n\n"
+    assert snap["kind"] == "list"
+
+    still_partial = partial + "\n"
+    snap = _stream_snapshot(still_partial)
+    assert snap["kind"] == "list"
+
+    complete = partial + "\n\nDone"
+    snap = _stream_snapshot(complete)
+    assert snap["visible"] == complete
+    assert snap["pending"] == ""
+
+
+def test_streaming_snapshot_buffers_specialized_weather_line_until_newline():
+    partial = "Forecast:\n\nTemperature: 18°C"
+    snap = _stream_snapshot(partial)
+    assert snap["visible"] == "Forecast:\n\n"
+    assert snap["kind"] == "weather"
+    complete = partial + "\n"
+    snap = _stream_snapshot(complete)
+    assert snap["visible"] == complete
