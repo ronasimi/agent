@@ -1,8 +1,8 @@
 """Persistent routing calibration and compact candidate-scoring helpers.
 
-The actual route choice is made by :mod:`al_agent.system1_router`.  This module
-contains only durable outcome statistics plus the cheap lexical prefilter used to
-keep the tiny model prompt bounded.
+The actual route choice is made by :mod:`al_agent.deterministic_router`. This module
+contains durable outcome statistics plus the cheap lexical scoring helpers used to
+keep the resident main model's active schema set bounded.
 """
 
 from __future__ import annotations
@@ -24,6 +24,10 @@ _STOP = {
     "get", "give", "how", "i", "in", "is", "it", "me", "my", "of", "on",
     "or", "please", "show", "that", "the", "then", "this", "to", "use",
     "using", "want", "what", "when", "where", "which", "with", "you",
+    # Generic task-control verbs/formatting words add noise to catalog routing.
+    "actual", "again", "clearly", "current", "include", "one", "read",
+    "report", "result", "results", "retrieve", "run", "same", "state",
+    "step", "tool", "usage",
 }
 
 # Routing remains primarily request/schema based. Learned evidence may move a
@@ -100,6 +104,11 @@ def _base_score(text: str, schema: dict) -> float:
     name_tokens = set(_tokens(name.replace("_", " ")))
     desc_tokens = set(_tokens(description))
     if not q_tokens:
+        return 0.0
+    # Argument compatibility is only a tie-breaker.  An unrelated schema must
+    # never receive a non-zero routing score merely because it has no required
+    # arguments; otherwise casual conversation activates arbitrary tools.
+    if not (q_tokens & (name_tokens | desc_tokens)):
         return 0.0
 
     name_coverage = len(q_tokens & name_tokens) / max(1, len(name_tokens))

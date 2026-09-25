@@ -117,12 +117,13 @@ def _schema(name: str, description: str, properties: dict, required: list[str]) 
 DISCOVERY_SCHEMAS = [
     _schema(
         "tool_search",
-        "Search the available tool catalog by name or description. Returns only compact "
-        "candidate metadata and may activate one router-selected candidate for the next model call. "
-        "Full schemas are supplied only through the native tools field. Empty query browses names.",
+        "Search the available tool catalog by name or description. Returns compact ranked "
+        "candidate metadata and automatically activates the relevant candidate schemas for the next "
+        "resident-model call. Full schemas are supplied only through the native tools field. "
+        "Empty query browses names.",
         {
             "query": {"type": "string"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 6},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 8},
             "offset": {"type": "integer", "minimum": 0},
         },
         [],
@@ -136,7 +137,7 @@ DISCOVERY_SCHEMAS = [
                 "type": "array",
                 "items": {"type": "string"},
                 "minItems": 1,
-                "maxItems": 6,
+                "maxItems": 8,
                 "uniqueItems": True,
             }
         },
@@ -175,12 +176,13 @@ class ToolSession:
         }
         self.catalog.update(self.control)
         self.uncertain_mutations: set[str] = set()
-        # ``decision_engine`` remains as a compatibility keyword for older
-        # integrations; the runtime now supplies a SystemOneRouter.
+        # Compatibility keywords are retained for integrations, but production
+        # now supplies a non-generative deterministic routing engine.
         self.router = router or decision_engine
-        self.routed_tools: set[str] = set(initial_active or [])
+        self.routed_tools: set[str] = set()
         if initial_active:
-            self._activate(list(initial_active))
+            activation = self._activate(list(initial_active), allow_trim=True)
+            self.routed_tools.update(activation.get("activated", []))
 
     @property
     def schemas(self) -> list[dict]:
@@ -201,7 +203,9 @@ class ToolSession:
             )
         return validate_arguments(schema, args)
 
-    def _activate(self, names: list[str], *, replace: bool = False) -> dict:
+    def _activate(
+        self, names: list[str], *, replace: bool = False, allow_trim: bool = False
+    ) -> dict:
         missing = [n for n in names if n not in self.catalog]
         if missing:
             raise ValueError("Unknown tools: " + ", ".join(missing))
@@ -216,6 +220,13 @@ class ToolSession:
             len(candidate) > self.max_active
             or len(json.dumps(list(candidate.values()))) > self.max_schema_chars
         ):
+            if allow_trim and candidate:
+                # Automatic candidates are ordered by relevance; trim the least
+                # relevant tail until the schema budget fits. Explicit load_tools
+                # remains strict and still reports oversize requests.
+                dropped = candidate.popitem(last=True)[0]
+                evicted.append(dropped)
+                continue
             oldest = next(iter(candidate))
             if oldest in names:
                 raise ValueError(
@@ -225,23 +236,24 @@ class ToolSession:
         self.active = candidate
         return {
             "ok": True,
-            "activated": [n for n in names if n not in self.control],
+            "activated": [n for n in names if n in self.active and n not in self.control],
             "evicted": evicted,
         }
 
-    def _search(self, query: str = "", limit: int = 6, offset: int = 0) -> dict:
-        """Return compact discovery metadata and activate only the best match.
+    def _search(self, query: str = "", limit: int = 8, offset: int = 0) -> dict:
+        """Return compact discovery metadata and activate a bounded relevant set.
 
-        Complete JSON schemas never appear in the tool result. They are carried
-        only by the next request's native ``tools`` field, avoiding duplicate
-        schema text in both conversation history and the prompt prefix.
+        Search itself never invokes a model. Complete schemas remain out of the
+        observation payload and are supplied only through the next request's
+        native ``tools`` field.
         """
         available = [
             schema for name, schema in self.catalog.items() if name not in self.control
         ]
-        candidates = []
-        selected = ""
-        route_confidence = 0.0
+        candidates: list[dict] = []
+        selected_names: list[str] = []
+        confidence = 0.0
+        selection_mode = "browse"
         if self.router is not None and query.strip():
             decision = self.router.decide(query, available, self.metadata)
             ranked = list(decision.candidates)
@@ -255,14 +267,12 @@ class ToolSession:
                 for row in window
             ]
             total = len(ranked)
-            selected = decision.selected[0] if decision.selected else ""
-            route_confidence = float(decision.confidence)
-            if selected:
-                self.routed_tools.add(selected)
+            selected = set(decision.selected)
+            selected_names = [row.name for row in window if row.name in selected]
+            confidence = float(decision.confidence)
+            selection_mode = decision.tier
         else:
-            names = sorted(
-                name for name in self.catalog if name not in self.control
-            )
+            names = sorted(name for name in self.catalog if name not in self.control)
             window_names = names[offset : offset + limit]
             candidates = [
                 {
@@ -274,20 +284,24 @@ class ToolSession:
                 for name in window_names
             ]
             total = len(names)
-            # Compatibility for standalone/unit-test ToolSession instances that
-            # have no SystemOneRouter. Production sessions always provide the
-            # router and therefore never use this as an intent decision path.
+            # Standalone/unit-test sessions without a routing engine preserve the
+            # historical deterministic browse behavior. Production always supplies
+            # DeterministicToolRouter, so this path performs no intent routing.
             if self.router is None and candidates:
-                selected = candidates[0]["name"]
+                selected_names = [candidates[0]["name"]]
+                selection_mode = "browse_first"
 
-        # A failed/low-confidence search must not leave the previous task schema
-        # active, otherwise the next main-model request would silently grow.
-        activation = self._activate([selected], replace=True) if selected else self._activate([], replace=True)
+        # Replace rather than accumulate schemas: each discovery step presents a
+        # fresh bounded candidate set and prevents prompt growth across a turn.
+        activation = self._activate(selected_names, replace=True, allow_trim=True)
+        activated_names = list(activation.get("activated", []))
+        self.routed_tools.update(activated_names)
         return {
             "ok": True,
             "candidates": candidates,
-            "selected": selected or None,
-            "confidence": round(route_confidence, 3) if selected else None,
+            "selected": activated_names[0] if len(activated_names) == 1 else None,
+            "selection_mode": selection_mode,
+            "confidence": round(confidence, 3) if selected_names else None,
             "activated": activation.get("activated", []),
             "evicted": activation.get("evicted", []),
             "total": total,

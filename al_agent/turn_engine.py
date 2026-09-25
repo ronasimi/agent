@@ -25,8 +25,7 @@ from .events import (
     release_inference_lock,
     release_turn_lock,
 )
-from .model_traces import record_model_trace, router_trace_callback
-from .system1_router import SystemOneRouter
+from .model_traces import record_model_trace
 from .prompts import append_and_save, build_system_prompt
 from .tool_session import ToolSession
 
@@ -175,30 +174,7 @@ def handle_user_turn(
                 name, arguments, binding=(functions[name], metadata[name])
             )
 
-        @contextmanager
-        def router_slot():
-            handle = get_inference()
-            try:
-                yield
-            finally:
-                free_inference(handle)
-
-        routing_engine = SystemOneRouter(
-            overrides.get("ROUTER_OLLAMA", state.ROUTER_OLLAMA),
-            model=state.ROUTER_MODEL,
-            options=state.ROUTER_OPTIONS,
-            keep_alive=state.ROUTER_KEEP_ALIVE,
-            candidate_count=state.ROUTER_CANDIDATES,
-            route_threshold=state.ROUTER_ROUTE_THRESHOLD,
-            inference_slot=router_slot,
-            prefix_max_bytes=state.ROUTER_PREFIX_MAX_BYTES,
-            description_chars=state.ROUTER_DESCRIPTION_CHARS,
-            on_metrics=router_trace_callback(
-                path=state.MODEL_TRACE_PATH, enabled=state.MODEL_TRACE_ENABLED,
-                max_bytes=state.MODEL_TRACE_MAX_BYTES, model=state.ROUTER_MODEL,
-                options=state.ROUTER_OPTIONS, conversation_id=cid, turn_id=turn_id,
-            ),
-        )
+        routing_engine = state.TOOL_ROUTER
         decision = routing_engine.decide(user_input, schemas, metadata)
         routing_context_key = decision.context_key
         for selected_name in decision.selected:
@@ -209,7 +185,7 @@ def handle_user_turn(
                 event_type="route_selected",
                 detail=(
                     f"tier={decision.tier}; confidence={decision.confidence:.3f}; "
-                    f"choice={decision.raw_choice[:24]}"
+                    "engine=deterministic"
                 ),
             )
         session = ToolSession(
@@ -231,7 +207,7 @@ def handle_user_turn(
             rolling_summary="",
             recalled_context="",
             recent_messages=messages[-12:],
-            policy_note="Autonomous single-model tool selection",
+            policy_note="Resident 4B tool selection with deterministic catalog prefilter",
             tool_schemas=session.schemas,
             requirements=[],
         )

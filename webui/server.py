@@ -71,77 +71,61 @@ SOURCE_ROOT = _DEFAULT_SOURCE_ROOT
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    """Prime real prefixes at startup and repair router residency while idle."""
+    """Prime the one resident main model without loading a competing router."""
     import threading
-    import time
     from al_agent.model_residency import background_inference_slot
     from al_agent.model_protocol import warm_model
-    from al_agent.model_traces import router_trace_callback
-    from al_agent.router_warmup import RouterPrefixWarmer
-    from al_agent.system1_router import SystemOneRouter
     from al_agent.tool_session import ToolSession
     from tools.catalog import catalog_snapshot
     from tools.runtime import record_monitor_state
-    stop = threading.Event()
 
-    def warm():
-        router = SystemOneRouter(
-            agent_runtime.ROUTER_WARM_OLLAMA,
-            model=agent_runtime.ROUTER_MODEL, options=agent_runtime.ROUTER_OPTIONS,
-            keep_alive=agent_runtime.ROUTER_KEEP_ALIVE,
-            prefix_max_bytes=agent_runtime.ROUTER_PREFIX_MAX_BYTES,
-            description_chars=agent_runtime.ROUTER_DESCRIPTION_CHARS,
-            on_metrics=router_trace_callback(
-                path=agent_runtime.MODEL_TRACE_PATH, enabled=agent_runtime.MODEL_TRACE_ENABLED,
-                max_bytes=agent_runtime.MODEL_TRACE_MAX_BYTES, model=agent_runtime.ROUTER_MODEL,
-                options=agent_runtime.ROUTER_OPTIONS,
-            ),
-        )
-        warmer = RouterPrefixWarmer(
-            router, catalog=lambda: catalog_snapshot()[0],
-            resident_models=agent_runtime.ROUTER_STATUS_OLLAMA.ps,
-            inference_slot=background_inference_slot,
-            retry_seconds=agent_runtime.ROUTER_CFG.get("warmup_retry_seconds", 60),
-            main_model=agent_runtime.MODEL,
-            status_sink=lambda status: record_monitor_state("agent.router_cache", status),
-        )
-        interval = max(5, float(agent_runtime.ROUTER_CFG.get("residency_check_seconds", 30)))
-        main_primed = False
-        next_main_attempt = 0.0
-        while not stop.is_set():
-            if not main_primed and time.monotonic() >= next_main_attempt:
-                try:
-                    # Release the shared slot between model requests so a newly
-                    # arrived user turn takes priority over the router warmup.
-                    with background_inference_slot():
-                        next_main_attempt = time.monotonic() + 60
-                        schemas, _functions, metadata = catalog_snapshot()
-                        session = ToolSession(
-                            schemas, lambda _name, _arguments: None, metadata,
-                            max_active=int(agent_runtime.AGENT_CFG.get("max_active_tools", 16)),
-                            max_schema_chars=int(agent_runtime.AGENT_CFG.get("max_tool_schema_chars", 20000)),
-                        )
-                        main_primed = warm_model(
-                            agent_runtime.OLLAMA, agent_runtime.MODEL,
-                            options=agent_runtime.MAIN_OPTIONS, keep_alive=agent_runtime.AGENT_CFG.get("keep_alive", -1),
-                            system_prompt=(agent_runtime.turn_engine.build_session_system_prompt(session)
-                                           if agent_runtime.WARMUP_PRIME_PREFIX else ""),
-                            tools=(session.schemas if agent_runtime.WARMUP_CFG.get("prime_tool_schemas", True) else None),
-                            think=False,
-                        )
-                except Exception:
-                    pass  # Retry while idle; foreground calls can load on demand.
-            if not stop.is_set():
-                warmer.tick()
-            stop.wait(interval)
+    def warm() -> None:
+        status = {"state": "warming", "model": agent_runtime.MODEL}
+        record_monitor_state("agent.model_warmup", status)
+        try:
+            with background_inference_slot():
+                schemas, _functions, metadata = catalog_snapshot()
+                session = ToolSession(
+                    schemas,
+                    lambda _name, _arguments: None,
+                    metadata,
+                    max_active=int(agent_runtime.AGENT_CFG.get("max_active_tools", 16)),
+                    max_schema_chars=int(agent_runtime.AGENT_CFG.get("max_tool_schema_chars", 20000)),
+                )
+                ok = warm_model(
+                    agent_runtime.OLLAMA,
+                    agent_runtime.MODEL,
+                    options=agent_runtime.MAIN_OPTIONS,
+                    keep_alive=agent_runtime.AGENT_CFG.get("keep_alive", -1),
+                    system_prompt=(
+                        agent_runtime.turn_engine.build_session_system_prompt(session)
+                        if agent_runtime.WARMUP_PRIME_PREFIX
+                        else ""
+                    ),
+                    tools=(
+                        session.schemas
+                        if agent_runtime.WARMUP_CFG.get("prime_tool_schemas", True)
+                        else None
+                    ),
+                    think=False,
+                )
+            record_monitor_state(
+                "agent.model_warmup",
+                {"state": "primed" if ok else "failed", "model": agent_runtime.MODEL},
+            )
+        except Exception as exc:
+            record_monitor_state(
+                "agent.model_warmup",
+                {
+                    "state": "failed",
+                    "model": agent_runtime.MODEL,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
 
     if agent_runtime.WARMUP_ENABLED:
-        thread = threading.Thread(target=warm, name="model-warmup", daemon=True)
-        thread.start()
-    try:
-        yield
-    finally:
-        stop.set()
+        threading.Thread(target=warm, name="model-warmup", daemon=True).start()
+    yield
 
 
 app = FastAPI(title="Al Agent Web UI", docs_url=None, redoc_url=None, lifespan=_lifespan)

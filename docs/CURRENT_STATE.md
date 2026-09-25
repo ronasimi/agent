@@ -1,22 +1,19 @@
 # Current state
 
-The foreground harness uses an autonomous action/result loop with `agent-main:4b` plus a resident stateless 0.5B System-1 router for tool selection.
+The foreground harness uses one resident `agent-main:4b` model for conversation, tool decisions, execution planning, research, and background inference. The former 0.5B System-1 routing model has been removed.
 
 - Main alias: `agent-main:4b`.
-- Router model: `qwen2.5:0.5b` by default, configurable with `AGENT_ROUTER_MODEL`.
-- Default protocol: Qwen XML-style tool calls (`qwen_xml`) with complete schemas supplied only through Ollama's native `tools` field.
+- No secondary routing model or routing-model Ollama client.
+- Default protocol: Qwen XML-style tool calls (`qwen_xml`) with complete active schemas supplied only through Ollama's native `tools` field.
 - Main context: 32,768 tokens; default output allowance: 2,048 tokens.
-- Router context: 2,048 tokens, deterministic decoding, four output tokens, up to eight compact candidates.
-- Router input is stateless: current request + compact candidate metadata only; no conversation history or full schemas.
-- Router prompt/request/candidate state is cleared at turn completion.
-- Persistent routing calibration is stored in `/app/memory/knowledge.db` and survives restarts.
-- Low-confidence/unavailable router decisions fall back to compact `tool_search`/`load_tools`; no task schema is guessed.
+- Deterministic catalog prefilter: up to eight relevant candidate schemas by default.
+- High-confidence matches activate one schema; ambiguous/multi-intent requests activate a bounded relevant set.
+- `tool_search` performs no model inference and replaces, rather than accumulates, active task schemas.
+- Persistent routing calibration remains in `/app/memory/knowledge.db` and can reorder only already-related candidates.
+- Startup warmup primes only the main model; no router residency maintenance runs.
 - Background consumers and legacy main-role aliases continue to use `agent-main:4b`.
-- Text-only image-understanding limitation remains explicit.
 - Existing SQLite data, tool implementations, UI, jobs, recipes, and integration controls are preserved.
 
 ## Validation
 
-The Qwen XML protocol, System-1 router, persistent calibration, action-loop, argument-coercion, warmup, and hybrid-streaming focused tests pass offline. SDK-backed integration tests require the `ollama` Python package and live-model tests remain opt-in. Run `diagnostics/validate_ollama.py` on the target host before relying on the deployment.
-
-See `SYSTEM1_ROUTER_2026-09-25.md` for the router contract. Historical design documents are not descriptions of the current routing path.
+Run the offline test suite, deterministic routing benchmark, simulator, and the live Ollama conformance test on the target host. The bug-report runtime snapshot now reports `deterministic_catalog_prefilter`, `separate_model: false`, and `llm_calls: 0` for routing.

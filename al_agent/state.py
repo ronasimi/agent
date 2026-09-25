@@ -12,20 +12,20 @@ from tools.recipe_compat import seed_builtin_recipes
 from tools.recipe_store import init_recipe_store
 from tools.working_state import WorkingStateStore
 
+from .deterministic_router import DeterministicToolRouter
+
 CONFIG_PATH = str(config_path())
 CONFIG = load_config()
 AGENT_CFG = CONFIG["agent"]
 MODEL = AGENT_CFG["model"]
 MAIN_OPTIONS = dict(AGENT_CFG["main_options"])
-ROUTER_CFG = dict(AGENT_CFG.get("router") or {})
-ROUTER_MODEL = str(ROUTER_CFG.get("model", "qwen2.5:0.5b"))
-ROUTER_OPTIONS = dict(ROUTER_CFG.get("options") or {"num_ctx": 8192, "temperature": 0, "num_predict": 4})
-ROUTER_KEEP_ALIVE = ROUTER_CFG.get("keep_alive", -1)
-ROUTER_CANDIDATES = int(ROUTER_CFG.get("candidates", 8))
-ROUTER_ROUTE_THRESHOLD = float(ROUTER_CFG.get("route_threshold", 0.62))
-ROUTER_TRANSPORT_TIMEOUT = float(ROUTER_CFG.get("timeout_seconds", 15))
-ROUTER_PREFIX_MAX_BYTES = int(ROUTER_CFG.get("prefix_max_bytes", 16000))
-ROUTER_DESCRIPTION_CHARS = int(ROUTER_CFG.get("description_chars", 48))
+TOOL_ROUTING_CFG = dict(AGENT_CFG.get("tool_routing") or {})
+TOOL_ROUTING_CANDIDATES = int(TOOL_ROUTING_CFG.get("candidate_limit", 8))
+TOOL_ROUTING_AUTO_THRESHOLD = float(
+    TOOL_ROUTING_CFG.get("auto_activate_threshold", 0.80)
+)
+TOOL_ROUTING_AUTO_MARGIN = float(TOOL_ROUTING_CFG.get("auto_activate_margin", 0.20))
+TOOL_ROUTING_MIN_SCORE = float(TOOL_ROUTING_CFG.get("min_candidate_score", 0.18))
 OLLAMA_HOST = AGENT_CFG["host"]
 os.environ["OLLAMA_HOST"] = OLLAMA_HOST
 # Compatibility names do not define roles or alternate runners.
@@ -73,10 +73,13 @@ MODEL_TRACE_ENABLED = bool(MODEL_TRACE_CFG.get("enabled", True))
 MODEL_TRACE_PATH = str(MODEL_TRACE_CFG.get("path", "/app/memory/model_calls.jsonl"))
 MODEL_TRACE_MAX_BYTES = int(MODEL_TRACE_CFG.get("max_bytes", 268435456))
 OLLAMA = Client(host=OLLAMA_HOST, timeout=MODEL_TRANSPORT_TIMEOUT)
-ROUTER_OLLAMA = Client(host=OLLAMA_HOST, timeout=ROUTER_TRANSPORT_TIMEOUT)
-ROUTER_WARM_OLLAMA = Client(host=OLLAMA_HOST, timeout=float(ROUTER_CFG.get("warmup_timeout_seconds", 60)))
-ROUTER_STATUS_OLLAMA = Client(host=OLLAMA_HOST, timeout=2)
 init_db()
+TOOL_ROUTER = DeterministicToolRouter(
+    candidate_count=TOOL_ROUTING_CANDIDATES,
+    auto_activate_threshold=TOOL_ROUTING_AUTO_THRESHOLD,
+    auto_activate_margin=TOOL_ROUTING_AUTO_MARGIN,
+    min_candidate_score=TOOL_ROUTING_MIN_SCORE,
+)
 if RECIPES_ENABLED:
     init_recipe_store()
     if RECIPE_CFG.get("seed_builtin_compatibility", True):

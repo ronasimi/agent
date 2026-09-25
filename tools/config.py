@@ -57,27 +57,28 @@ def normalize_config(raw: dict) -> dict:
     if int(options["num_ctx"]) < 2048:
         raise ValueError("agent.main_options.num_ctx must be at least 2048")
     agent.update(model=model, main_options=options)
-    router = dict(agent.get("router") or {})
-    router["model"] = str(
-        os.environ.get("AGENT_ROUTER_MODEL")
-        or router.get("model")
-        or "qwen2.5:0.5b"
-    ).strip()
-    router.setdefault("keep_alive", -1)
-    router.setdefault("timeout_seconds", 15)
-    router.setdefault("candidates", 8)
-    router.setdefault("route_threshold", 0.62)
-    router.setdefault("prefix_max_bytes", 16000)
-    router.setdefault("description_chars", 48)
-    router.setdefault("warmup_timeout_seconds", 60)
-    router.setdefault("residency_check_seconds", 30)
-    router.setdefault("warmup_retry_seconds", 60)
-    router_options = dict(router.get("options") or {})
-    router_options.setdefault("num_ctx", 8192)
-    router_options.setdefault("temperature", 0)
-    router_options.setdefault("num_predict", 4)
-    router["options"] = router_options
-    agent["router"] = router
+    # Legacy model-based router settings are intentionally ignored. Tool routing
+    # is now a deterministic catalog prefilter feeding the same resident model.
+    legacy_router = agent.pop("router", None)
+    if legacy_router:
+        warnings.warn(
+            "Legacy agent.router settings are ignored; tool routing is deterministic "
+            "and uses the resident main model.",
+            stacklevel=2,
+        )
+    routing = dict(agent.get("tool_routing") or {})
+    routing.setdefault("candidate_limit", 8)
+    routing.setdefault("auto_activate_threshold", 0.80)
+    routing.setdefault("auto_activate_margin", 0.20)
+    routing.setdefault("min_candidate_score", 0.18)
+    if not 1 <= int(routing["candidate_limit"]) <= 8:
+        raise ValueError("agent.tool_routing.candidate_limit must be between 1 and 8")
+    for key in ("auto_activate_threshold", "auto_activate_margin", "min_candidate_score"):
+        value = float(routing[key])
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"agent.tool_routing.{key} must be between 0 and 1")
+        routing[key] = value
+    agent["tool_routing"] = routing
     requested_protocol = str(agent.get("tool_protocol") or "qwen_xml").strip().lower()
     if requested_protocol not in {"qwen_xml", "native"}:
         warnings.warn(

@@ -16,6 +16,3 @@ if ! ollama show "$agent_model_alias" >/dev/null 2>&1; then
   fi
 fi
 ollama show "$agent_model_alias" --modelfile
-# Small stateless System-1 router used for tool selection.
-router_model="${AGENT_ROUTER_MODEL:-qwen2.5:0.5b}"
-ollama pull "$router_model"
