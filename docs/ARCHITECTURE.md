@@ -1,10 +1,10 @@
 # Architecture
 
-This document describes the autonomous, single-model runtime. Older dated design documents describe earlier versions.
+This document describes the autonomous runtime with one main model and a tiny stateless System-1 routing model. Older dated design documents describe earlier versions.
 
 ## Model and protocol
 
-tools.config.load_config normalizes every inference consumer to agent.model and agent.main_options. The default model alias is agent-main:9b, backed by the distilled Qwen3.8 9B Q4_K_M GGUF. Compatibility constants named FAST_MODEL, REPORT_MODEL, or COMPACTION_MODEL all refer to this same model. There is no specialist model escalation, embedding runner, vision sidecar, or model-residency swap.
+tools.config.load_config normalizes task inference consumers to agent.model and agent.main_options. The main runtime alias is agent-main:4b. Compatibility constants named FAST_MODEL, REPORT_MODEL, or COMPACTION_MODEL still refer to that main model. Tool selection is the exception: a resident qwen2.5:0.5b System-1 router receives only a compact current-turn shortlist and never conversation history or full schemas.
 
 The default protocol is `qwen_xml`. Tool definitions are sent through Ollama's native `tools` request field so the model's Jinja template serializes them into its `<tools>` system block. The model then emits invocations using its XML grammar:
 
@@ -38,9 +38,11 @@ The harness parses complete XML envelopes, validates and schema-coerces paramete
 
 ## Tool discovery
 
-A turn starts with the available tool names and two discovery schemas. The model chooses exact names with load_tools, or searches names and descriptions with tool_search. Discovery returns descriptions and full argument schemas and activates the selected tools. It never executes those tools itself.
+A cheap lexical prefilter narrows the registered catalog to at most eight compact name/description candidates. The 0.5B System-1 router then chooses one candidate (or no tool) using a stateless Ollama `generate` call. Only the selected task schema is exposed to the 4B model alongside the stable `tool_search`/`load_tools` controls.
 
-Search scoring is ordinary metadata retrieval over the model's explicit search query. User text is never fed into a routing classifier or keyword-to-tool mapping. Empty searches support alphabetical pagination. Activation has tool-count and serialized-schema limits; older loaded tools can be evicted and reloaded. An oversized activation fails atomically.
+`tool_search` returns compact metadata only; complete schemas never appear in its observation. A confident search replaces the active task schema with one router-selected schema. A low-confidence or failed router decision clears task schemas and leaves the 4B model with discovery controls so it can explicitly search/load a capability. `load_tools` remains an explicit escape hatch when the main model needs a named tool from compact discovery results.
+
+Persistent global/context routing outcomes are stored in the main SQLite database and calibrate router confidence with a bounded adjustment. Infrastructure timeouts do not penalize a tool. Router prompt/request/candidate state is cleared in the turn `finally` path, while the learned SQLite calibration persists across runs.
 
 Builtin providers continue to register tools declaratively. Add an implementation and a TOOL_SPECS entry under tools/provider_groups. No modification of the action loop is needed. Custom tools still use the existing validation and registration mechanisms.
 
@@ -75,4 +77,4 @@ Slash commands remain explicit user interface controls outside the natural-langu
 
 A blocking tool remains subject to its own timeout or isolated executor; the turn deadline is checked at execution boundaries and while model chunks arrive. Transport read timeout bounds stalled reads. Stop does not promise immediate preemption of every third-party operation.
 
-The default text-only model cannot inspect pixels. Autonomous selection also does not guarantee that the 9B model will choose the right tool or produce a correct answer. The live smoke test and opt-in model tests must be run on the target Ollama deployment.
+The default text-only main model cannot inspect pixels. The 0.5B router and 4B main model can still choose an incorrect capability or produce an incorrect answer. The live smoke test and opt-in model tests must be run on the target Ollama deployment.

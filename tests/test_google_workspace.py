@@ -383,7 +383,8 @@ def test_google_tools_are_discoverable_readonly_and_have_bounded_schemas():
     from al_agent.tool_session import ToolSession
     session = ToolSession(tools.TOOL_SCHEMAS, lambda *a: None, tools.TOOL_METADATA)
     loaded = session.invoke("load_tools", {"names": sorted(names)})
-    assert {s["function"]["name"] for s in loaded["schemas"]} == names
+    assert set(loaded["activated"]) == names
+    assert "schemas" not in loaded
     schema = tools.get_tool_schema("gmail_read_message")["function"]["parameters"]
     assert schema["properties"]["max_body_chars"]["maximum"] == 20_000
     assert "message_id" in schema["required"]

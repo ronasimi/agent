@@ -25,9 +25,21 @@ from .events import (
     release_inference_lock,
     release_turn_lock,
 )
-from .model_traces import record_model_trace
+from .model_traces import record_model_trace, router_trace_callback
+from .system1_router import SystemOneRouter
 from .prompts import append_and_save, build_system_prompt
 from .tool_session import ToolSession
+
+
+def _is_transport_error_message(message: dict) -> bool:
+    if message.get("role") != "assistant":
+        return False
+    text = str(message.get("content") or "").strip().lower()
+    return (
+        text.startswith("model request failed:")
+        or "model request failed: timed out" in text
+        or (text.startswith("turn failed:") and "timed out" in text)
+    )
 
 
 def _history_for_protocol(messages: list[dict], protocol: str) -> list[dict]:
@@ -45,6 +57,9 @@ def _history_for_protocol(messages: list[dict], protocol: str) -> list[dict]:
     while index < len(messages):
         msg = dict(messages[index])
         msg.pop("images", None)
+        if _is_transport_error_message(msg):
+            index += 1
+            continue
         if msg.get("role") not in {"system", "tool"}:
             output.append(msg)
         index += 1
@@ -120,6 +135,10 @@ def handle_user_turn(
     work_state = None
     cid = get_active_conversation_id()
     success = False
+    routing_engine = None
+    session = None
+    routing_context_key = "_general"
+    routing_tool_status: dict[str, list[bool]] = {}
     cfg = state.AGENT_CFG
     protocol = str(cfg.get("tool_protocol", "qwen_xml"))
     set_foreground_turn(
@@ -156,12 +175,51 @@ def handle_user_turn(
                 name, arguments, binding=(functions[name], metadata[name])
             )
 
+        @contextmanager
+        def router_slot():
+            handle = get_inference()
+            try:
+                yield
+            finally:
+                free_inference(handle)
+
+        routing_engine = SystemOneRouter(
+            overrides.get("ROUTER_OLLAMA", state.ROUTER_OLLAMA),
+            model=state.ROUTER_MODEL,
+            options=state.ROUTER_OPTIONS,
+            keep_alive=state.ROUTER_KEEP_ALIVE,
+            candidate_count=state.ROUTER_CANDIDATES,
+            route_threshold=state.ROUTER_ROUTE_THRESHOLD,
+            inference_slot=router_slot,
+            prefix_max_bytes=state.ROUTER_PREFIX_MAX_BYTES,
+            description_chars=state.ROUTER_DESCRIPTION_CHARS,
+            on_metrics=router_trace_callback(
+                path=state.MODEL_TRACE_PATH, enabled=state.MODEL_TRACE_ENABLED,
+                max_bytes=state.MODEL_TRACE_MAX_BYTES, model=state.ROUTER_MODEL,
+                options=state.ROUTER_OPTIONS, conversation_id=cid, turn_id=turn_id,
+            ),
+        )
+        decision = routing_engine.decide(user_input, schemas, metadata)
+        routing_context_key = decision.context_key
+        for selected_name in decision.selected:
+            routing_engine.record(
+                selected_name,
+                routing_context_key,
+                None,
+                event_type="route_selected",
+                detail=(
+                    f"tier={decision.tier}; confidence={decision.confidence:.3f}; "
+                    f"choice={decision.raw_choice[:24]}"
+                ),
+            )
         session = ToolSession(
             schemas,
             execute,
             metadata,
             max_active=int(cfg.get("max_active_tools", 16)),
             max_schema_chars=int(cfg.get("max_tool_schema_chars", 20000)),
+            router=routing_engine,
+            initial_active=list(decision.selected),
         )
         messages[0]["content"] = build_session_system_prompt(session)
         work_state = WorkingStateStore(
@@ -192,6 +250,12 @@ def handle_user_turn(
                     observation_id=payload.get("observation_id", ""),
                 )
                 work_state.update_tools(session.schemas)
+                tool_name = str(payload["tool"])
+                tool_ok = str(payload.get("status")) == "ok"
+                routing_tool_status.setdefault(tool_name, []).append(tool_ok)
+                # Route learning is task-outcome based. A tool can execute
+                # successfully and still be the wrong capability, so do not
+                # train confidence merely because the primitive returned OK.
             if kind in {"tool_start", "tool_result"}:
                 payload["name"] = payload["tool"]
             emit_event(kind, **payload)
@@ -261,6 +325,16 @@ def handle_user_turn(
             think_supported=bool(cfg.get("supports_thinking", False)),
         )
         success = True
+        if routing_engine is not None:
+            for tool_name in session.routed_tools:
+                outcomes = routing_tool_status.get(tool_name, [])
+                if any(outcomes):
+                    routing_engine.record(
+                        tool_name,
+                        routing_context_key,
+                        1.0,
+                        event_type="task_success",
+                    )
     except Exception as exc:  # noqa: BLE001 - UI/persistence boundary must finalize failed turns
         # Persist an honest termination record. Never report a deadline/error as
         # task completion, and never synthesize success from earlier side effects.
@@ -269,8 +343,43 @@ def handle_user_turn(
             if isinstance(exc, LoopStopped)
             else f"Turn failed: {type(exc).__name__}: {exc}"
         )
-        if turn_lock is not None:
-            append_fn(messages, {"role": "assistant", "content": content})
+        # Transport/runtime failures are UI diagnostics, not conversation. Do
+        # not persist them as assistant turns because they poison retries and
+        # grow the next model prompt. Existing stored transport errors are also
+        # filtered by _history_for_protocol above.
+        infrastructure_failure = (
+            "model request failed:" in content.lower()
+            or "timed out" in content.lower()
+            or "timeout" in content.lower()
+        )
+        if routing_engine is not None:
+            if infrastructure_failure:
+                for tool_name in getattr(session, "routed_tools", ()):
+                    routing_engine.record(
+                        tool_name, routing_context_key, None,
+                        event_type="infrastructure_failure", detail=content[:240]
+                    )
+            else:
+                routing_related_failure = any(
+                    marker in content.lower()
+                    for marker in (
+                        "repeated tool failures",
+                        "tool-call budget",
+                        "model-call budget",
+                    )
+                )
+                for tool_name in getattr(session, "routed_tools", ()):
+                    outcomes = routing_tool_status.get(tool_name, [])
+                    if outcomes and not any(outcomes):
+                        routing_engine.record(
+                            tool_name, routing_context_key, 0.0,
+                            event_type="task_failure", detail=content[:240]
+                        )
+                    elif outcomes and routing_related_failure:
+                        routing_engine.record(
+                            tool_name, routing_context_key, 0.35,
+                            event_type="task_failure", detail=content[:240]
+                        )
         if cancel_requested():
             emit_event("turn_cancelled", reason=content)
         else:
@@ -282,13 +391,17 @@ def handle_user_turn(
                 work_state.complete_turn(blocked=not success)
         finally:
             try:
-                if turn_lock is not None:
-                    free_turn(turn_lock)
+                if routing_engine is not None:
+                    routing_engine.reset_turn()
             finally:
-                set_foreground_turn(token, None)
-                record_monitor_state("agent.last_interaction", utc_now())
-                emit_event(
-                    "turn_end",
-                    success=success,
-                    elapsed_ms=(time.monotonic() - started) * 1000,
-                )
+                try:
+                    if turn_lock is not None:
+                        free_turn(turn_lock)
+                finally:
+                    set_foreground_turn(token, None)
+                    record_monitor_state("agent.last_interaction", utc_now())
+                    emit_event(
+                        "turn_end",
+                        success=success,
+                        elapsed_ms=(time.monotonic() - started) * 1000,
+                    )

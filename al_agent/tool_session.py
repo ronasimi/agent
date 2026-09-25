@@ -1,4 +1,4 @@
-"""Per-turn tool discovery and strict validation, with no user-intent routing."""
+"""Per-turn tool discovery, compact schema activation, and strict validation."""
 
 from __future__ import annotations
 
@@ -117,9 +117,9 @@ def _schema(name: str, description: str, properties: dict, required: list[str]) 
 DISCOVERY_SCHEMAS = [
     _schema(
         "tool_search",
-        "Search the entire available tool catalog by name or description. "
-        "Returns full schemas and activates the matches. Empty query lists tools alphabetically; "
-        "use offset to browse further. This does not execute the discovered tools.",
+        "Search the available tool catalog by name or description. Returns only compact "
+        "candidate metadata and may activate one router-selected candidate for the next model call. "
+        "Full schemas are supplied only through the native tools field. Empty query browses names.",
         {
             "query": {"type": "string"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 6},
@@ -129,8 +129,8 @@ DISCOVERY_SCHEMAS = [
     ),
     _schema(
         "load_tools",
-        "Load full schemas for exact tool names from the available catalog. "
-        "This only activates tools; call them separately to perform work.",
+        "Activate exact tool names from the available catalog. Full schemas are then "
+        "supplied only through the next native tools field; call them separately to perform work.",
         {
             "names": {
                 "type": "array",
@@ -155,6 +155,9 @@ class ToolSession:
         metadata: dict | None = None,
         max_active: int = 16,
         max_schema_chars: int = 20000,
+        decision_engine: Any | None = None,
+        router: Any | None = None,
+        initial_active: list[str] | None = None,
     ):
         self.catalog = {s["function"]["name"]: copy.deepcopy(s) for s in schemas}
         self.execute_registered = execute
@@ -172,14 +175,22 @@ class ToolSession:
         }
         self.catalog.update(self.control)
         self.uncertain_mutations: set[str] = set()
+        # ``decision_engine`` remains as a compatibility keyword for older
+        # integrations; the runtime now supplies a SystemOneRouter.
+        self.router = router or decision_engine
+        self.routed_tools: set[str] = set(initial_active or [])
+        if initial_active:
+            self._activate(list(initial_active))
 
     @property
     def schemas(self) -> list[dict]:
         return [*self.control.values(), *self.active.values()]
 
     def inventory(self) -> str:
-        return "Available tool names (load exact schemas before calling): " + ", ".join(
-            sorted(self.catalog)
+        return (
+            "Only currently supplied native tool schemas may be called. "
+            "Additional capabilities are available through tool_search/load_tools; "
+            "schema absence does not mean a capability is unavailable."
         )
 
     def validate(self, name: str, args: Any) -> dict:
@@ -190,17 +201,17 @@ class ToolSession:
             )
         return validate_arguments(schema, args)
 
-    def _activate(self, names: list[str]) -> dict:
+    def _activate(self, names: list[str], *, replace: bool = False) -> dict:
         missing = [n for n in names if n not in self.catalog]
         if missing:
             raise ValueError("Unknown tools: " + ", ".join(missing))
-        candidate = self.active.copy()
+        candidate = OrderedDict() if replace else self.active.copy()
+        evicted = [name for name in self.active if replace and name not in names]
         for name in names:
             if name in self.control:
                 continue
             candidate[name] = self.catalog[name]
             candidate.move_to_end(name)
-        evicted = []
         while (
             len(candidate) > self.max_active
             or len(json.dumps(list(candidate.values()))) > self.max_schema_chars
@@ -214,42 +225,80 @@ class ToolSession:
         self.active = candidate
         return {
             "ok": True,
-            "schemas": [self.catalog[n] for n in names],
+            "activated": [n for n in names if n not in self.control],
             "evicted": evicted,
         }
 
     def _search(self, query: str = "", limit: int = 6, offset: int = 0) -> dict:
-        # Lexical retrieval over metadata is invoked by the model, never the user
-        # prompt. There are no domain triggers, tool bundles, or mandatory tools.
-        tokens = set(re.findall(r"\w+", query.lower().replace("_", " ")))
-        rows = []
-        for name, schema in self.catalog.items():
-            if name in self.control:
-                continue
-            fn = schema["function"]
-            words = set(
-                re.findall(
-                    r"\w+",
-                    (name.replace("_", " ") + " " + fn.get("description", "")).lower(),
-                )
+        """Return compact discovery metadata and activate only the best match.
+
+        Complete JSON schemas never appear in the tool result. They are carried
+        only by the next request's native ``tools`` field, avoiding duplicate
+        schema text in both conversation history and the prompt prefix.
+        """
+        available = [
+            schema for name, schema in self.catalog.items() if name not in self.control
+        ]
+        candidates = []
+        selected = ""
+        route_confidence = 0.0
+        if self.router is not None and query.strip():
+            decision = self.router.decide(query, available, self.metadata)
+            ranked = list(decision.candidates)
+            window = ranked[offset : offset + limit]
+            candidates = [
+                {
+                    "name": row.name,
+                    "description": row.description[:180],
+                    "relevance": round(row.score, 3),
+                }
+                for row in window
+            ]
+            total = len(ranked)
+            selected = decision.selected[0] if decision.selected else ""
+            route_confidence = float(decision.confidence)
+            if selected:
+                self.routed_tools.add(selected)
+        else:
+            names = sorted(
+                name for name in self.catalog if name not in self.control
             )
-            score = len(tokens & words) + (100 if query.strip() == name else 0)
-            if not tokens or score:
-                rows.append((-score, name))
-        rows.sort()
-        names = [name for _, name in rows[offset : offset + limit]]
-        result = self._activate(names)
-        result.update(
-            total=len(rows),
-            next_offset=offset + limit if offset + limit < len(rows) else None,
-        )
-        return result
+            window_names = names[offset : offset + limit]
+            candidates = [
+                {
+                    "name": name,
+                    "description": str(
+                        self.catalog[name].get("function", {}).get("description", "")
+                    )[:180],
+                }
+                for name in window_names
+            ]
+            total = len(names)
+            # Compatibility for standalone/unit-test ToolSession instances that
+            # have no SystemOneRouter. Production sessions always provide the
+            # router and therefore never use this as an intent decision path.
+            if self.router is None and candidates:
+                selected = candidates[0]["name"]
+
+        # A failed/low-confidence search must not leave the previous task schema
+        # active, otherwise the next main-model request would silently grow.
+        activation = self._activate([selected], replace=True) if selected else self._activate([], replace=True)
+        return {
+            "ok": True,
+            "candidates": candidates,
+            "selected": selected or None,
+            "confidence": round(route_confidence, 3) if selected else None,
+            "activated": activation.get("activated", []),
+            "evicted": activation.get("evicted", []),
+            "total": total,
+            "next_offset": offset + limit if offset + limit < total else None,
+        }
 
     def invoke(self, name: str, args: dict) -> Any:
         validated = self.validate(name, args)
         dispatch = {
             "tool_search": self._search,
-            "load_tools": lambda names: self._activate(names),
+            "load_tools": lambda names: self._activate(names, replace=True),
         }
         if name in dispatch:
             return dispatch[name](**validated)

@@ -66,6 +66,11 @@ def test_runtime_refreshes_saved_history_and_writes_complete_terminal_state(
     cid = "integration-" + uuid.uuid4().hex
     client = FakeClient([final("First remembered answer"), final("Second answer")])
     monkeypatch.setattr(runtime, "OLLAMA", client)
+    # This scripted client emits legacy JSON actions; select that test protocol
+    # explicitly instead of depending on the deployment's Qwen XML default.
+    monkeypatch.setitem(state.AGENT_CFG, "tool_protocol", "json")
+    from test_system1_router import FakeRouterClient
+    monkeypatch.setattr(runtime, "ROUTER_OLLAMA", FakeRouterClient("000L"))
     monkeypatch.setattr(state, "MODEL_TRACE_ENABLED", False)
     assert "refresh_history" in inspect.signature(runtime.handle_user_turn).parameters
     with conversation_context(cid):
@@ -95,6 +100,9 @@ def test_runtime_executes_real_primitive_and_emits_ui_tool_names(monkeypatch):
         ]
     )
     monkeypatch.setattr(runtime, "OLLAMA", client)
+    monkeypatch.setitem(state.AGENT_CFG, "tool_protocol", "json")
+    from test_system1_router import FakeRouterClient
+    monkeypatch.setattr(runtime, "ROUTER_OLLAMA", FakeRouterClient("000L"))
     monkeypatch.setattr(state, "MODEL_TRACE_ENABLED", False)
     events = []
     with (
@@ -178,6 +186,10 @@ def test_json_mode_history_contains_real_roles_not_protocol_bubbles(monkeypatch)
     from al_agent import runtime, state
     from tools.memory import _load_chat_history_from_db
     from tools.conversation_context import conversation_context
+    from test_system1_router import FakeRouterClient
+
+    monkeypatch.setitem(state.AGENT_CFG, "tool_protocol", "json")
+    monkeypatch.setattr(runtime, "ROUTER_OLLAMA", FakeRouterClient("000L"))
 
     monkeypatch.setattr(
         runtime,

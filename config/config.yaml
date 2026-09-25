@@ -1,7 +1,7 @@
-# One model for interactive and background inference. No intent routing.
+# One main model plus a tiny stateless System-1 tool router.
 agent:
   host: http://127.0.0.1:11434
-  model: agent-main:9b
+  model: agent-main:4b
   model_source: hf.co/empero-ai/Qwen3.8-9B-Distill-GGUF:Q4_K_M
   keep_alive: -1
   # Qwen3.8's Ollama template accepts native tool definitions but emits tool
@@ -10,6 +10,23 @@ agent:
   timezone: America/Toronto
   thinking_default: false
   supports_thinking: true
+  # Stateless System-1 tool router. It receives only the current request and a
+  # stable compact catalog plus shortlist IDs; conversation history is never sent.
+  router:
+    model: qwen2.5:0.5b
+    keep_alive: -1
+    timeout_seconds: 15
+    candidates: 8
+    route_threshold: 0.62
+    prefix_max_bytes: 16000
+    description_chars: 48
+    warmup_timeout_seconds: 60
+    residency_check_seconds: 30
+    warmup_retry_seconds: 60
+    options:
+      num_ctx: 8192
+      temperature: 0
+      num_predict: 4
   main_options:
     num_ctx: 32768
     temperature: 0.2

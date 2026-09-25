@@ -6,6 +6,7 @@
 - [Autonomous refactor](AUTONOMOUS_REFACTOR.md): source baseline, concrete fixes, migration, and validation limits.
 - [Current state](CURRENT_STATE.md): configuration and verification summary.
 - [Bug reports](BUG_REPORTS.md): generating troubleshooting reports.
+- [Router prefix cache](ROUTER_PREFIX_CACHE.md): stable capability index, residency, and latency measurement.
 - [Durable compute](DURABLE_COMPUTE.md): the existing checkpointed computation tool.
 - [Archived tests](legacy-tests/README.md): expectations retired with the previous architecture.
 

@@ -14,7 +14,9 @@ def test_all_registered_tools_selectable_by_literal_name():
     session = ToolSession(tools.TOOL_SCHEMAS, lambda *a: None, tools.TOOL_METADATA)
     for name in tools.AVAILABLE_TOOLS_MAP:
         loaded = session.invoke("load_tools", {"names": [name]})
-        assert loaded["schemas"][0]["function"]["name"] == name
+        expected = [] if name in {"tool_search", "load_tools"} else [name]
+        assert loaded["activated"] == expected
+        assert "schemas" not in loaded
 
 
 def test_new_tool_set_is_registered():

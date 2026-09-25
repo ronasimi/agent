@@ -27,6 +27,7 @@ from .prompts import append_and_save, build_system_prompt
 from .state import *
 
 OLLAMA = _state.OLLAMA
+ROUTER_OLLAMA = _state.ROUTER_OLLAMA
 
 
 def handle_user_turn(
@@ -44,6 +45,7 @@ def handle_user_turn(
         refresh_history=refresh_history,
         runtime_overrides={
             "OLLAMA": OLLAMA,
+            "ROUTER_OLLAMA": ROUTER_OLLAMA,
             "append_and_save": append_and_save,
             "acquire_inference_lock": _acquire_inference_lock,
             "release_inference_lock": _release_inference_lock,

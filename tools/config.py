@@ -25,7 +25,7 @@ def load_config() -> dict:
     return normalize_config(raw)
 
 
-DEFAULT_MODEL = "agent-main:9b"
+DEFAULT_MODEL = "agent-main:4b"
 
 
 def normalize_config(raw: dict) -> dict:
@@ -57,6 +57,27 @@ def normalize_config(raw: dict) -> dict:
     if int(options["num_ctx"]) < 2048:
         raise ValueError("agent.main_options.num_ctx must be at least 2048")
     agent.update(model=model, main_options=options)
+    router = dict(agent.get("router") or {})
+    router["model"] = str(
+        os.environ.get("AGENT_ROUTER_MODEL")
+        or router.get("model")
+        or "qwen2.5:0.5b"
+    ).strip()
+    router.setdefault("keep_alive", -1)
+    router.setdefault("timeout_seconds", 15)
+    router.setdefault("candidates", 8)
+    router.setdefault("route_threshold", 0.62)
+    router.setdefault("prefix_max_bytes", 16000)
+    router.setdefault("description_chars", 48)
+    router.setdefault("warmup_timeout_seconds", 60)
+    router.setdefault("residency_check_seconds", 30)
+    router.setdefault("warmup_retry_seconds", 60)
+    router_options = dict(router.get("options") or {})
+    router_options.setdefault("num_ctx", 8192)
+    router_options.setdefault("temperature", 0)
+    router_options.setdefault("num_predict", 4)
+    router["options"] = router_options
+    agent["router"] = router
     requested_protocol = str(agent.get("tool_protocol") or "qwen_xml").strip().lower()
     if requested_protocol not in {"qwen_xml", "native"}:
         warnings.warn(

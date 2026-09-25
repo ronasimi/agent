@@ -483,7 +483,9 @@ def test_tool_session_state_is_not_shared_and_full_catalog_is_discoverable():
     one.invoke("load_tools", {"names": ["lookup"]})
     assert "lookup" in one.active and "lookup" not in two.active
     result = two.invoke("tool_search", {})
-    assert result["total"] == 1 and result["schemas"][0] == SCHEMA
+    assert result["total"] == 1 and result["selected"] == "lookup"
+    assert result["activated"] == ["lookup"]
+    assert "schemas" not in result
 
 
 def test_native_stream_preserves_distinct_identical_argument_calls():

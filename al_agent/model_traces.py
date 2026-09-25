@@ -4,6 +4,7 @@ The writer is deliberately independent of the turn engine and Ollama client. A
 single locked append keeps the foreground overhead tiny, while bounded rotation
 prevents an unattended local harness from growing the trace file forever.
 """
+
 from __future__ import annotations
 
 import json
@@ -54,6 +55,7 @@ def record_model_trace(
     completion: dict[str, Any] | None = None,
     metrics: dict[str, Any] | None = None,
     error: str = "",
+    request_extra: dict[str, Any] | None = None,
 ) -> None:
     """Write one exact request/completion pair as JSONL.
 
@@ -75,6 +77,7 @@ def record_model_trace(
         "purpose": str(purpose),
         "thinking_enabled": bool(thinking_enabled),
         "request": {
+            **(request_extra or {}),
             "messages": messages,
             "tools": tools,
             "options": options,
@@ -83,7 +86,10 @@ def record_model_trace(
         "metrics": metrics or {},
         "error": str(error or ""),
     }
-    encoded = json.dumps(record, ensure_ascii=False, separators=(",", ":"), default=str) + "\n"
+    encoded = (
+        json.dumps(record, ensure_ascii=False, separators=(",", ":"), default=str)
+        + "\n"
+    )
     with _LOCK:
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -93,3 +99,42 @@ def record_model_trace(
         except OSError:
             # Tracing must never fail an interactive turn.
             return
+
+
+def router_trace_callback(
+    *,
+    path: str,
+    enabled: bool,
+    max_bytes: int,
+    model: str,
+    options: dict,
+    conversation_id: str = "",
+    turn_id: int = 0,
+):
+    """Keep routing and warmup timings in the same diagnostics stream as chat."""
+    call_index = 0
+
+    def trace(event: dict) -> None:
+        nonlocal call_index
+        call_index += 1
+        record_model_trace(
+            path=path,
+            enabled=enabled,
+            max_bytes=max_bytes,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            call_index=call_index,
+            model=model,
+            role="system1-router",
+            purpose=event["purpose"],
+            thinking_enabled=False,
+            messages=[],
+            tools=[],
+            options=options,
+            request_extra={"api": "generate", "prompt": event["prompt"]},
+            completion={"response": event["response"]},
+            metrics=event["metrics"],
+            error=event["error"],
+        )
+
+    return trace
