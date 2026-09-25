@@ -1,388 +1,49 @@
-# ==========================================
-# FILE: config/config.yaml
-# ==========================================
+# One model for interactive and background inference. No intent routing.
 agent:
-  # The Ollama server is intentionally external to this container.
-  host: "http://127.0.0.1:11434"
-  # Explicit model-role architecture. The harness resolves deterministic work
-  # before inference, then uses the smallest capable model and escalates only
-  # when ambiguity/recovery requires more reasoning.
-  executor_model: "agent-main"
-  decision_model: "agent-micro"
-  reasoning_model: "agent-reasoning"
-
-  # Backward-compatible aliases used by older tools/plugins. `model` is the
-  # normal interactive executor; `fast_model` remains the 1.5B support/extraction
-  # role rather than the 0.5B decision-only model.
-  model: "agent-main"
-  fast_model: "agent-main"
-  decision_model_keep_alive: -1
-  reasoning_model_keep_alive: "2m"
-  # The requested Qwen3.8-Distill reasoning GGUF is text-only. Keep image
-  # understanding on the official multimodal 4B model instead of advertising
-  # a vision capability the reasoning alias cannot actually provide.
-  vision_model: "qwen3.5:4b"
-  vision_model_keep_alive: "2m"
-
-  # Dedicated long-form research writer/verifier. /research uses this model
-  # only after source collection. The worker temporarily evicts the interactive
-  # and fast models while this larger model is resident, then restores them.
-  report_model: "agent-research"
-  report_model_keep_alive: "10m"
-  report_options:
-    num_ctx: 8192
-    temperature: 0.6
-    top_p: 0.95
-    top_k: 20
-  report_restore_models_after_stage: true
-
-  # Pin the small validator/research runner once loaded. The report stage may
-  # evict it under memory pressure; it is then restored outside the foreground
-  # inference lock during the next idle window.
-  fast_model_keep_alive: -1
-  # Optional semantic-memory model. Normal turn memory lookup is lexical while
-  # semantic_memory_enabled is false, so this model does not need to be pulled
-  # for ordinary chat/tool/recipe operation.
-  embed_model: "nomic-embed-text"
-  timezone: "America/Toronto"
-  semantic_memory_enabled: false
-  # Default to Ollama-compatible nothink. The WebUI Think checkbox (or /think on)
-  # enables reasoning explicitly for the entire turn.
+  host: http://127.0.0.1:11434
+  model: agent-main:4b
+  model_source: hf.co/empero-ai/Qwen3.8-4B-Distill-GGUF:Q4_K_M
+  keep_alive: -1
+  tool_protocol: json
+  timezone: America/Toronto
   thinking_default: false
-  # Avoid synchronous per-fragment stdout logging while the model reasons.
-  # Enable only for terminal debugging. The Web UI streams reasoning separately
-  # only when the user explicitly enables the Think toggle.
-  log_thinking_trace: false
-  show_perf_stats: true
-
-  # Exact post-compaction Ollama request/completion traces for regression tests
-  # and optional local fine-tuning. Rotated locally; no network export.
-  model_traces:
-    enabled: true
-    path: "/app/memory/model_calls.jsonl"
-    max_bytes: 268435456
-
-  # Low-priority post-turn reflection. It runs only after substantial/failing
-  # tool work or before compaction, yields to foreground inference, and stores
-  # at most a few trigger-scoped operational notes.
-  background_rethink:
-    enabled: true
-    min_tool_iterations: 4
-
-  # Warm the 1.5B executor at frontend startup and restore the 0.5B decision
-  # runner during idle time. Deterministic fast paths still run before either
-  # model is consulted.
-  warmup:
-    enabled: true
-    fast_model_prewarm: true
-    decision_model_prewarm: true
-    # Tool-capable chat templates may place dynamic schemas before messages, so
-    # a system-only prime often is not a reusable prefix. Keep it off by default;
-    # use diagnostics/benchmarks/benchmark_warmup.py and model_stats.cache_hit_pct to verify before enabling.
-    prime_system_prefix: false
-
-  # Small best-effort conformance probe. Results are cached by model digest/template
-  # so normal restarts do not repeat generation. Probes run in background/idle
-  # paths and never block the WebUI from serving.
-  model_capabilities:
-    enabled: true
-    probe_main_on_startup: true
-    probe_fast_when_warmed: true
-    probe_decision_when_warmed: true
-    cache_path: "/app/memory/model_capabilities.json"
-    # Let the UI become interactive before a cold/new-model probe starts. Any
-    # active/recent user turn restarts this idle window.
-    idle_delay_seconds: 3
-    # Set true only when validating probe logic; normal model rebuilds invalidate
-    # the cache automatically because the identity contains the model digest.
-    force_probe: false
-
-  # Transport failures before the first streamed chunk are safe to retry and
-  # should not consume a semantic/tool-loop iteration. Once streaming begins,
-  # the request is never replayed because that could duplicate output/actions.
-  model_transport:
-    # Upper bound for one Ollama HTTP request/read stall. Streaming generation
-    # may continue normally as long as the transport continues making progress.
-    timeout_seconds: 60
-    # Maximum foreground wait for the shared Ollama inference slot. A queue
-    # timeout surfaces as an explicit error instead of silently stalling a turn.
-    queue_timeout_seconds: 90
-    preflight_retries: 1
-    base_delay_seconds: 0.15
-    max_delay_seconds: 0.75
-
-  max_iterations: 6
-  # Broad explicit multi-check requests get an adaptive budget up to this cap.
-  max_iterations_hard: 10
-  # Interactive wall-clock and model-call budgets. The harness stops starting
-  # new model/recovery work at the soft deadline and returns grounded partial
-  # results deterministically rather than letting a compound task run away.
-  turn_soft_timeout_seconds: 120
-  turn_hard_timeout_seconds: 180
-  max_model_calls_per_turn: 6
-  # Stop repeated empty/invalid/error model responses before they consume the
-  # global model-call safety budget. This is a no-progress guard, not a higher budget.
-  model_no_progress_max_retries: 2
-  # Qwen3.8-Distill is a reasoning model. On some Ollama/model combinations a
-  # request can finish with message.thinking populated while content/tool_calls
-  # remain empty. Retry that specific condition once with literal think=false
-  # and a larger output allowance instead of consuming the generic no-progress
-  # budget. The original reasoning may be streamed only when Think was enabled;
-  # it is never promoted into the final answer.
-  reasoning_recovery:
-    enabled: true
-    max_attempts: 1
-    # Recovery itself always uses literal think=false. Qwen3.8's template has
-    # a boolean thinking gate; string effort levels enter full reasoning.
-    tool_num_predict: 1024
-    final_num_predict: 2048
-  model_escalation:
-    enabled: true
-    # Directly use 4B for explicit Think, final synthesis of compiled plans, and
-    # clearly complex no-tool reasoning. Ordinary tool turns stay on 1.5B.
-    complex_direct_reasoning: true
-    min_complex_chars: 280
-    # A low-confidence 0.5B validator decision or executor no-progress can request
-    # one 4B recovery call before the step is failed/blocked.
-    escalate_on_low_validator_confidence: true
-    max_reasoning_calls_per_turn: 4
-
-  max_validator_calls_per_turn: 2
-  max_recovery_attempts_per_requirement: 2
-  tool_turn_num_predict: 384
-  final_num_predict: 1024
-  tool_turn_temperature: 0.2
-  # Required capabilities may expand the normal small schema set, but remain bounded.
-  requirement_tool_cap: 24
-  # Broad compound requests use only explicit requirement tools plus a tiny
-  # deterministic fallback set. This prevents irrelevant schemas from bloating
-  # prompt prefill and tempting small models into substitute tools.
-  requirement_led_schema_only: true
-  # Complex multi-intent turns are compiled by the 0.5B decision role only
-  # when deterministic numbered-plan parsing cannot resolve them. Each atomic
-  # step then stays on deterministic execution or the 1.5B executor, with 4B
-  # reasoning reserved for bounded escalation/final synthesis.
-  structured_plan:
-    enabled: true
-    min_chars: 900
-    min_commands: 3
-    # Explicit long-form audits/stress tests can contain many numbered
-    # requirements. Future steps remain hidden from the 4B model, so increasing
-    # the durable plan size does not increase each call's schema/prompt size.
-    max_steps: 96
-    max_tools_per_step: 3
-    # Structured plans have a separate bounded runtime budget. The normal
-    # interactive six-call/180s circuit breakers remain unchanged for ordinary
-    # turns. Stop/cancel remains available throughout scheduled execution.
-    # Deterministic and evidence-backed steps may consume zero model calls.
-    # The budget remains a hard ceiling for genuinely semantic/recovery steps.
-    max_model_calls: 193
-    max_iterations: 208
-    soft_timeout_seconds: 3600
-    hard_timeout_seconds: 5400
-  # Keep each small-model iteration narrow. Read-only calls may be batched, but
-  # only one mutating side effect is allowed before the model sees its result.
-  max_tool_calls_per_iteration: 3
-  max_mutating_calls_per_iteration: 1
-  # Independent read-only calls emitted in the same native batch can execute concurrently.
-  max_parallel_readonly_tools: 3
-
-  # Tool-produced screenshots/images are handled by the configured vision
-  # role, either directly or as a sidecar observation for the executor.
-  vision:
-    sidecar_when_distinct: true
-    max_observation_chars: 5000
-    auto_attach_tool_media: true
-    max_images_per_turn: 2
-    max_image_bytes: 4194304
-    # Experimental: the current model reports image support. Send image payloads
-    # directly through the shared main/vision role so capability can be tested.
-    # Set false again if the Ollama runner rejects multimodal requests.
-    supports_images: true
-
-  # Share bounded semantic state across executor/support roles. This is
-  # prompt-level state sharing, not a cross-model KV cache. The decision model
-  # receives only bounded classification/validator payloads.
-  # Raw tool output stays in the normal loop transcript and remains untrusted.
-  model_context_sharing:
-    enabled: true
-    max_chars: 6000
-    summary_chars: 2200
-    recent_chars: 1800
-    memory_chars: 1200
-    tool_chars: 1600
-
-  # Canonical harness-owned state shared by the interactive execution roles.
-  # When enabled, this replaces duplicated raw history in the active model
-  # prompt instead of appending it on top.
-  working_state:
-    enabled: true
-    main_history_turns: 1
-    # Keep only the latest raw tool transactions; older evidence is persisted in
-    # the bounded untrusted evidence digest to reduce repeated prompt ingestion.
-    raw_tool_results: 2
-    # Tier-1 microcompaction: keep a few older tool transactions as tiny
-    # retrievable observation handles before dropping them entirely.
-    archived_tool_results: 4
-    archived_tool_preview_chars: 180
-    evidence_render_chars: 3600
-    # Drop native schemas for explicit checks once their evidence is satisfied
-    # or deterministically blocked; this reduces later-turn prefill and discourages
-    # small-model repetition of already-completed diagnostics.
-    prune_satisfied_tool_schemas: true
-    # Chat templates render tool schemas at the very top of the prompt, so any
-    # change to the set - or to its order - invalidates the whole server-side
-    # prefix cache and forces a full re-prefill. Prune and reorder only during
-    # an iteration that must change the set anyway to expose a pending
-    # requirement; repeats of completed checks are still suppressed
-    # deterministically. Set to false to churn eagerly at the cost of TTFT.
-    minimize_schema_churn: true
-    suppress_completed_requirement_repeats: true
-    max_render_chars: 7000
-    objective_chars: 1600
-    background_chars: 2200
-    recent_context_chars: 1400
-    memory_chars: 1200
-    evidence_items: 10
-    evidence_preview_chars: 480
-    failure_items: 8
-    validator_items: 6
-    plan_items: 6
-    scheduler_steps: 96
-
-  # Before the last allowed tool-loop iteration, the fast model classifies the
-  # loop and the harness injects constrained recovery guidance for the active executor/reasoning model.
-  tool_loop_validator:
-    enabled: true
-    # Three failed/no-progress attempts trigger validation before a fourth
-    # unvalidated attempt. Persistent stalls can be revalidated, but are bounded.
-    failed_step_attempts: 3
-    max_interventions_per_turn: 3
-    max_candidate_tools: 24
-    timeout_seconds: 25
-    max_transcript_chars: 12000
-    # Validator uses the dedicated 0.5B coder decision role.
-    keep_alive: -1
-    options:
-      num_ctx: 8192
-      temperature: 0.1
-      top_p: 0.95
-      top_k: 20
-      num_predict: 128
-
-  # Hard fact-type provenance/content validation before factual finalization.
-  grounding:
-    # Hard provenance/content gate for fact-retrieval answers. Models may choose
-    # recovery actions, but cannot override a missing-evidence decision.
-    enabled: true
-    # Weather observations carried from a prior turn must be newer than this.
-    weather_max_age_seconds: 10800
-    # Discarding a candidate answer creates no new evidence, so the gate needs
-    # its own budget or it can consume every remaining iteration of the turn.
-    max_candidate_discards: 3
-
-  # Reusable Unix-style workflows are persisted separately from conversation
-  # memory. Recipe lookup uses SQLite FTS5 + token-overlap scoring and does not
-  # depend on the optional embedding model.
-  recipes:
-    enabled: true
-    suggest_after_success: true
-    # A single tool call is not a reusable workflow and produces noisy,
-    # ambiguous "save it" prompts after ordinary lookups.
-    min_stages: 2
-    semantic_match_threshold: 0.35
-    preflight_limit: 3
-    max_pipeline_stages: 16
-    seed_builtin_compatibility: true
-    # Absolute last fall-through: after normal corrective tool recovery fails,
-    # let the fast validator propose one bounded ephemeral read-only recipe.
-    validator_fallback_enabled: true
-    validator_fallback_max_stages: 4
-    validator_fallback_max_tools: 12
-    # Small-model semantic extraction for automatic recipe generalization. The
-    # fast model may only suggest names for literal values already present in a
-    # successful trace; deterministic code validates and rewrites the recipe.
-    fast_parameter_inference: true
-    fast_parameter_min_stages: 2
-    fast_parameter_max_calls_per_turn: 1
-
-  # Native tool schemas are selected deterministically per turn to reduce prefill.
-  max_tools_per_turn: 12
-
-  # Context compaction normally reuses the executor model so Ollama
-  # server does not evict the interactive model. Set this to the fast model only
-  # when the server can keep both models resident.
-  compaction_model: ""
-  # num_ctx here is used only when compaction_model is a *different* model.
-  # Ollama keys a loaded runner by context size, so reusing the executor with
-  # a smaller num_ctx would unload the warm interactive model; the worker
-  # therefore keeps main_options.num_ctx in that case.
-  compaction_options:
-    num_ctx: 16384
-    temperature: 0.6
-    top_p: 0.95
-    top_k: 20
-    num_predict: 512
-
-  # Keep enough headroom for tool results while allowing substantially longer
-  # interactive and research contexts. Compaction still bounds runaway history.
-  context:
-    num_ctx: 16384
-    reserve_tokens: 2048
-    recent_messages: 12
-    # Tier-2 continuity is checked after every turn but compacted only after the
-    # threshold, keeping foreground latency at zero while retaining raw history.
-    summary_keep_messages: 8
-    compact_at_tokens: 9000
-    # Tier-3 recall uses SQLite timestamp indexes + FTS5 and is injected only
-    # for explicit historical-chat requests.
-    historical_recall_messages: 32
-    historical_recall_chars: 7000
-    max_tool_output_chars: 4000
-    tool_loop_reserve_tokens: 3072
-    # Deprecated compatibility switch. System/working-state blocks are always
-    # canonicalized into one leading system message for strict Qwen/Ollama
-    # templates; correctness takes precedence over the old volatile-prefix
-    # caching optimization.
-    volatile_blocks_last: false
-
-  # Executor (1.5B coder): normal tool selection, bounded argument construction, and
-  # routine user-facing synthesis.
+  supports_thinking: false
   main_options:
     num_ctx: 16384
-    temperature: 0.3
+    temperature: 0.2
     top_p: 0.9
     top_k: 20
-
-  # Compatibility/support 1.5B role used by parameter extraction and background
-  # helpers. It aliases executor_model, so keep the runner context identical.
-  fast_options:
-    num_ctx: 16384
-    temperature: 0.1
-    top_p: 0.9
-    top_k: 20
-
-  # Decision (0.5B coder): constrained JSON classification only. Never use this role
-  # for normal prose or arbitrary tool arguments. Small context keeps validation
-  # and plan-arbitration TTFT low.
-  decision_options:
-    num_ctx: 8192
-    temperature: 0.0
-    top_p: 0.9
-    top_k: 20
-    num_predict: 128
-
-  # Reasoning (4B): lazy escalation for explicit Think turns, complex no-tool
-  # analysis, executor no-progress recovery, and final structured-plan synthesis.
-  reasoning_options:
-    num_ctx: 16384
-    temperature: 0.4
-    top_p: 0.95
-    top_k: 20
-
-  system_prompt: |
-    Local assistant for conversation, research, computer tasks, and workflows.
-
+    num_predict: 2048
+  max_model_calls_per_turn: 24
+  max_tool_calls_per_turn: 48
+  max_tool_calls_per_iteration: 6
+  max_active_tools: 16
+  max_tool_schema_chars: 20000
+  model_no_progress_max_retries: 3
+  turn_hard_timeout_seconds: 600
+  model_transport:
+    timeout_seconds: 60
+    queue_timeout_seconds: 90
+  context:
+    reserve_tokens: 2560
+    max_tool_output_chars: 6000
+    recent_messages: 100
+  warmup:
+    enabled: true
+    prime_system_prefix: false
+  vision:
+    supports_images: false
+    max_image_bytes: 4194304
+  working_state:
+    enabled: true
+  recipes:
+    enabled: true
+    seed_builtin_compatibility: true
+  model_traces:
+    enabled: true
+    path: /app/memory/model_calls.jsonl
+    max_bytes: 268435456
+  system_prompt: Local assistant for conversation, research, computer tasks, and workflows.
 research:
   max_rounds: 3
   max_queries_per_round: 3
@@ -392,9 +53,6 @@ research:
   max_page_chars: 25000
   max_evidence_chars: 9000
   fetch_timeout_seconds: 10
-
-  # Reports are planned first, then written section-by-section so evidence does
-  # not compete with the entire output for one context window.
   report:
     target_words: 2000
     min_words: 1700
@@ -405,11 +63,6 @@ research:
     section_num_predict: 1100
     overview_num_predict: 900
     include_key_findings: true
-
-    # Evidence contract for the dedicated report model. Claims are extracted
-    # from raw source text with exact support excerpts before drafting. Every
-    # generated section is then checked against that ledger and repaired before
-    # it can enter the final report.
     factuality:
       enabled: true
       source_batch_size: 3
@@ -420,42 +73,25 @@ research:
       gate_num_predict: 900
       repair_num_predict: 1200
       write_audit_sidecars: true
-
     images:
       enabled: true
       max_images: 3
       max_bytes: 3145728
-
 worker:
   poll_interval_seconds: 3
   heartbeat_seconds: 15
-  # Bound a background compaction transport stall independently of the worker
-  # lifecycle so one dead Ollama request cannot freeze maintenance forever.
   compaction_timeout_seconds: 120
   stale_job_seconds: 180
-  # Hard safety ceiling for one claimed background job. The worker continues
-  # heartbeats/monitoring while the job runs; if this ceiling is exceeded it
-  # requeues/fails the job and exits so Compose can kill any stuck Python thread
-  # and restart a clean worker process.
   max_job_runtime_seconds: 7200
-  # Durable deterministic computations execute cooperatively. This limits one
-  # worker slice only; a healthy computation may checkpoint and resume for an
-  # arbitrary number of slices until HALT or explicit cancellation.
   durable_compute_quantum: 10000
   durable_compute_yield_delay_seconds: 1
   interactive_cooldown_seconds: 10
   min_available_memory_mb: 900
-  # This is a scheduling guard, not an Ollama server limit. Keep the actual
-  # Ollama MAX_LOADED_MODELS setting on the Ollama server/container.
   max_agent_vram_mb: 7200
-  # Deprecated compatibility mirror. Background fast-model calls use the same
-  # indefinite residency policy as the canonical agent configuration.
   fast_model_keep_alive: -1
-  # Run cleanup only while foreground inference is idle.
   maintenance_interval_seconds: 21600
   ephemeral_retention_days: 30
   checkpoints_per_job: 25
-
 host_monitor:
   enabled: true
   interval_seconds: 60
@@ -463,43 +99,35 @@ host_monitor:
   high_memory_percent: 90
   high_disk_percent: 90
   high_temperature_celsius: 90
-
 reminders:
-  timezone: "America/Toronto"
-  timer_dir: "/home/agent/.config/systemd/user"
-  unit_prefix: "agent-reminder"
+  timezone: America/Toronto
+  timer_dir: /home/agent/.config/systemd/user
+  unit_prefix: agent-reminder
   systemctl_timeout: 10
-
 self_optimization:
-  # Candidates are opt-in jobs. They can read an immutable source mount and
-  # write only under workspace_root; they never apply changes to the live tree.
   enabled: true
-  source_root: "/app/source"
-  workspace_root: "/app/workspace/self_optimization"
+  source_root: /app/source
+  workspace_root: /app/workspace/self_optimization
   allowed_paths:
-    - "al_agent"
-    - "webui"
-    - "worker.py"
-    - "tools"
-    - "tests"
-    - "scripts"
-    - "config"
-    - "README.md"
-    - "Dockerfile"
-    - "docker-compose.yml"
-    - "requirements.txt"
-    - "ollama.env.example"
+  - al_agent
+  - webui
+  - worker.py
+  - tools
+  - tests
+  - scripts
+  - config
+  - README.md
+  - Dockerfile
+  - docker-compose.yml
+  - requirements.txt
+  - ollama.env.example
   max_changed_files: 5
   max_source_chars: 32000
   max_patch_chars: 24000
   command_timeout_seconds: 300
-  # Candidate tests run in the dedicated networkless Compose service.
   validation_runner_enabled: true
   validation_timeout_seconds: 900
   min_available_memory_mb: 2200
-  # If bubblewrap is missing or blocked, validation fails closed instead of
-  # running model-generated code in the worker namespace when the dedicated
-  # validator is explicitly disabled.
   require_test_sandbox: true
   test_memory_limit_mb: 1536
   model_options:
@@ -509,7 +137,17 @@ self_optimization:
     top_k: 20
     num_predict: 4096
   test_commands:
-    - ["python", "-m", "compileall", "-q", "."]
-    - ["python", "-m", "pytest", "-q"]
+  - - python
+    - -m
+    - compileall
+    - -q
+    - .
+  - - python
+    - -m
+    - pytest
+    - -q
   benchmark_commands:
-    - ["python", "diagnostics/benchmarks/benchmark_harness.py", "--max-source-tokens", "250000"]
+  - - python
+    - diagnostics/benchmarks/benchmark_harness.py
+    - --max-source-tokens
+    - '250000'

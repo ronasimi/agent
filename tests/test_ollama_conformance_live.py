@@ -1,11 +1,9 @@
-"""Opt-in live Ollama protocol checks.
+"""Opt-in checks of the selected model/protocol on a real Ollama server."""
 
-Run with RUN_OLLAMA_LIVE_TESTS=1 pytest -q tests/test_ollama_conformance_live.py
-on the target host. These tests are skipped in normal CI.
-"""
 from __future__ import annotations
 
 import os
+
 import pytest
 
 pytestmark = pytest.mark.skipif(
@@ -14,84 +12,69 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _field(value, name, default=None):
-    return value.get(name, default) if isinstance(value, dict) else getattr(value, name, default)
-
-
-def test_live_ollama_supports_harness_chat_metrics_and_tools():
+def _run(prompt):
     from ollama import Client
+    from al_agent.agent_loop import LoopConfig, run_loop
+    from al_agent.prompts import build_system_prompt
+    from al_agent.tool_session import ToolSession
+    from tools.catalog import catalog_snapshot
     from tools.config import load_config
-    from tools.catalog import get_tool_schema
+    from tools.executor import execute_registered_tool
 
     cfg = load_config()["agent"]
-    client = Client(host=cfg.get("host", "http://127.0.0.1:11434"))
-    model = cfg["model"]
-    options = {**(cfg.get("main_options") or {}), "num_predict": 4}
-    response = client.chat(
-        model=model,
-        messages=[{"role": "user", "content": "Reply OK"}],
-        tools=[get_tool_schema("current_time")],
-        options=options,
-        keep_alive=-1,
-        think=False,
-        stream=False,
+    schemas, functions, metadata = catalog_snapshot()
+    schemas = [
+        s for s in schemas if s["function"]["name"] in {"calculate", "current_time"}
+    ]
+    calls = []
+
+    def execute(name, arguments):
+        calls.append(name)
+        return execute_registered_tool(
+            name, arguments, binding=(functions[name], metadata[name])
+        )
+
+    session = ToolSession(schemas, execute, metadata)
+    answer = run_loop(
+        [
+            {
+                "role": "system",
+                "content": build_system_prompt() + "\n" + session.inventory(),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        client=Client(
+            host=cfg["host"],
+            timeout=cfg.get("model_transport", {}).get("timeout_seconds", 60),
+        ),
+        tools=session,
+        config=LoopConfig(
+            cfg["model"], cfg["main_options"], protocol=cfg.get("tool_protocol", "json")
+        ),
+        append=lambda message: None,
+        emit=lambda *args, **kwargs: None,
+        think_supported=bool(cfg.get("supports_thinking", False)),
     )
-    assert _field(response, "prompt_eval_count", 0) is not None
-    assert _field(response, "eval_count", 0) is not None
-    assert _field(response, "message") is not None
+    return answer, calls
 
 
-def test_live_ollama_reasoning_recovery_mode_reaches_visible_content():
-    """Catch reasoning-only completions that look successful at the API layer.
+def test_live_configured_protocol_produces_a_final_answer():
+    answer, calls = _run("Reply with exactly OK. No tools are needed.")
+    assert answer.strip() == "OK"
+    assert not calls
 
-    The configured Qwen3.8-Distill roles may reason before answering. The
-    bounded recovery deliberately disables thinking because this GGUF template
-    only has a boolean thinking gate; string effort levels enter full reasoning.
-    The recovery mode must reach ``message.content`` on the target Ollama build.
-    """
-    from ollama import Client
-    from tools.config import load_config
 
-    cfg = load_config()["agent"]
-    recovery = dict(cfg.get("reasoning_recovery") or {})
-    client = Client(host=cfg.get("host", "http://127.0.0.1:11434"))
-    response = client.chat(
-        model=cfg["model"],
-        messages=[{"role": "user", "content": "Reply with exactly: OK"}],
-        options={
-            **(cfg.get("main_options") or {}),
-            "num_predict": int(recovery.get("final_num_predict", 2048)),
-        },
-        keep_alive=-1,
-        think=False,
-        stream=False,
+def test_live_model_discovers_and_executes_calculate():
+    answer, calls = _run(
+        "Use the calculate tool to compute 19 * 23, then state the result."
     )
-    message = _field(response, "message", {})
-    content = str(_field(message, "content", "") or "").strip()
-    thinking = str(_field(message, "thinking", "") or "").strip()
-    assert content, (
-        "Configured reasoning-recovery mode still returned no visible content "
-        f"(thinking_chars={len(thinking)}, done_reason={_field(response, 'done_reason', 'unknown')!r})."
+    assert "calculate" in calls
+    assert "437" in answer
+
+
+def test_live_model_discovers_and_executes_current_time():
+    answer, calls = _run(
+        "Use current_time to obtain the current UTC date and time, then report it."
     )
-
-
-def test_live_startup_capability_probe_produces_usable_profile(tmp_path):
-    """Exercise the same safe profile used by startup model adaptation."""
-    from ollama import Client
-    from tools.config import load_config
-    from al_agent.model_capabilities import probe_model_capabilities
-
-    cfg = load_config()["agent"]
-    client = Client(host=cfg.get("host", "http://127.0.0.1:11434"))
-    profile = probe_model_capabilities(
-        client,
-        cfg["model"],
-        options=cfg.get("main_options") or {},
-        keep_alive=-1,
-        cache_path=str(tmp_path / "model_capabilities.json"),
-        force=True,
-    )
-    assert profile.plain_chat is True
-    assert profile.think_parameter in {True, False}
-    assert profile.tools_parameter in {True, False}
-    assert profile.tool_call_mode in {"native", "qwen_xml", "accepted_unverified", "unsupported", "unknown"}
+    assert "current_time" in calls
+    assert answer.strip()

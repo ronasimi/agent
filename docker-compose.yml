@@ -48,6 +48,8 @@ services:
       - DISPLAY=${DISPLAY:-:0}
       - WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-1}
       - TZ=${TZ:-America/Toronto}
+      - AGENT_MODEL=${AGENT_MODEL:-}
+      - OLLAMA_HOST=${OLLAMA_HOST:-}
       - AGENT_CREDENTIAL_DIR=/app/credentials
       - AGENT_CREDENTIAL_KEY=${AGENT_CREDENTIAL_KEY:-}
       - AGENT_CREDENTIAL_KEY_FILE=${AGENT_CREDENTIAL_KEY_FILE:-}
@@ -124,6 +126,8 @@ services:
         condition: service_completed_successfully
     environment:
       - TZ=${TZ:-America/Toronto}
+      - AGENT_MODEL=${AGENT_MODEL:-}
+      - OLLAMA_HOST=${OLLAMA_HOST:-}
       - WEBUI_HOST=${WEBUI_HOST:-127.0.0.1}
       - WEBUI_PORT=${WEBUI_PORT:-8080}
       - AGENT_CREDENTIAL_DIR=/app/credentials

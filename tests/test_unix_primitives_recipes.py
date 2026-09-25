@@ -188,12 +188,6 @@ def test_builtin_weather_workflow_is_not_suggested_as_duplicate_recipe(tmp_path,
     assert maybe_create_recipe_candidate("weather for London ON", trace, 2) is None
 
 
-def test_recipe_selector_bundle():
-    from tools import load_tools, select_tool_schemas
-    load_tools()
-    names = {s["function"]["name"] for s in select_tool_schemas("find and run my saved recipe for checking a website", max_tools=12)}
-    assert "run_recipe" in names
-    assert "search_recipes" in names
 
 
 def test_pipeline_schema_is_bounded():
@@ -202,80 +196,8 @@ def test_pipeline_schema_is_bounded():
     assert result["ok"] is False
     assert "exceeds" in result["error"]
 
-def test_successful_turn_emits_recipe_suggestion(tmp_path, monkeypatch):
-    _set_recipe_db(tmp_path, monkeypatch)
-    from al_agent import runtime as agent
-    from tools import AVAILABLE_TOOLS_MAP
-
-    def fake_resolve_host(host: str, record_type: str = "any") -> str:
-        return json.dumps({"host": host, "addresses": ["93.184.216.34"]})
-
-    def fake_tcp_connect(host: str, port: int, timeout: float = 5.0) -> str:
-        return json.dumps({"host": host, "port": port, "ok": True})
-
-    monkeypatch.setitem(AVAILABLE_TOOLS_MAP, "resolve_host", fake_resolve_host)
-    monkeypatch.setitem(AVAILABLE_TOOLS_MAP, "tcp_connect", fake_tcp_connect)
-    monkeypatch.setattr(agent, "_acquire_inference_lock", lambda: None)
-    monkeypatch.setattr(agent, "_release_inference_lock", lambda lock: None)
-    monkeypatch.setattr(agent, "record_monitor_state", lambda *a, **k: None)
-    monkeypatch.setattr(agent, "_queue_compaction_if_needed", lambda *a, **k: None)
-    monkeypatch.setattr(agent, "append_and_save", lambda messages, msg: messages.append(msg))
-    monkeypatch.setattr(agent, "RECIPE_MATCH_THRESHOLD", 2.0)  # do not match old recipes
-    monkeypatch.setattr(agent.TaskRequirementLedger, "from_request", classmethod(lambda cls, text: cls([])))
-
-    class FakeClient:
-        def __init__(self): self.calls = 0
-        def chat(self, **kwargs):
-            self.calls += 1
-            if self.calls == 1:
-                return iter([{"done": True, "message": {"content": "", "tool_calls": [{"id":"1","function":{"name":"resolve_host","arguments":{"host":"example.com"}}}]}}])
-            if self.calls == 2:
-                return iter([{"done": True, "message": {"content": "", "tool_calls": [{"id":"2","function":{"name":"tcp_connect","arguments":{"host":"example.com","port":443}}}]}}])
-            return iter([{"done": True, "message": {"content": "Connectivity verified.", "tool_calls": []}}])
-
-    monkeypatch.setattr(agent, "OLLAMA", FakeClient())
-    events=[]
-    messages=[{"role":"system","content":"system"}]
-    with agent.frontend_event_context(lambda e: events.append(e)):
-        agent.handle_user_turn(messages, "Resolve example.com and test TCP connectivity to port 443", False)
-    assert any(e.get("type") == "recipe_suggestion" for e in events)
 
 
-def test_turn_preflights_recipes_before_model_planning(tmp_path, monkeypatch):
-    _set_recipe_db(tmp_path, monkeypatch)
-    from tools.recipe_store import save_recipe
-    save_recipe(
-        "Check website connectivity", "check website connectivity with DNS and TCP",
-        [{"tool": "resolve_host", "args": {"host": {"$param": "host"}}}],
-        {"host": {"description": "hostname"}}, ["website", "connectivity"],
-    )
-    from al_agent import runtime as agent
-    monkeypatch.setattr(agent, "_acquire_inference_lock", lambda: None)
-    monkeypatch.setattr(agent, "_release_inference_lock", lambda lock: None)
-    monkeypatch.setattr(agent, "record_monitor_state", lambda *a, **k: None)
-    monkeypatch.setattr(agent, "_queue_compaction_if_needed", lambda *a, **k: None)
-    monkeypatch.setattr(agent, "append_and_save", lambda messages, msg: messages.append(msg))
-    monkeypatch.setattr(agent, "RECIPE_MATCH_THRESHOLD", 0.1)
-    monkeypatch.setattr(agent.TaskRequirementLedger, "from_request", classmethod(lambda cls, text: cls([])))
-
-    class FakeClient:
-        def __init__(self): self.requests = []
-        def chat(self, **kwargs):
-            self.requests.append(kwargs)
-            return iter([{"done": True, "message": {"content": "Connectivity task considered.", "tool_calls": []}}])
-
-    client = FakeClient(); monkeypatch.setattr(agent, "OLLAMA", client)
-    events = []; messages = [{"role": "system", "content": "system"}]
-    with agent.frontend_event_context(lambda event: events.append(event)):
-        agent.handle_user_turn(messages, "check website connectivity", False)
-
-    event_types = [event.get("type") for event in events]
-    assert event_types.index("recipe_check") < event_types.index("model_start")
-    assert next(event for event in events if event.get("type") == "recipe_check")["best_match"] == "Check website connectivity"
-    prompt = "\n".join(str(item.get("content") or "") for item in client.requests[0]["messages"])
-    assert "[Harness recipe preflight]" in prompt and "Check website connectivity" in prompt
-    exposed = {item["function"]["name"] for item in client.requests[0]["tools"]}
-    assert "run_recipe" in exposed
 
 
 def test_pipeline_extended_bound_and_foreach_condition(monkeypatch):
@@ -358,14 +280,6 @@ def test_pipeline_treats_soft_tool_failure_as_recipe_failure(monkeypatch):
     assert "no_progress_result" in result["error"]
 
 
-def test_fast_model_keep_alive_is_indefinite_and_consistent_in_config():
-    import yaml
-    root = Path(__file__).resolve().parents[1]
-    config = yaml.safe_load((root / "config" / "config.yaml").read_text(encoding="utf-8"))
-    assert config["agent"]["fast_model_keep_alive"] == -1
-    assert config["agent"]["tool_loop_validator"]["keep_alive"] == -1
-    assert config["worker"]["fast_model_keep_alive"] == -1
-    assert config["agent"]["warmup"]["fast_model_prewarm"] is True
 
 
 def test_optional_failed_pipeline_stage_is_not_credited_as_provenance(monkeypatch):
@@ -513,23 +427,3 @@ def test_recipe_learning_fast_hints_are_advisory_and_cannot_inject_values():
     assert all(meta.get("default") != "evil.example" for meta in params.values())
     assert "token" not in params
     assert stages[1]["args"]["url"]["$template"] == "https://{site}"
-
-
-def test_fast_recipe_parameter_classifier_returns_bounded_json_hints():
-    from al_agent.fast_tasks import infer_recipe_parameter_hints
-
-    class FakeClient:
-        def chat(self, **kwargs):
-            assert "tools" not in kwargs
-            assert kwargs["think"] is False
-            return {"message": {"content": '{"parameters":[{"name":"hostname","value":"example.com"}]}'}}
-
-    hints = infer_recipe_parameter_hints(
-        FakeClient(), model="fast", objective="check example.com",
-        trace=[
-            {"tool": "dns_query", "args": {"name": "example.com"}, "success": True, "readonly": True},
-            {"tool": "http_probe", "args": {"url": "https://example.com"}, "success": True, "readonly": True},
-        ],
-        options={"num_ctx": 4096}, keep_alive=-1,
-    )
-    assert hints == [{"name": "hostname", "value": "example.com"}]

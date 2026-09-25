@@ -13,8 +13,8 @@ from tools.research_factuality import (
     normalize_gate_result, render_claim_ledger, safe_ledger_fallback, validate_ledger_batch,
 )
 from tools.runtime import complete_job, get_job, heartbeat_job, save_checkpoint
-from .config import OLLAMA_HOST, POLL_SECONDS, REPORT_MODEL, REPORT_MODEL_KEEP_ALIVE, REPORT_OPTIONS, RESEARCH_CFG
-from ..model_residency import background_inference_slot, enter_report_model_stage, exit_report_model_stage
+from .config import MODEL_TRANSPORT_TIMEOUT, OLLAMA_HOST, POLL_SECONDS, REPORT_MODEL, REPORT_MODEL_KEEP_ALIVE, REPORT_OPTIONS, RESEARCH_CFG
+from ..model_residency import background_inference_slot
 from ..model_capabilities import capability_chat_overrides
 from .resources import InferenceDeferred, _ensure_interactive_idle, _interactive_busy, _notify, resources_available
 
@@ -29,8 +29,8 @@ def _clean_json(raw: str) -> dict:
 
 
 def _report_text(system: str, user: str, *, num_predict: int | None = None) -> str:
-    """Run one bounded dedicated report-model call with foreground priority."""
-    client = Client(host=os.environ.get("OLLAMA_HOST", OLLAMA_HOST))
+    """Run one bounded report call on the all-purpose model with foreground priority."""
+    client = Client(host=os.environ.get("OLLAMA_HOST", OLLAMA_HOST), timeout=MODEL_TRANSPORT_TIMEOUT)
     options = dict(REPORT_OPTIONS)
     if num_predict is not None:
         options["num_predict"] = max(128, int(num_predict))
@@ -57,8 +57,8 @@ def _report_text(system: str, user: str, *, num_predict: int | None = None) -> s
 
 
 def _report_json(system: str, user: str, schema: dict, *, num_predict: int | None = None) -> dict:
-    """Run one structured dedicated report-model call."""
-    client = Client(host=os.environ.get("OLLAMA_HOST", OLLAMA_HOST))
+    """Run one structured report call on the all-purpose model."""
+    client = Client(host=os.environ.get("OLLAMA_HOST", OLLAMA_HOST), timeout=MODEL_TRANSPORT_TIMEOUT)
     options = dict(REPORT_OPTIONS)
     if num_predict is not None:
         options["num_predict"] = max(128, int(num_predict))
@@ -382,11 +382,9 @@ def _assemble_report(topic: str, report_plan: dict, overview: str, section_draft
 def run_research_job(job_id: str, worker_id: str) -> str:
     """Resume a research job from its persisted state until completion.
 
-    Retrieval/planning-gap work stays on the small fast model. Once source
-    collection is complete, the worker enters a memory-bounded report stage:
-    normal models are evicted, the configured report_model is loaded, a
-    source-verbatim claim ledger is built, and all generated prose must pass a
-    post-generation factuality gate before assembly.
+    Planning, claim extraction, and writing all use the same configured model.
+    The durable job retains its explicit phase/checkpoint state machine and
+    source-verbatim evidence checks; it never selects or swaps another model.
     """
     job = get_job(job_id)
     if not job:
@@ -444,262 +442,241 @@ def run_research_job(job_id: str, worker_id: str) -> str:
         state["claim_ledger_path"] = str(ledger_path)
         state["factuality_audit_path"] = str(audit_path)
 
-    report_stage_active = False
-    report_phases = {"claim_ledger", "report_plan", "collect_media", "write_sections", "write_overview", "assemble"}
+    while True:
+        if (current := get_job(job_id)) and current.get("status") == "cancelled":
+            raise RuntimeError("Research job was cancelled.")
 
-    try:
-        while True:
-            if (current := get_job(job_id)) and current.get("status") == "cancelled":
-                raise RuntimeError("Research job was cancelled.")
+        heartbeat_job(job_id, worker_id, state)
+        save_checkpoint(job_id, state)
+        phase = state.get("phase", "plan")
+        round_num = int(state.get("round", 0))
 
-            heartbeat_job(job_id, worker_id, state)
+        if phase == "plan":
+            if round_num >= max_rounds:
+                state["phase"] = "claim_ledger"
+                continue
+            queries = plan_research_queries(topic, max_queries=max_queries, before_inference=_ensure_interactive_idle)
+            state["queries"] = queries
+            state["completed_queries"] = []
+            state["phase"] = "search"
+            state["round"] = round_num + 1
             save_checkpoint(job_id, state)
-            phase = state.get("phase", "plan")
-            round_num = int(state.get("round", 0))
+            continue
 
-            if phase in report_phases and not report_stage_active:
-                enter_report_model_stage(job_id)
-                report_stage_active = True
-                state["report_model"] = REPORT_MODEL
-                state["report_model_stage_started_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-                save_checkpoint(job_id, state)
-
-            if phase == "plan":
-                if round_num >= max_rounds:
-                    state["phase"] = "claim_ledger"
+        if phase == "search":
+            completed = set(state.get("completed_queries", []))
+            for query in state.get("queries", []):
+                if query in completed:
                     continue
-                queries = plan_research_queries(topic, max_queries=max_queries, before_inference=_ensure_interactive_idle)
-                state["queries"] = queries
+                ok, _reason = resources_available()
+                if not ok:
+                    heartbeat_job(job_id, worker_id, state)
+                    time.sleep(min(POLL_SECONDS * 2, 10))
+                    break
+                if _interactive_busy():
+                    raise InferenceDeferred("Interactive inference is active; research search deferred.")
+                deep_search_and_scrape(
+                    job_id,
+                    query,
+                    max_results=int(RESEARCH_CFG.get("max_results_per_query", 3)),
+                    before_inference=_ensure_interactive_idle,
+                )
+                completed.add(query)
+                state["completed_queries"] = sorted(completed)
+                # Count records directly rather than parsing a formatted buffer.
+                if len(get_research_sources(job_id)) >= max_sources:
+                    state["source_cap_reached"] = True
+                    state["phase"] = "evaluate"
+                heartbeat_job(job_id, worker_id, state)
+                save_checkpoint(job_id, state)
+                break
+            else:
+                state["phase"] = "evaluate"
+                save_checkpoint(job_id, state)
+            continue
+
+        if phase == "evaluate":
+            evaluation = evaluate_research(job_id, topic, before_inference=_ensure_interactive_idle)
+            state.setdefault("evaluations", []).append(evaluation)
+            status = evaluation.get("status", "insufficient")
+            if status == "complete" or round_num >= max_rounds or state.get("source_cap_reached"):
+                state["phase"] = "claim_ledger"
+            else:
+                gaps = [str(q).strip() for q in evaluation.get("gap_queries", []) if str(q).strip()]
+                if not gaps:
+                    gaps = [topic]
+                state["queries"] = gaps[:max_queries]
                 state["completed_queries"] = []
                 state["phase"] = "search"
-                state["round"] = round_num + 1
-                save_checkpoint(job_id, state)
-                continue
+            save_checkpoint(job_id, state)
+            continue
 
-            if phase == "search":
-                completed = set(state.get("completed_queries", []))
-                for query in state.get("queries", []):
-                    if query in completed:
-                        continue
-                    ok, _reason = resources_available()
-                    if not ok:
-                        heartbeat_job(job_id, worker_id, state)
-                        time.sleep(min(POLL_SECONDS * 2, 10))
-                        break
-                    if _interactive_busy():
-                        raise InferenceDeferred("Interactive inference is active; research search deferred.")
-                    deep_search_and_scrape(
-                        job_id,
-                        query,
-                        max_results=int(RESEARCH_CFG.get("max_results_per_query", 3)),
-                        before_inference=_ensure_interactive_idle,
-                    )
-                    completed.add(query)
-                    state["completed_queries"] = sorted(completed)
-                    # Count records directly rather than parsing a formatted buffer.
-                    if len(get_research_sources(job_id)) >= max_sources:
-                        state["source_cap_reached"] = True
-                        state["phase"] = "evaluate"
-                    heartbeat_job(job_id, worker_id, state)
-                    save_checkpoint(job_id, state)
-                    break
-                else:
-                    state["phase"] = "evaluate"
-                    save_checkpoint(job_id, state)
-                continue
+        # Backward-compatible resume paths for jobs checkpointed by older workers.
+        if phase == "synthesize":
+            state["phase"] = "claim_ledger"
+            save_checkpoint(job_id, state)
+            continue
+        if phase == "report_plan" and not state.get("claim_ledger"):
+            state["phase"] = "claim_ledger"
+            save_checkpoint(job_id, state)
+            continue
 
-            if phase == "evaluate":
-                evaluation = evaluate_research(job_id, topic, before_inference=_ensure_interactive_idle)
-                state.setdefault("evaluations", []).append(evaluation)
-                status = evaluation.get("status", "insufficient")
-                if status == "complete" or round_num >= max_rounds or state.get("source_cap_reached"):
-                    state["phase"] = "claim_ledger"
-                else:
-                    gaps = [str(q).strip() for q in evaluation.get("gap_queries", []) if str(q).strip()]
-                    if not gaps:
-                        gaps = [topic]
-                    state["queries"] = gaps[:max_queries]
-                    state["completed_queries"] = []
-                    state["phase"] = "search"
-                save_checkpoint(job_id, state)
-                continue
+        if phase == "claim_ledger":
+            ledger = _build_claim_ledger(job_id, topic)
+            if not ledger_source_ids(ledger):
+                raise RuntimeError("Research sources were collected, but no source-verbatim factual claims survived validation.")
+            state["claim_ledger"] = ledger
+            state.setdefault("factuality_audit", {})["ledger"] = {
+                "source_count": len(ledger),
+                "sources_with_verified_claims": len(ledger_source_ids(ledger)),
+                "claim_count": sum(len(item.get("claims") or []) for item in ledger),
+                "model": REPORT_MODEL,
+            }
+            persist_audit_sidecars()
+            state["phase"] = "report_plan"
+            save_checkpoint(job_id, state)
+            continue
 
-            # Backward-compatible resume paths for jobs checkpointed by older workers.
-            if phase == "synthesize":
-                state["phase"] = "claim_ledger"
-                save_checkpoint(job_id, state)
-                continue
-            if phase == "report_plan" and not state.get("claim_ledger"):
-                state["phase"] = "claim_ledger"
-                save_checkpoint(job_id, state)
-                continue
+        if phase == "report_plan":
+            ledger = state.get("claim_ledger") or []
+            media_ids = {
+                str(source.get("source_id") or "")
+                for source in get_research_sources(job_id)
+                if source.get("image_candidates")
+            }
+            state["report_plan"] = _build_report_plan_from_ledger(
+                topic, ledger, target_words=target_words, max_sections=max_sections, media_ids=media_ids,
+            )
+            state.setdefault("section_drafts", {})
+            state["phase"] = "collect_media"
+            save_checkpoint(job_id, state)
+            continue
 
-            if phase == "claim_ledger":
-                ledger = _build_claim_ledger(job_id, topic)
-                if not ledger_source_ids(ledger):
-                    raise RuntimeError("Research sources were collected, but no source-verbatim factual claims survived validation.")
-                state["claim_ledger"] = ledger
-                state.setdefault("factuality_audit", {})["ledger"] = {
-                    "source_count": len(ledger),
-                    "sources_with_verified_claims": len(ledger_source_ids(ledger)),
-                    "claim_count": sum(len(item.get("claims") or []) for item in ledger),
-                    "model": REPORT_MODEL,
-                }
-                persist_audit_sidecars()
-                state["phase"] = "report_plan"
-                save_checkpoint(job_id, state)
-                continue
-
-            if phase == "report_plan":
-                ledger = state.get("claim_ledger") or []
-                media_ids = {
-                    str(source.get("source_id") or "")
-                    for source in get_research_sources(job_id)
-                    if source.get("image_candidates")
-                }
-                state["report_plan"] = _build_report_plan_from_ledger(
-                    topic, ledger, target_words=target_words, max_sections=max_sections, media_ids=media_ids,
-                )
-                state.setdefault("section_drafts", {})
-                state["phase"] = "collect_media"
-                save_checkpoint(job_id, state)
-                continue
-
-            if phase == "collect_media":
-                plan = state.get("report_plan") or {}
-                preferred = []
-                for section in plan.get("sections", []):
-                    for source_id in section.get("media_source_ids", []):
-                        if source_id not in preferred:
-                            preferred.append(source_id)
-                if bool(image_cfg.get("enabled", True)):
-                    state["media"] = collect_research_media(
-                        job_id,
-                        asset_dir,
-                        preferred_source_ids=preferred,
-                        max_images=int(image_cfg.get("max_images", 3)),
-                        max_bytes=int(image_cfg.get("max_bytes", 3 * 1024 * 1024)),
-                    )
-                else:
-                    state["media"] = []
-                state["asset_dir"] = str(asset_dir)
-                state["phase"] = "write_sections"
-                save_checkpoint(job_id, state)
-                continue
-
-            if phase == "write_sections":
-                plan = state.get("report_plan") or {}
-                ledger = state.get("claim_ledger") or []
-                drafts = state.setdefault("section_drafts", {})
-                audits = state.setdefault("factuality_audit", {})
-                sections = plan.get("sections", [])
-                for index, section in enumerate(sections):
-                    key = str(index)
-                    if str(drafts.get(key, "")).strip():
-                        continue
-                    ledger_text = render_claim_ledger(
-                        ledger,
-                        section.get("source_ids", []),
-                        max_chars=int(report_cfg.get("section_evidence_chars", 12000)),
-                    )
-                    draft = _write_report_section(topic, section, ledger_text)
-                    target = max(250, int(section.get("target_words") or 400))
-                    if len(re.findall(r"\b\w+\b", draft)) < max(180, int(target * 0.72)):
-                        draft = _expand_report_section(topic, section, ledger_text, draft)
-                    draft, section_audit = _gate_and_repair(
-                        topic,
-                        str(section.get("heading") or f"Section {index + 1}"),
-                        draft,
-                        ledger_text,
-                        fallback_ledger=ledger,
-                        fallback_source_ids=list(section.get("source_ids", [])),
-                    )
-                    drafts[key] = draft
-                    audits[f"section_{index}"] = section_audit
-                    state["section_drafts"] = drafts
-                    persist_audit_sidecars()
-                    heartbeat_job(job_id, worker_id, state)
-                    save_checkpoint(job_id, state)
-                    break
-                else:
-                    state["phase"] = "write_overview"
-                    save_checkpoint(job_id, state)
-                continue
-
-            if phase == "write_overview":
-                ledger = state.get("claim_ledger") or []
-                full_ledger_text = render_claim_ledger(
-                    ledger, max_chars=max(int(report_cfg.get("plan_evidence_chars", 22000)), 22000)
-                )
-                overview, overview_audit = _write_report_overview(
-                    topic,
-                    state.get("report_plan") or {},
-                    state.get("section_drafts") or {},
-                    full_ledger_text,
-                )
-                state["overview"] = overview
-                state.setdefault("factuality_audit", {})["overview"] = overview_audit
-                persist_audit_sidecars()
-                state["phase"] = "assemble"
-                save_checkpoint(job_id, state)
-                continue
-
-            if phase == "assemble":
-                report = _assemble_report(
-                    topic,
-                    state.get("report_plan") or {},
-                    str(state.get("overview") or ""),
-                    state.get("section_drafts") or {},
-                    state.get("media") or [],
-                    asset_dir.name,
+        if phase == "collect_media":
+            plan = state.get("report_plan") or {}
+            preferred = []
+            for section in plan.get("sections", []):
+                for source_id in section.get("media_source_ids", []):
+                    if source_id not in preferred:
+                        preferred.append(source_id)
+            if bool(image_cfg.get("enabled", True)):
+                state["media"] = collect_research_media(
                     job_id,
+                    asset_dir,
+                    preferred_source_ids=preferred,
+                    max_images=int(image_cfg.get("max_images", 3)),
+                    max_bytes=int(image_cfg.get("max_bytes", 3 * 1024 * 1024)),
                 )
-                md_path.write_text(report, encoding="utf-8")
+            else:
+                state["media"] = []
+            state["asset_dir"] = str(asset_dir)
+            state["phase"] = "write_sections"
+            save_checkpoint(job_id, state)
+            continue
+
+        if phase == "write_sections":
+            plan = state.get("report_plan") or {}
+            ledger = state.get("claim_ledger") or []
+            drafts = state.setdefault("section_drafts", {})
+            audits = state.setdefault("factuality_audit", {})
+            sections = plan.get("sections", [])
+            for index, section in enumerate(sections):
+                key = str(index)
+                if str(drafts.get(key, "")).strip():
+                    continue
+                ledger_text = render_claim_ledger(
+                    ledger,
+                    section.get("source_ids", []),
+                    max_chars=int(report_cfg.get("section_evidence_chars", 12000)),
+                )
+                draft = _write_report_section(topic, section, ledger_text)
+                target = max(250, int(section.get("target_words") or 400))
+                if len(re.findall(r"\b\w+\b", draft)) < max(180, int(target * 0.72)):
+                    draft = _expand_report_section(topic, section, ledger_text, draft)
+                draft, section_audit = _gate_and_repair(
+                    topic,
+                    str(section.get("heading") or f"Section {index + 1}"),
+                    draft,
+                    ledger_text,
+                    fallback_ledger=ledger,
+                    fallback_source_ids=list(section.get("source_ids", [])),
+                )
+                drafts[key] = draft
+                audits[f"section_{index}"] = section_audit
+                state["section_drafts"] = drafts
                 persist_audit_sidecars()
-                # Imported lazily: PDF rendering pulls in optional native libraries,
-                # and a missing one must degrade this single step rather than break
-                # import-time discovery of every background job provider.
-                try:
-                    from tools.pdf_generator import generate_pdf_report
-                    pdf_result = generate_pdf_report(report, output_filename=str(pdf_path))
-                except Exception as exc:
-                    pdf_result = f"Error: PDF rendering is unavailable: {exc}"
-                if str(pdf_result).startswith("Error:"):
-                    state["pdf_error"] = str(pdf_result)
-                    state["pdf_path"] = None
-                else:
-                    state.pop("pdf_error", None)
-                    state["pdf_path"] = str(pdf_path)
-                state["report_path"] = str(md_path)
-                state["markdown_path"] = str(md_path)
-                state["asset_dir"] = str(asset_dir) if asset_dir.exists() else None
-                state["report_word_count"] = len(re.findall(r"\b\w+\b", report))
-                state["phase"] = "complete"
+                heartbeat_job(job_id, worker_id, state)
                 save_checkpoint(job_id, state)
-                complete_job(job_id, result=str(md_path))
-                paths = f"Markdown: {md_path}"
-                if state.get("pdf_path"):
-                    paths += f"\nPDF: {pdf_path}"
-                if state.get("claim_ledger_path"):
-                    paths += f"\nClaim ledger: {ledger_path}"
-                if state.get("factuality_audit_path"):
-                    paths += f"\nFactuality audit: {audit_path}"
-                _notify("Deep Research Complete", f"Finished research: {topic}\n{paths}")
-                return report
+                break
+            else:
+                state["phase"] = "write_overview"
+                save_checkpoint(job_id, state)
+            continue
 
-            if phase == "complete":
-                result = state.get("report_path") or state.get("markdown_path") or "Research already completed."
-                complete_job(job_id, result=str(result))
-                return str(result)
+        if phase == "write_overview":
+            ledger = state.get("claim_ledger") or []
+            full_ledger_text = render_claim_ledger(
+                ledger, max_chars=max(int(report_cfg.get("plan_evidence_chars", 22000)), 22000)
+            )
+            overview, overview_audit = _write_report_overview(
+                topic,
+                state.get("report_plan") or {},
+                state.get("section_drafts") or {},
+                full_ledger_text,
+            )
+            state["overview"] = overview
+            state.setdefault("factuality_audit", {})["overview"] = overview_audit
+            persist_audit_sidecars()
+            state["phase"] = "assemble"
+            save_checkpoint(job_id, state)
+            continue
 
-            raise RuntimeError(f"Unknown research phase: {phase}")
-    finally:
-        if report_stage_active:
+        if phase == "assemble":
+            report = _assemble_report(
+                topic,
+                state.get("report_plan") or {},
+                str(state.get("overview") or ""),
+                state.get("section_drafts") or {},
+                state.get("media") or [],
+                asset_dir.name,
+                job_id,
+            )
+            md_path.write_text(report, encoding="utf-8")
+            persist_audit_sidecars()
+            # Imported lazily: PDF rendering pulls in optional native libraries,
+            # and a missing one must degrade this single step rather than break
+            # import-time discovery of every background job provider.
             try:
-                exit_report_model_stage(job_id, restore=True)
-            except Exception:
-                # If a foreground turn arrived between report calls it owns the
-                # inference lock and will evict the report model itself. Never
-                # mask the research result/deferral with cleanup failure.
-                pass
+                from tools.pdf_generator import generate_pdf_report
+                pdf_result = generate_pdf_report(report, output_filename=str(pdf_path))
+            except Exception as exc:
+                pdf_result = f"Error: PDF rendering is unavailable: {exc}"
+            if str(pdf_result).startswith("Error:"):
+                state["pdf_error"] = str(pdf_result)
+                state["pdf_path"] = None
+            else:
+                state.pop("pdf_error", None)
+                state["pdf_path"] = str(pdf_path)
+            state["report_path"] = str(md_path)
+            state["markdown_path"] = str(md_path)
+            state["asset_dir"] = str(asset_dir) if asset_dir.exists() else None
+            state["report_word_count"] = len(re.findall(r"\b\w+\b", report))
+            state["phase"] = "complete"
+            save_checkpoint(job_id, state)
+            complete_job(job_id, result=str(md_path))
+            paths = f"Markdown: {md_path}"
+            if state.get("pdf_path"):
+                paths += f"\nPDF: {pdf_path}"
+            if state.get("claim_ledger_path"):
+                paths += f"\nClaim ledger: {ledger_path}"
+            if state.get("factuality_audit_path"):
+                paths += f"\nFactuality audit: {audit_path}"
+            _notify("Deep Research Complete", f"Finished research: {topic}\n{paths}")
+            return report
 
+        if phase == "complete":
+            result = state.get("report_path") or state.get("markdown_path") or "Research already completed."
+            complete_job(job_id, result=str(result))
+            return str(result)
+
+        raise RuntimeError(f"Unknown research phase: {phase}")

@@ -10,16 +10,16 @@ def test_runtime_facade_passes_overrides_without_mutating_turn_engine(monkeypatc
     sentinel_engine_client = object()
     sentinel_facade_client = object()
     captured = {}
-    monkeypatch.setattr(runtime._turn_engine, "OLLAMA", sentinel_engine_client)
+    monkeypatch.setattr(runtime.turn_engine.state, "OLLAMA", sentinel_engine_client)
     monkeypatch.setattr(runtime, "OLLAMA", sentinel_facade_client)
     monkeypatch.setattr(
-        runtime._turn_engine,
+        runtime.turn_engine,
         "handle_user_turn",
         lambda *args, **kwargs: captured.update(kwargs),
     )
 
     runtime.handle_user_turn([], "hello", False)
-    assert runtime._turn_engine.OLLAMA is sentinel_engine_client
+    assert runtime.turn_engine.state.OLLAMA is sentinel_engine_client
     assert captured["runtime_overrides"]["OLLAMA"] is sentinel_facade_client
 
 

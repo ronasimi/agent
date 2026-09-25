@@ -91,20 +91,6 @@ def test_non_history_yesterday_request_does_not_trigger_chat_recall():
     ) == "check the router now"
 
 
-def test_historical_recall_tool_selection_stays_minimal():
-    from tools.catalog import select_tool_schemas
-    from tools.historical_context import historical_recall_tool_text
-
-    pure = historical_recall_tool_text("find our conversation about Ollama prompt caching")
-    assert pure == ""
-    assert select_tool_schemas(pure, max_tools=12, context_text="") == []
-
-    weather = [
-        item["function"]["name"]
-        for item in select_tool_schemas("what was the weather yesterday?", max_tools=12, context_text="")
-    ]
-    assert "weather_forecast" in weather
-    assert "search_conversation_history" not in weather
 
 
 def test_historical_recall_excludes_the_current_recall_question(tmp_path, monkeypatch):

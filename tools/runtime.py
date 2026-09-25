@@ -1197,3 +1197,19 @@ def maintain_runtime(retention_days: int = 30, checkpoints_per_job: int = 25) ->
 
 
 init_runtime_db()
+
+
+def set_foreground_turn(token: str, value: dict | None) -> None:
+    """Atomically track concurrent foreground turns without clearing another chat."""
+    init_runtime_db()
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT value_json FROM monitor_state WHERE key=?", ("agent.foreground_turns",)).fetchone()
+        active = _parse_json(row[0], {}) if row else {}
+        if value is None:
+            active.pop(token, None)
+        else:
+            active[token] = value
+        conn.execute("INSERT INTO monitor_state(key,value_json,updated_at) VALUES (?,?,?) "
+                     "ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",
+                     ("agent.foreground_turns", _json(active), utc_now()))

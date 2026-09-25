@@ -317,14 +317,11 @@ async function loadHealth(){
   const main=$('#mainModel'),fast=$('#fastModel'),vision=$('#visionModel'),context=$('#contextSize');
   try{
     const h=await api('/api/health');
-    const executorName=String(h.executor_model||h.main_model||'Unknown executor');
-    const decisionName=String(h.decision_model||'Unknown decision model');
-    const reasoningName=String(h.reasoning_model||h.vision_model||executorName);
-    const visionName=String(h.vision_model||reasoningName);
+    const modelName=String(h.model||h.main_model||'Unknown model');
     const contextTokens=Number(h.context);
-    main.textContent=executorName;main.title=`Executor model: ${executorName}`;
-    fast.textContent=`Decision: ${decisionName}`;fast.title=`Decision/validator model: ${decisionName}`;
-    vision.textContent=`Reasoning: ${reasoningName}`;vision.title=`Reasoning model: ${reasoningName}; vision: ${visionName}`;
+    main.textContent=modelName;main.title=`All-purpose model: ${modelName}`;
+    fast.textContent='';fast.hidden=true;
+    vision.textContent='Autonomous tools';vision.title='The model selects tools and arguments';
     context.textContent=Number.isFinite(contextTokens)&&contextTokens>0?`${Math.round(contextTokens/1024)}K`:'—';
     context.title=Number.isFinite(contextTokens)&&contextTokens>0?`${contextTokens.toLocaleString()} token context`:'Context size unavailable';
     return h;

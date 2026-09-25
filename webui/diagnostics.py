@@ -167,72 +167,21 @@ def _recent_model_traces(conversation_id: str, *, limit: int = 12, scan_lines: i
 
 
 def _runtime_snapshot(conversation_id: str) -> dict[str, Any]:
-    try:
-        from al_agent.model_capabilities import get_active_model_capabilities
-        capability_profiles = {}
-        for role, model in (("executor", agent_runtime.EXECUTOR_MODEL), ("decision", agent_runtime.DECISION_MODEL), ("reasoning", agent_runtime.REASONING_MODEL), ("vision", agent_runtime.VISION_MODEL)):
-            profile = get_active_model_capabilities(model)
-            if profile is not None:
-                capability_profiles[role] = profile.to_dict()
-    except Exception:
-        capability_profiles = {}
     return {
         "conversation_id": conversation_id,
-        "models": {
-            "executor": agent_runtime.EXECUTOR_MODEL,
-            "decision": agent_runtime.DECISION_MODEL,
-            "reasoning": agent_runtime.REASONING_MODEL,
-            "main_compat": agent_runtime.MODEL,
-            "fast_compat": agent_runtime.FAST_MODEL,
-            "vision": agent_runtime.VISION_MODEL,
-            "report": str(agent_runtime.AGENT_CFG.get("report_model") or ""),
-        },
-        "context": {
-            "executor_num_ctx": agent_runtime.MAIN_OPTIONS.get("num_ctx"),
-            "decision_num_ctx": agent_runtime.DECISION_OPTIONS.get("num_ctx"),
-            "reasoning_num_ctx": agent_runtime.REASONING_OPTIONS.get("num_ctx"),
-            "main_num_ctx": agent_runtime.MAIN_OPTIONS.get("num_ctx"),
-            "fast_num_ctx": agent_runtime.FAST_OPTIONS.get("num_ctx"),
-            "max_context": agent_runtime.MAX_CTX,
-            "working_state_enabled": agent_runtime.WORKING_STATE_ENABLED,
-            "working_state_history_turns": agent_runtime.WORKING_STATE_HISTORY_TURNS,
-            "semantic_memory_enabled": agent_runtime.SEMANTIC_MEMORY,
-            "configured_context": agent_runtime.AGENT_CFG.get("context", {}),
-        },
-        "generation": {
-            "thinking_default": agent_runtime.THINKING_DEFAULT,
-            "tool_turn_num_predict": agent_runtime.TOOL_TURN_NUM_PREDICT,
-            "final_num_predict": agent_runtime.FINAL_NUM_PREDICT,
-            "model_transport_timeout": agent_runtime.MODEL_TRANSPORT_TIMEOUT,
-            "inference_queue_timeout": agent_runtime.INFERENCE_LOCK_TIMEOUT_SECONDS,
-            "max_model_calls_per_turn": agent_runtime.MAX_MODEL_CALLS_PER_TURN,
-            "structured_plan_max_model_calls": agent_runtime.STRUCTURED_PLAN_MAX_MODEL_CALLS,
-            "structured_plan_max_iterations": agent_runtime.STRUCTURED_PLAN_MAX_ITERATIONS,
-            "structured_plan_soft_timeout_seconds": agent_runtime.STRUCTURED_PLAN_SOFT_TIMEOUT_SECONDS,
-            "structured_plan_hard_timeout_seconds": agent_runtime.STRUCTURED_PLAN_HARD_TIMEOUT_SECONDS,
-            "executor_options": agent_runtime.MAIN_OPTIONS,
-            "decision_options": agent_runtime.DECISION_OPTIONS,
-            "reasoning_options": agent_runtime.REASONING_OPTIONS,
-            "main_options": agent_runtime.MAIN_OPTIONS,
-            "fast_options": agent_runtime.FAST_OPTIONS,
-            "max_reasoning_calls_per_turn": agent_runtime.MAX_REASONING_CALLS_PER_TURN,
-        },
-        "features": {
-            "grounding": agent_runtime.GROUNDING_ENABLED,
-            "recipes": agent_runtime.RECIPES_ENABLED,
-            "model_traces": agent_runtime.MODEL_TRACE_ENABLED,
-            "shared_model_context": agent_runtime.SHARED_CTX_ENABLED,
-        },
-        "model_capabilities": capability_profiles,
-        "ollama_host": str(agent_runtime.OLLAMA_HOST),
-        "model_trace_path": str(agent_runtime.MODEL_TRACE_PATH),
-        "interaction_state": {
-            "active": get_monitor_state("agent.interaction_active", False),
-            "waiting": get_monitor_state("agent.interaction_waiting", False),
-            "last_interaction": get_monitor_state("agent.last_interaction", ""),
-        },
+        "models": {"all_purpose": agent_runtime.MODEL},
+        "context": {"max_context": agent_runtime.MAX_CTX,
+                    "configured_context": agent_runtime.AGENT_CFG.get("context", {})},
+        "generation": {"options": agent_runtime.MAIN_OPTIONS,
+                       "tool_protocol": agent_runtime.AGENT_CFG.get("tool_protocol", "json"),
+                       "max_model_calls_per_turn": agent_runtime.MAX_MODEL_CALLS_PER_TURN,
+                       "model_transport_timeout": agent_runtime.MODEL_TRANSPORT_TIMEOUT},
+        "features": {"autonomous_tools": True, "recipes": agent_runtime.RECIPES_ENABLED},
+        "ollama_host": agent_runtime.OLLAMA_HOST,
+        "model_trace_path": agent_runtime.MODEL_TRACE_PATH,
+        "interaction_state": {"active_turns": get_monitor_state("agent.foreground_turns", {}),
+                              "last_interaction": get_monitor_state("agent.last_interaction", "")},
     }
-
 
 
 def _repository_inventory(source_root: Path) -> dict[str, Any]:

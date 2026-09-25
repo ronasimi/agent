@@ -21,7 +21,7 @@ from .runtime import DB_PATH, DB_TIMEOUT, init_runtime_db
 from .conversation_context import DEFAULT_CONVERSATION_ID, get_active_conversation_id, normalize_conversation_id
 
 config = load_config()
-EMBED_MODEL = config.get("agent", {}).get("embed_model", "nomic-embed-text")
+
 
 # Hot-path caches are process-local and keyed by the active database path so
 # tests/embedders can safely swap AGENT_DB_PATH. SQLite remains the durable
@@ -323,7 +323,7 @@ def _save_message_to_db(msg: dict, conversation_id: str | None = None) -> int:
     content = msg.get("content", "")
     name = msg.get("name") or msg.get("tool_name")
     extra_data = {}
-    for key in ("tool_calls", "tool_call_id", "media"):
+    for key in ("tool_calls", "tool_call_id", "media", "_runtime"):
         if key in msg:
             extra_data[key] = msg[key]
     extra = json.dumps(extra_data, ensure_ascii=False) if extra_data else None
@@ -788,60 +788,13 @@ def _cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
 
 
 def remember_semantic(topic: str = "general_knowledge", fact: str = "") -> str:
-    """Store a fact with an embedding for semantic retrieval."""
-    if not str(fact).strip():
-        return "Error: Missing required 'fact' parameter."
-    try:
-        from ollama import Client
-        client = Client(host=os.environ.get("OLLAMA_HOST", "http://localhost:11434"))
-        response = client.embed(model=EMBED_MODEL, input=str(fact), keep_alive=0)
-        vectors = response.get("embeddings") or []
-        embedding = vectors[0] if vectors else response.get("embedding") or []
-        if not embedding:
-            return "Error: embedding generation returned no vector."
-        embedding_json = json.dumps(embedding)
-    except Exception as exc:
-        return f"Error: embedding generation failed: {exc}"
-
-    with _connect() as conn:
-        conn.execute(
-            "INSERT INTO semantic_memory(topic, fact, embedding) VALUES (?, ?, ?)",
-            (str(topic), str(fact), embedding_json),
-        )
-    return f"Stored semantic memory under '{topic}'."
+    """Compatibility alias: store a fact in lexical memory without another model."""
+    return remember(topic=topic, fact=fact)
 
 
 def search_semantic_memory(query: str = "", limit: int = 5) -> str:
-    """Retrieve semantically similar memories, falling back to keyword search."""
-    if not str(query).strip():
-        return search_memory(query, limit=limit)
-    try:
-        from ollama import Client
-        client = Client(host=os.environ.get("OLLAMA_HOST", "http://localhost:11434"))
-        response = client.embed(model=EMBED_MODEL, input=str(query), keep_alive=0)
-        vectors = response.get("embeddings") or []
-        query_embedding = vectors[0] if vectors else response.get("embedding") or []
-        if not query_embedding:
-            return search_memory(query, limit=limit)
-    except Exception:
-        return search_memory(query, limit=limit)
-
-    with _connect() as conn:
-        rows = conn.execute("SELECT topic, fact, embedding FROM semantic_memory").fetchall()
-
-    scored = []
-    for topic, fact, raw_embedding in rows:
-        try:
-            score = _cosine_similarity(query_embedding, json.loads(raw_embedding))
-            scored.append((score, topic, fact))
-        except Exception:
-            continue
-    scored.sort(key=lambda item: item[0], reverse=True)
-    results = [
-        {"similarity": round(score, 4), "topic": topic, "fact": fact}
-        for score, topic, fact in scored[: max(1, min(int(limit), 20))]
-    ]
-    return json.dumps(results, ensure_ascii=False, indent=2) if results else search_memory(query, limit=limit)
+    """Compatibility alias: search persistent memory without embedding inference."""
+    return search_memory(query=query, limit=limit)
 
 
 def get_relevant_memories(query: str, limit: int = 8) -> list[dict[str, Any]]:

@@ -93,18 +93,6 @@ def test_profile_image_migrates_legacy_user_photo_from_chat_history(monkeypatch,
     assert migrated.is_file()
 
 
-def test_profile_tool_is_selected_for_profile_picture_followup_context():
-    import tools
-
-    names = {
-        schema["function"]["name"]
-        for schema in tools.select_tool_schemas(
-            "yes",
-            context_text="Would you like to use /app/workspace/uploads/me.png as your profile picture?",
-            max_tools=12,
-        )
-    }
-    assert "set_profile_image" in names
 
 
 def test_relevant_profile_context_does_not_volunteer_identity_on_unrelated_turn(tmp_path, monkeypatch):

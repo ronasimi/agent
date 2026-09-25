@@ -65,15 +65,6 @@ def test_compute_tools_are_structured_validator_successes():
         assert outcome["status"] == "ok"
 
 
-def test_compute_routing_exposes_durable_tools_without_generic_execution():
-    from tools.catalog import select_tool_schemas
-
-    names = {
-        item["function"]["name"]
-        for item in select_tool_schemas("start an unbounded durable computation that runs until halt", max_tools=12)
-    }
-    assert {"start_computation", "get_computation_status", "cancel_computation"} <= names
-    assert "execute_shell" not in names
 
 
 def test_start_computation_accepts_sparse_initial_tape_and_head(monkeypatch):

@@ -98,86 +98,14 @@ def test_volatile_blocks_are_counted_against_the_token_budget():
     assert estimate_messages_tokens(result) <= 800
 
 
-def test_unchanged_schema_set_is_left_byte_stable():
-    """Pruning or reordering alone would invalidate the whole prompt cache."""
-    from al_agent.runtime import _refresh_requirement_tool_schemas
-    from tools import TOOL_METADATA, get_tool_schema
-    from tools.task_requirements import TaskRequirementLedger
-    from tools.turn_policy import derive_turn_tool_policy
-
-    request = "Inspect host CPU and memory and CPU memory IO pressure"
-    ledger = TaskRequirementLedger.from_request(request)
-    policy = derive_turn_tool_policy(request, set(TOOL_METADATA), TOOL_METADATA)
-    schemas = [get_tool_schema("host_snapshot"), get_tool_schema("pressure_snapshot")]
-    ledger.record_tool("host_snapshot", status="ok", fingerprint="host-one")
-
-    changed = _refresh_requirement_tool_schemas(
-        schemas, ledger, policy, minimize_churn=True
-    )
-    names = [schema["function"]["name"] for schema in schemas]
-    assert changed is False
-    # Neither removed nor reordered: the serialized set stays identical.
-    assert names == ["host_snapshot", "pressure_snapshot"]
 
 
-def test_satisfied_schema_is_pruned_when_the_set_changes_anyway():
-    from al_agent.runtime import _refresh_requirement_tool_schemas
-    from tools import TOOL_METADATA, get_tool_schema
-    from tools.task_requirements import TaskRequirementLedger
-    from tools.turn_policy import derive_turn_tool_policy
-
-    request = "Inspect host CPU and memory and CPU memory IO pressure"
-    ledger = TaskRequirementLedger.from_request(request)
-    policy = derive_turn_tool_policy(request, set(TOOL_METADATA), TOOL_METADATA)
-    # pressure_snapshot is still pending but absent, so this iteration must
-    # change the tool set regardless; pruning is then free.
-    schemas = [get_tool_schema("host_snapshot")]
-    ledger.record_tool("host_snapshot", status="ok", fingerprint="host-one")
-
-    changed = _refresh_requirement_tool_schemas(
-        schemas, ledger, policy, minimize_churn=True
-    )
-    names = [schema["function"]["name"] for schema in schemas]
-    assert changed is True
-    assert "host_snapshot" not in names
-    assert "pressure_snapshot" in names
 
 
-def test_schema_selection_ignores_single_incidental_description_matches():
-    from tools import select_tool_schemas
-
-    names = {
-        schema["function"]["name"]
-        for schema in select_tool_schemas("Explain in two sentences what an agent harness does.", max_tools=12)
-    }
-    assert names == set()
 
 
-def test_generic_execution_is_not_exposed_by_a_vague_lexical_match():
-    from tools import select_tool_schemas
-
-    vague = {
-        schema["function"]["name"]
-        for schema in select_tool_schemas("tell me about this agent", max_tools=12)
-    }
-    assert "execute_shell" not in vague
-    assert "execute_python" not in vague
-
-    named = {
-        schema["function"]["name"]
-        for schema in select_tool_schemas("run a shell command to list /etc", max_tools=12)
-    }
-    assert "execute_shell" in named
 
 
-def test_relevant_diagnostic_selection_is_unchanged():
-    from tools import select_tool_schemas
-
-    names = {
-        schema["function"]["name"]
-        for schema in select_tool_schemas("Check host memory and disk usage", max_tools=12)
-    }
-    assert {"host_snapshot", "memory_info", "disk_usage"} <= names
 
 
 def test_network_status_phrasing_creates_a_network_requirement():
@@ -234,51 +162,8 @@ def test_compaction_reuses_the_interactive_context_size_for_the_same_model():
         assert background_config.COMPACTION_OPTIONS["num_ctx"] == background_config.MAIN_OPTIONS["num_ctx"]
 
 
-def test_finalization_strips_local_only_fields_from_the_wire():
-    from al_agent import runtime as agent
-
-    captured = {}
-
-    class FakeClient:
-        def chat(self, **kwargs):
-            captured["messages"] = kwargs["messages"]
-            captured["stream"] = kwargs.get("stream")
-            return {"message": {"content": "final"}}
-
-    original_client = agent.OLLAMA
-    original_save = agent.append_and_save
-    agent.OLLAMA = FakeClient()
-    agent.append_and_save = lambda messages, message: messages.append(message)
-    try:
-        messages = [
-            {"role": "system", "content": "system"},
-            {"role": "user", "content": "inspect"},
-        ]
-        tail = [
-            {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "function": {"name": "demo", "arguments": {}}}]},
-            {"role": "tool", "content": "observed", "tool_name": "demo", "tool_call_id": "c1"},
-        ]
-        agent._finalize_after_limit(messages, tail)
-    finally:
-        agent.OLLAMA = original_client
-        agent.append_and_save = original_save
-
-    assert captured["stream"] is True
-    assert all("tool_call_id" not in message for message in captured["messages"])
-    assert [i for i, message in enumerate(captured["messages"]) if message.get("role") == "system"] == [0]
-    assert messages[-1]["content"] == "final"
 
 
-def test_config_exposes_the_latency_knobs():
-    import yaml
-
-    with open("config/config.yaml", encoding="utf-8") as handle:
-        config = yaml.safe_load(handle)
-    agent_cfg = config["agent"]
-    assert agent_cfg["warmup"]["enabled"] is True
-    assert agent_cfg["context"]["volatile_blocks_last"] is False
-    assert agent_cfg["working_state"]["minimize_schema_churn"] is True
-    assert int(agent_cfg["grounding"]["max_candidate_discards"]) >= 1
 
 
 class _ScriptedOllama:
@@ -312,56 +197,3 @@ def _run_turn(monkeypatch, prompt, reply):
     with events.frontend_event_context(sink=captured.append):
         agent.handle_user_turn(messages, prompt, False)
     return client, captured
-
-
-def test_grounding_gate_stops_discarding_after_its_budget(monkeypatch, capsys):
-    """Without a budget this path silently consumes the whole iteration limit."""
-    from al_agent import runtime as agent
-
-    client, events_seen = _run_turn(
-        monkeypatch,
-        "What is the weather in London Ontario right now?",
-        lambda index, request: "It is sunny and 20C.",
-    )
-    capsys.readouterr()
-    finals = [e for e in events_seen if e["type"] == "assistant_final"]
-    assert finals and finals[-1].get("grounded") is False
-    # One inference per discard plus the recovery attempt, never the full budget.
-    assert len(client.requests) <= agent.GROUNDING_MAX_DISCARDS + 2
-
-
-def test_repeated_harness_control_notes_are_not_duplicated(monkeypatch, capsys):
-    client, _events = _run_turn(
-        monkeypatch,
-        "What is the weather in London Ontario right now?",
-        lambda index, request: "It is sunny and 20C.",
-    )
-    capsys.readouterr()
-    last = client.requests[-1]["messages"]
-    gate_notes = [
-        message for message in last
-        if message.get("role") == "user"
-        and str(message.get("content") or "").startswith("[Harness hard grounding gate]")
-    ]
-    assert len(gate_notes) <= 1
-
-
-def test_simple_chat_does_not_expose_private_harness_context(monkeypatch, capsys):
-    """Greetings must use the minimal conversational path, not narrate harness state."""
-    client, _events = _run_turn(
-        monkeypatch,
-        "Hi, how are you?",
-        lambda index, request: "Hi! I'm doing well, thanks for asking.",
-    )
-    capsys.readouterr()
-    assert len(client.requests) == 1
-    wire = "\n".join(str(message.get("content") or "") for message in client.requests[0]["messages"])
-    for private_marker in (
-        "Harness Evidence Digest",
-        "Harness working state",
-        "Harness scheduler",
-        "Harness recipe preflight",
-        "Private untrusted evidence",
-        "validator_history",
-    ):
-        assert private_marker not in wire

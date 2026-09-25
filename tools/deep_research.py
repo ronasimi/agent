@@ -24,9 +24,11 @@ from .runtime import DB_PATH, DB_TIMEOUT, init_runtime_db
 
 config = load_config()
 
-FAST_MODEL = config.get("agent", {}).get("fast_model", "agent-main")
-FAST_OPTIONS = config.get("agent", {}).get("fast_options", {"num_ctx": 16384, "temperature": 0.1, "top_p": 0.95, "top_k": 20})
-FAST_KEEP_ALIVE = config.get("agent", {}).get("fast_model_keep_alive", config.get("worker", {}).get("fast_model_keep_alive", 0))
+# Compatibility names refer to the single configured all-purpose model.
+FAST_MODEL = config["agent"]["model"]
+FAST_OPTIONS = dict(config["agent"]["main_options"])
+FAST_KEEP_ALIVE = config["agent"].get("keep_alive", -1)
+MODEL_TRANSPORT_TIMEOUT = float(config["agent"].get("model_transport", {}).get("timeout_seconds", 60))
 RESEARCH_CFG = config.get("research", {})
 REPORT_CFG = RESEARCH_CFG.get("report", {})
 MAX_PAGE_CHARS = int(RESEARCH_CFG.get("max_page_chars", 25000))
@@ -160,7 +162,7 @@ def init_research_db() -> None:
 
 
 def _fast_client() -> Client:
-    return Client(host=os.environ.get("OLLAMA_HOST", OLLAMA_HOST))
+    return Client(host=os.environ.get("OLLAMA_HOST", OLLAMA_HOST), timeout=MODEL_TRANSPORT_TIMEOUT)
 
 
 def plan_research_queries(

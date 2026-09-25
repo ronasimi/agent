@@ -41,7 +41,9 @@ def main(argv: list[str] | None = None) -> int:
         func = AVAILABLE_TOOLS_MAP.get(name)
         if func is None:
             raise KeyError(f"registered tool '{name}' was not available in isolated worker")
-        value = func(**tool_args)
+        from .conversation_context import conversation_context
+        with conversation_context(request.get("conversation_id")):
+            value = func(**tool_args)
         _write_result(result_path, {"ok": True, "value": value})
         return 0
     except BaseException as exc:

@@ -380,12 +380,10 @@ def test_google_tools_are_discoverable_readonly_and_have_bounded_schemas():
     }
     assert names <= set(tools.AVAILABLE_TOOLS_MAP)
     assert all(tools.TOOL_METADATA[name]["readonly"] for name in names)
-    gmail_names = {item["function"]["name"] for item in tools.select_tool_schemas("search my Gmail", max_tools=12)}
-    calendar_names = {item["function"]["name"] for item in tools.select_tool_schemas("show my calendar", max_tools=12)}
-    drive_names = {item["function"]["name"] for item in tools.select_tool_schemas("show my Google Drive files", max_tools=12)}
-    assert {"gmail_search_messages", "gmail_read_message"} <= gmail_names
-    assert "google_calendar_list_events" in calendar_names
-    assert "google_drive_list_files" in drive_names
+    from al_agent.tool_session import ToolSession
+    session = ToolSession(tools.TOOL_SCHEMAS, lambda *a: None, tools.TOOL_METADATA)
+    loaded = session.invoke("load_tools", {"names": sorted(names)})
+    assert {s["function"]["name"] for s in loaded["schemas"]} == names
     schema = tools.get_tool_schema("gmail_read_message")["function"]["parameters"]
     assert schema["properties"]["max_body_chars"]["maximum"] == 20_000
     assert "message_id" in schema["required"]

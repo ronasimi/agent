@@ -554,10 +554,9 @@ def test_health_endpoint_reports_current_model_roles_without_removed_micro_role(
     payload = server.health()
     assert payload["ok"] is True
     assert payload["main_model"] == server.agent_runtime.MODEL
-    assert payload["fast_model"] == server.agent_runtime.FAST_MODEL
-    assert payload["vision_model"] == server.agent_runtime.VISION_MODEL
     assert payload["context"] == server.agent_runtime.MAX_CTX
-    assert payload["report_model"] == str(server.agent_runtime.AGENT_CFG.get("report_model") or "")
+    assert payload["model"] == server.agent_runtime.MODEL
+    assert "report_model" not in payload
     assert "micro_model" not in payload
 
 
@@ -608,15 +607,33 @@ def test_thinking_stream_has_dedicated_composer_host():
     assert ".assistant-thinking" not in css
 
 
-def test_turn_ack_and_workspace_scans_do_not_block_event_loop():
-    root = Path(__file__).resolve().parents[1]
-    chat = (root / "webui" / "chat.py").read_text(encoding="utf-8")
-    accepted = chat.index('await websocket.send_json({"type": "accepted"')
-    initial_scan = chat.index('artifact_snapshot = await asyncio.to_thread(_workspace_file_snapshot)')
-    task_start = chat.index('task = asyncio.create_task(asyncio.to_thread(work))')
-    final_scan = chat.index('for event in await asyncio.to_thread(collect_new_artifacts)')
-    assert accepted < initial_scan < task_start
-    assert final_scan > task_start
+def test_turn_ack_and_workspace_scans_do_not_block_event_loop(monkeypatch):
+    import asyncio
+    import threading
+    from webui import chat
+
+    calls = []
+    event_loop_thread = threading.get_ident()
+
+    class Socket:
+        async def send_json(self, packet):
+            calls.append((packet['type'], threading.get_ident()))
+
+    def scan():
+        calls.append(('scan', threading.get_ident()))
+        return {}
+
+    def work(messages, text, thinking, *, refresh_history=False):
+        assert refresh_history is True
+        calls.append(('work', threading.get_ident()))
+
+    monkeypatch.setattr(chat, 'ensure_conversation', lambda cid: None)
+    monkeypatch.setattr(chat, '_workspace_file_snapshot', scan)
+    monkeypatch.setattr(chat, '_new_artifacts', lambda *args, **kwargs: [])
+    monkeypatch.setattr(chat.agent_runtime, 'handle_user_turn', work)
+    asyncio.run(chat._run_turn(Socket(), {'content': 'hello'}))
+    assert [name for name, _ in calls] == ['accepted', 'scan', 'work', 'scan', 'history_refresh']
+    assert all(tid != event_loop_thread for name, tid in calls if name in {'scan', 'work'})
 
 
 def test_hidden_diagnostic_panels_are_not_refreshed_after_every_turn():
@@ -653,11 +670,6 @@ def test_webui_think_toggle_streams_reasoning_and_defaults_off():
     assert "requestAnimationFrame(paintThinkingStream)" in js
 
 
-def test_experimental_main_model_image_support_enabled():
-    from al_agent import state
-
-    assert state.VISION_SUPPORTS_IMAGES is True
-    assert state.AUTO_ATTACH_TOOL_MEDIA is True
 
 
 def test_reasoning_status_updates_do_not_force_scroll_layout():

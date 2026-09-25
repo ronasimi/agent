@@ -160,27 +160,6 @@ def test_prompt_template_errors_are_deterministic_even_when_server_returns_500()
     assert attempts["count"] == 1
 
 
-def test_textual_readonly_tool_call_can_be_repaired(monkeypatch):
-    from al_agent import turn_support
-
-    def demo(query=""):
-        return query
-    demo.__name__ = "web_search"
-    demo._agent_tool_name = "web_search"
-    demo._agent_tool_readonly = True
-    monkeypatch.setitem(turn_support.AVAILABLE_TOOLS_MAP, "web_search", demo)
-    monkeypatch.setitem(turn_support.TOOL_METADATA, "web_search", {"readonly": True})
-    monkeypatch.setattr(turn_support, "get_tool_schema", lambda name: {
-        "type": "function",
-        "function": {
-            "name": "web_search",
-            "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
-        },
-    })
-    text = '''To find it, I will search.\n\n**Tool call:**\n```json\n{"tool_name":"web_search","query":"London ON news","params":{"depth":"balanced"}}\n```'''
-    calls, name = turn_support._recover_textual_readonly_tool_call(text, {"web_search"})
-    assert name == "web_search"
-    assert calls[0]["function"]["arguments"] == {"query": "London ON news"}
 
 
 def test_single_dict_tool_call_is_not_iterated_as_mapping_keys():
@@ -266,56 +245,3 @@ def test_qwen_xml_tool_call_parser_handles_multiline_and_multiple_calls():
     assert [c["function"]["name"] for c in calls] == ["web_search", "read_lines"]
     assert calls[0]["function"]["arguments"] == {"query": "London Ontario weather"}
     assert calls[1]["function"]["arguments"]["start_line"] == "10"
-
-
-def test_qwen_xml_recovery_uses_registry_validation_and_allows_supplied_mutator(monkeypatch):
-    from al_agent import turn_support
-
-    def write_file(filename: str, content: str):
-        return "ok"
-
-    write_file._agent_tool_name = "write_file"
-    monkeypatch.setitem(turn_support.AVAILABLE_TOOLS_MAP, "write_file", write_file)
-    monkeypatch.setitem(turn_support.TOOL_METADATA, "write_file", {"readonly": False})
-    monkeypatch.setattr(turn_support, "get_tool_schema", lambda _name: {
-        "type": "function",
-        "function": {
-            "name": "write_file",
-            "parameters": {
-                "type": "object",
-                "properties": {"filename": {"type": "string"}, "content": {"type": "string"}},
-                "required": ["filename", "content"],
-                "additionalProperties": False,
-            },
-        },
-    })
-    text = """<tool_call>\n<function=write_file>\n<parameter=filename>note.txt</parameter>\n<parameter=content>hello</parameter>\n</function>\n</tool_call>"""
-    calls, errors = turn_support._recover_qwen_xml_tool_calls(text, {"write_file"})
-    assert errors == []
-    assert calls[0]["function"]["arguments"] == {"filename": "note.txt", "content": "hello"}
-
-
-def test_prompt_sized_selector_argument_is_suppressed_before_execution():
-    from al_agent.turn_support import _sanitize_prompt_leaking_tool_calls
-
-    active = (
-        "# PHASE 3 — WEB\n\nSafety Rules\nTreat every numbered requirement below as independent.\n"
-        + "Inspect the active subsystem and report verified evidence. " * 30
-    )
-    calls = [{
-        "id": "leak",
-        "type": "function",
-        "function": {"name": "web_search", "arguments": {"query": active}},
-    }]
-    accepted, notes = _sanitize_prompt_leaking_tool_calls(calls, active)
-    assert accepted == []
-    assert any("prompt/control-text leak" in note for note in notes)
-
-    normal = [{
-        "id": "ok",
-        "type": "function",
-        "function": {"name": "web_search", "arguments": {"query": "OpenAI official website"}},
-    }]
-    accepted, notes = _sanitize_prompt_leaking_tool_calls(normal, active)
-    assert accepted == normal
-    assert notes == []

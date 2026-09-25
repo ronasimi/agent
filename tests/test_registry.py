@@ -12,25 +12,8 @@ def test_registry_contract():
     assert all("parameters" in schema["function"] for schema in tools.TOOL_SCHEMAS)
 
 
-def test_tool_schema_selection():
-    import tools
-    schemas = tools.select_tool_schemas("check CPU and memory usage", max_tools=20)
-    names = {schema["function"]["name"] for schema in schemas}
-    assert len(schemas) <= 20
-    assert "host_snapshot" in names
-    assert "execute_shell" not in names
-    assert "pressure_snapshot" in names or "pressure_info" in names
 
 
-def test_small_core_and_file_bundle_are_stable():
-    import tools
-    generic = {schema["function"]["name"] for schema in tools.select_tool_schemas("hello", max_tools=12)}
-    file_turn = {schema["function"]["name"] for schema in tools.select_tool_schemas("inspect this repo file", max_tools=12)}
-    assert generic == tools._ALWAYS_TOOL_NAMES
-    assert {"read_file", "path_stat", "find_paths", "read_text"} <= file_turn
-    assert "write_file" not in file_turn
-    assert "execute_python" not in file_turn
-    assert len(file_turn) <= 12
 
 
 def test_argument_normalization_performs_only_unambiguous_coercion():
@@ -62,13 +45,6 @@ def test_bare_list_annotation_generates_array_schema():
     assert schema["function"]["parameters"]["properties"]["tags"]["type"] == "array"
 
 
-def test_mixed_intent_keeps_lexically_relevant_tool_after_bundle_selection():
-    import tools
-
-    schemas = tools.select_tool_schemas("search the web and send a desktop notification", max_tools=12)
-    names = {schema["function"]["name"] for schema in schemas}
-    assert "web_search" in names
-    assert "notify_desktop" in names
 
 
 def test_generic_prompt_does_not_always_expose_privileged_shell():
@@ -97,17 +73,6 @@ def test_workspace_accepts_absolute_path_inside_workspace(tmp_path, monkeypatch)
     assert resolved == str(target.resolve())
 
 
-def test_short_followup_can_retain_tool_from_recent_context():
-    import tools
-
-    tools.load_tools()
-    schemas = tools.select_tool_schemas(
-        "yes, do that",
-        max_tools=12,
-        context_text="Please schedule a reminder for tomorrow. I can create it with schedule_reminder.",
-    )
-    names = {schema["function"]["name"] for schema in schemas}
-    assert "schedule_reminder" in names
 
 
 def test_custom_tool_decorator_defaults_to_bounded_timeout():
@@ -183,27 +148,11 @@ def test_cancel_reminder_rejects_empty_id_before_slug_fallback():
     assert cancel_reminder("").startswith("Error:")
 
 
-def test_weather_intent_exposes_structured_weather_and_web_fallback():
-    import tools
-    tools.load_tools()
-    names = {schema["function"]["name"] for schema in tools.select_tool_schemas("weather forecast for the next 5 days", max_tools=12)}
-    assert {"geocode_location", "weather_forecast", "web_search", "browse_url"} <= names
-    assert "environment_summary" not in names
 
 
 def test_tool_discovery_does_not_mutate_registry():
     import tools
     tools.load_tools()
     names = {schema["function"]["name"] for schema in tools.select_tool_schemas("what tools are available?", max_tools=12)}
-    assert "tool_health" in names
+    assert names == {"tool_search", "load_tools"}
     assert "reload_tools" not in names
-
-
-def test_local_network_scan_intent_exposes_readonly_discovery_primitives():
-    import tools
-    tools.load_tools()
-    names = {schema["function"]["name"] for schema in tools.select_tool_schemas(
-        "scan the local network and subnets for hosts", max_tools=16
-    )}
-    assert {"local_subnets", "scan_subnet"} <= names
-    assert "network_reachability" not in names

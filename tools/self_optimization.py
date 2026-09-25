@@ -39,13 +39,13 @@ CONFIG = load_config()
 AGENT_CFG = CONFIG.get("agent", {})
 OPT_CFG = CONFIG.get("self_optimization", {})
 WORKSPACE_ROOT = Path(str(OPT_CFG.get("workspace_root", "/app/workspace/self_optimization")))
-MODEL = str(AGENT_CFG.get("model", "agent-main"))
-FAST_MODEL = str(AGENT_CFG.get("fast_model", "agent-main"))
+MODEL = AGENT_CFG["model"]
+FAST_MODEL = MODEL
 OLLAMA_HOST = str(AGENT_CFG.get("host", os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")))
-SELF_OPTIONS = OPT_CFG.get("model_options") or {
-    "num_ctx": 16384, "temperature": 0.6, "top_p": 0.95, "top_k": 20, "num_predict": 4096,
-}
-FAST_OPTIONS = AGENT_CFG.get("fast_options") or {"num_ctx": 16384, "temperature": 0.1, "top_p": 0.95, "top_k": 20}
+SELF_OPTIONS = dict(AGENT_CFG["main_options"])
+
+FAST_OPTIONS = dict(SELF_OPTIONS)
+MODEL_TRANSPORT_TIMEOUT = float(AGENT_CFG.get("model_transport", {}).get("timeout_seconds", 60))
 
 _PLAN_SCHEMA = {
     "type": "object",
@@ -297,12 +297,12 @@ def _model_generate(
 ) -> dict[str, Any]:
     if before_inference:
         before_inference()
-    response = Client(host=os.environ.get("OLLAMA_HOST", OLLAMA_HOST)).generate(
+    response = Client(host=os.environ.get("OLLAMA_HOST", OLLAMA_HOST), timeout=MODEL_TRANSPORT_TIMEOUT).generate(
         model=model,
         prompt=prompt,
         format=schema,
         options=options,
-        keep_alive=0,
+        keep_alive=AGENT_CFG.get("keep_alive", -1),
         **capability_chat_overrides(model, think=False),
     )
     return _parse_json_response(response.get("response", "{}"))

@@ -1,4 +1,5 @@
 """Frontend event routing, cancellation, and cross-process inference locking."""
+
 from __future__ import annotations
 
 import contextvars
@@ -11,11 +12,18 @@ from contextlib import contextmanager
 from typing import Any, Callable
 
 from tools.runtime import utc_now
-from tools.conversation_context import get_active_conversation_id, normalize_conversation_id
+from tools.conversation_context import (
+    get_active_conversation_id,
+    normalize_conversation_id,
+)
 from .state import INFERENCE_LOCK_PATH, INFERENCE_LOCK_TIMEOUT_SECONDS
 
-_EVENT_SINK: contextvars.ContextVar[Callable[[dict[str, Any]], None] | None] = contextvars.ContextVar("agent_event_sink", default=None)
-_CANCEL_EVENT: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar("agent_cancel_event", default=None)
+_EVENT_SINK: contextvars.ContextVar[Callable[[dict[str, Any]], None] | None] = (
+    contextvars.ContextVar("agent_event_sink", default=None)
+)
+_CANCEL_EVENT: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar(
+    "agent_cancel_event", default=None
+)
 
 
 def emit_event(event_type: str, **payload: Any) -> None:
@@ -44,7 +52,6 @@ def cancel_requested() -> bool:
     return bool(token and token.is_set())
 
 
-
 def _acquire_file_lock(
     path: str,
     *,
@@ -66,30 +73,50 @@ def _acquire_file_lock(
     queued = False
     started = time.monotonic()
     last_progress_emit = started
-    deadline = None if timeout_seconds is None else started + max(0.0, float(timeout_seconds))
-    while True:
-        if cancel_requested():
-            handle.close()
-            raise RuntimeError("Turn cancelled while waiting for a harness lock")
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            emit_event(acquired_event, queued=queued, wait_ms=(time.monotonic() - started) * 1000.0)
-            return handle
-        except BlockingIOError:
-            now = time.monotonic()
-            if not queued:
-                queued = True
-                emit_event(wait_event, elapsed_ms=0.0, timeout_seconds=timeout_seconds)
-            elif now - last_progress_emit >= 5.0:
-                last_progress_emit = now
-                emit_event(f"{wait_event}_progress", elapsed_ms=(now - started) * 1000.0, timeout_seconds=timeout_seconds)
-            if deadline is not None and now >= deadline:
+    deadline = (
+        None if timeout_seconds is None else started + max(0.0, float(timeout_seconds))
+    )
+    try:
+        while True:
+            if cancel_requested():
                 handle.close()
-                emit_event(f"{wait_event}_timeout", elapsed_ms=(now - started) * 1000.0, timeout_seconds=timeout_seconds)
-                raise TimeoutError(
-                    f"Timed out after {float(timeout_seconds):.1f}s waiting for the shared model inference slot"
+                raise RuntimeError("Turn cancelled while waiting for a harness lock")
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                emit_event(
+                    acquired_event,
+                    queued=queued,
+                    wait_ms=(time.monotonic() - started) * 1000.0,
                 )
-            time.sleep(0.10)
+                return handle
+            except BlockingIOError:
+                now = time.monotonic()
+                if not queued:
+                    queued = True
+                    emit_event(
+                        wait_event, elapsed_ms=0.0, timeout_seconds=timeout_seconds
+                    )
+                elif now - last_progress_emit >= 5.0:
+                    last_progress_emit = now
+                    emit_event(
+                        f"{wait_event}_progress",
+                        elapsed_ms=(now - started) * 1000.0,
+                        timeout_seconds=timeout_seconds,
+                    )
+                if deadline is not None and now >= deadline:
+                    handle.close()
+                    emit_event(
+                        f"{wait_event}_timeout",
+                        elapsed_ms=(now - started) * 1000.0,
+                        timeout_seconds=timeout_seconds,
+                    )
+                    raise TimeoutError(
+                        f"Timed out after {float(timeout_seconds):.1f}s waiting for the shared model inference slot"
+                    )
+                time.sleep(0.10)
+    except BaseException:
+        handle.close()
+        raise
 
 
 def acquire_turn_lock():
@@ -100,12 +127,15 @@ def acquire_turn_lock():
     per-conversation lock preserves ordering without occupying the model queue.
     """
     conversation_id = normalize_conversation_id(get_active_conversation_id())
-    digest = hashlib.sha256(conversation_id.encode("utf-8", errors="replace")).hexdigest()[:20]
+    digest = hashlib.sha256(
+        conversation_id.encode("utf-8", errors="replace")
+    ).hexdigest()[:20]
     base = os.path.dirname(INFERENCE_LOCK_PATH) or "."
     return _acquire_file_lock(
         os.path.join(base, f".agent_turn_{digest}.lock"),
         wait_event="turn_queue_wait",
         acquired_event="turn_queue_acquired",
+        timeout_seconds=INFERENCE_LOCK_TIMEOUT_SECONDS,
     )
 
 

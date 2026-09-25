@@ -63,6 +63,14 @@ def _interactive_recent() -> bool:
 
 def _interactive_busy() -> bool:
     """Return True while a foreground turn is active *or waiting* for inference."""
+    active_turns = get_monitor_state("agent.foreground_turns", {})
+    for token, turn in list(active_turns.items()):
+        try:
+            os.kill(int(turn["pid"]), 0)
+            return True
+        except (OSError, ValueError, TypeError, KeyError):
+            from tools.runtime import set_foreground_turn
+            set_foreground_turn(token, None)
     for key in ("agent.interaction_active", "agent.interaction_waiting"):
         active = get_monitor_state(key, False)
         if isinstance(active, dict) and active.get("pid"):

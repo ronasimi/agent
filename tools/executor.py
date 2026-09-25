@@ -6,6 +6,7 @@ Timeout-decorated Python/custom tools execute in a single-use subprocess; the
 shared subprocess runner can therefore terminate the entire process group on a
 wall-clock timeout instead of leaving an unkillable CPython worker thread.
 """
+
 from __future__ import annotations
 
 import json
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .subprocess_utils import run_argv
+from .conversation_context import get_active_conversation_id
 from .lifecycle_hooks import before_tool_decision, after_tool_notify
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -27,7 +29,15 @@ def _execute_isolated_tool(name: str, args: dict[str, Any], seconds: int) -> Any
         request_path = Path(temp_dir) / "request.json"
         result_path = Path(temp_dir) / "result.json"
         request_path.write_text(
-            json.dumps({"name": name, "args": args}, ensure_ascii=False, default=str),
+            json.dumps(
+                {
+                    "name": name,
+                    "args": args,
+                    "conversation_id": get_active_conversation_id(),
+                },
+                ensure_ascii=False,
+                default=str,
+            ),
             encoding="utf-8",
         )
         try:
@@ -36,7 +46,13 @@ def _execute_isolated_tool(name: str, args: dict[str, Any], seconds: int) -> Any
             pass
 
         proc = run_argv(
-            [sys.executable, "-m", "tools.executor_worker", str(request_path), str(result_path)],
+            [
+                sys.executable,
+                "-m",
+                "tools.executor_worker",
+                str(request_path),
+                str(result_path),
+            ],
             cwd=str(_REPO_ROOT),
             timeout=seconds,
             env=os.environ.copy(),
@@ -48,13 +64,21 @@ def _execute_isolated_tool(name: str, args: dict[str, Any], seconds: int) -> Any
                 "the isolated tool process group was terminated."
             )
         if not result_path.exists():
-            detail = (proc.stderr or proc.stdout or f"isolated worker exited with status {proc.returncode}").strip()
-            raise RuntimeError(f"Tool '{name}' isolated worker failed without a result: {detail[:1200]}")
+            detail = (
+                proc.stderr
+                or proc.stdout
+                or f"isolated worker exited with status {proc.returncode}"
+            ).strip()
+            raise RuntimeError(
+                f"Tool '{name}' isolated worker failed without a result: {detail[:1200]}"
+            )
 
         try:
             packet = json.loads(result_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"Tool '{name}' isolated worker returned an invalid result: {exc}") from exc
+            raise RuntimeError(
+                f"Tool '{name}' isolated worker returned an invalid result: {exc}"
+            ) from exc
         if packet.get("ok") is True:
             return packet.get("value")
         error_type = str(packet.get("error_type") or "RuntimeError")
@@ -62,7 +86,9 @@ def _execute_isolated_tool(name: str, args: dict[str, Any], seconds: int) -> Any
         raise RuntimeError(f"{error_type}: {message}")
 
 
-def execute_registered_tool(name: str, args: dict[str, Any]) -> Any:
+def execute_registered_tool(
+    name: str, args: dict[str, Any], *, binding: tuple | None = None
+) -> Any:
     """Execute one registered tool through the canonical lifecycle-hook path."""
     # Import lazily to avoid a catalog -> executor -> catalog cycle at startup.
     from .catalog import AVAILABLE_TOOLS_MAP, TOOL_METADATA
@@ -71,8 +97,12 @@ def execute_registered_tool(name: str, args: dict[str, Any]) -> Any:
     if denial:
         return f"Error: blocked by lifecycle hook: {denial}"
 
-    func = AVAILABLE_TOOLS_MAP[name]
-    timeout = TOOL_METADATA.get(name, {}).get("timeout")
+    func, meta = (
+        binding
+        if binding is not None
+        else (AVAILABLE_TOOLS_MAP[name], TOOL_METADATA.get(name, {}))
+    )
+    timeout = meta.get("timeout")
     try:
         if not timeout:
             result = func(**args)

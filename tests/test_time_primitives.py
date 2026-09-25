@@ -27,17 +27,8 @@ def test_current_time_returns_structured_current_clock():
     assert isinstance(payload["unix_timestamp"], int)
 
 
-def test_time_request_forces_current_time_without_shell():
-    names = _tool_names(select_tool_schemas("What time is it?", max_tools=12))
-    assert "current_time" in names
-    assert "execute_shell" not in names
-    assert "execute_python" not in names
-    assert "enqueue_self_optimization" not in names
 
 
-def test_current_time_is_present_even_with_tiny_schema_budget():
-    names = _tool_names(select_tool_schemas("What time is it?", max_tools=1))
-    assert names == {"current_time"}
 
 
 def test_direct_time_request_creates_completion_requirement():
@@ -78,9 +69,10 @@ def test_compact_tool_policy_mentions_withheld_capabilities():
 
 
 def test_system_policy_forbids_stale_clock_inference():
-    source = Path("al_agent/runtime.py").read_text(encoding="utf-8")
+    from al_agent.prompts import SYSTEM_POLICY
+    source = SYSTEM_POLICY
     assert "Never infer the current clock from uptime" in source
-    assert "Their absence from the currently supplied schemas" in source
+    assert "an unloaded schema does not mean a tool is absent" in source
 
 
 def test_runtime_services_mount_host_localtime():

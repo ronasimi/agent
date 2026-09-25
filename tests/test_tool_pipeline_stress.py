@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from al_agent.turn_support import _parse_tool_calls, _recover_textual_readonly_tool_call
 from tools.loop_validator import classify_tool_outcome
 from tools.subprocess_utils import run_argv
 from tools.tool_registry import _normalize_schema_arguments
@@ -68,26 +67,8 @@ def test_schema_validation_recurses_and_enforces_bounds():
         _normalize_schema_arguments(schema, {"options": {}})
 
 
-def test_native_tool_args_accept_fenced_and_double_encoded_json():
-    calls, errors = _parse_tool_calls([
-        {"function": {"name": "current_time", "arguments": '''```json
-{}
-```'''}},
-        {"function": {"name": "current_time", "arguments": json.dumps(json.dumps({}))}},
-    ], {"current_time"})
-    assert len(calls) == 2
-    assert not errors
 
 
-def test_textual_recovery_accepts_common_readonly_envelopes_but_not_mutations():
-    text = '''Tool call:\n```json\n{"name":"current_time","arguments":{}}\n```'''
-    calls, name = _recover_textual_readonly_tool_call(text, {"current_time"})
-    assert name == "current_time"
-    assert calls[0]["function"]["arguments"] == {}
-
-    mutation = '''<tool_call>{"function":{"name":"execute_shell","arguments":{"command":"echo nope"}}}</tool_call>'''
-    calls, name = _recover_textual_readonly_tool_call(mutation, {"execute_shell"})
-    assert calls == [] and name == ""
 
 
 def test_nonzero_execution_with_stdout_is_not_classified_as_success():
@@ -116,56 +97,3 @@ def test_timeout_bounded_registered_tools_use_killable_isolated_worker(monkeypat
     assert executor.execute_registered_tool(name, {}) == "isolated"
     assert calls == [(name, {}, 7)]
     assert not hasattr(executor, "_TIMED_OUT_THREADS")
-
-
-def test_malformed_missing_required_call_is_rejected_without_execution():
-    calls, errors = _parse_tool_calls([
-        {"function": {"name": "execute_shell", "arguments": {"timeout": 2}}}
-    ], {"execute_shell"})
-    assert calls == []
-    assert errors and "Missing required argument" in errors[0]
-
-
-def test_readonly_native_batch_executes_concurrently(monkeypatch):
-    from al_agent import runtime as agent
-    import al_agent.turn_engine as turn_engine
-    from tools import get_tool_schema
-
-    monkeypatch.setattr(agent, "_acquire_inference_lock", lambda: None)
-    monkeypatch.setattr(agent, "_release_inference_lock", lambda lock: None)
-    monkeypatch.setattr(agent, "record_monitor_state", lambda *a, **k: None)
-    monkeypatch.setattr(agent, "_queue_compaction_if_needed", lambda *a, **k: None)
-    monkeypatch.setattr(agent, "append_and_save", lambda messages, msg: messages.append(msg))
-    monkeypatch.setattr(turn_engine, "WORKING_STATE_ENABLED", False)
-    monkeypatch.setattr(turn_engine, "RECIPES_ENABLED", False)
-    monkeypatch.setattr(turn_engine, "get_conversation_summary", lambda: "")
-    monkeypatch.setattr(turn_engine, "build_memory_context", lambda *_: "")
-    monkeypatch.setattr(turn_engine, "get_relevant_user_prompt_context", lambda *_: "")
-    monkeypatch.setattr(turn_engine.TaskRequirementLedger, "from_request", classmethod(lambda cls, text: cls([])))
-    schemas = [get_tool_schema("hostname"), get_tool_schema("environment_summary")]
-    monkeypatch.setattr(turn_engine, "select_tool_schemas", lambda *a, **k: schemas)
-
-    def fake_execute(name, args):
-        time.sleep(0.30)
-        return json.dumps({"tool": name, "ok": True})
-    monkeypatch.setattr(turn_engine, "_execute_registered_tool", fake_execute)
-
-    class FakeClient:
-        def __init__(self): self.calls = 0
-        def chat(self, **kwargs):
-            self.calls += 1
-            if self.calls == 1:
-                return iter([{"done": True, "message": {"content": "", "tool_calls": [
-                    {"id": "a", "function": {"name": "hostname", "arguments": {}}},
-                    {"id": "b", "function": {"name": "environment_summary", "arguments": {}}},
-                ]}}])
-            return iter([{"done": True, "message": {"content": "done", "tool_calls": []}}])
-
-    monkeypatch.setattr(agent, "OLLAMA", FakeClient())
-    monkeypatch.setattr(turn_engine, "OLLAMA", agent.OLLAMA)
-    started = time.monotonic()
-    messages = [{"role": "system", "content": "system"}]
-    agent.handle_user_turn(messages, "Run hostname and environment summary together", False)
-    elapsed = time.monotonic() - started
-    assert elapsed < 0.55, elapsed
-    assert messages[-1]["content"] == "done"

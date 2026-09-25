@@ -35,11 +35,9 @@ def _tool_call_key(call: Any) -> str:
     call_id, name, args = _tool_call_parts(call)
     if call_id:
         return "id:" + call_id
-    try:
-        encoded = json.dumps(args, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-    except (TypeError, ValueError):
-        encoded = str(args)
-    return f"sig:{name}:{encoded}"
+    function = call.get("function", {}) if isinstance(call, dict) else getattr(call, "function", None)
+    index = function.get("index") if isinstance(function, dict) else getattr(function, "index", None)
+    return f"index:{index}" if index is not None else ""
 
 
 def merge_stream_tool_calls(accumulated: list[Any], incoming: Any) -> list[Any]:
@@ -48,7 +46,8 @@ def merge_stream_tool_calls(accumulated: list[Any], incoming: Any) -> list[Any]:
     Ollama streams complete tool-call objects, but multiple calls can arrive in
     different chunks.  Some servers/clients may also repeat a call in a later
     chunk.  Preserve arrival order while replacing an existing call with the
-    same id/signature so the turn engine neither drops nor duplicates actions.
+    same explicit id/index so distinct equal-argument calls retain their identity. Calls without an
+    explicit identity are preserved instead of guessed to be duplicates.
     """
     result = list(accumulated or [])
     if isinstance(incoming, dict):
@@ -58,13 +57,14 @@ def merge_stream_tool_calls(accumulated: list[Any], incoming: Any) -> list[Any]:
             items = list(incoming or [])
         except TypeError:
             items = [incoming] if incoming else []
-    positions = {_tool_call_key(call): index for index, call in enumerate(result)}
+    positions = {_tool_call_key(call): index for index, call in enumerate(result) if _tool_call_key(call)}
     for call in items:
         key = _tool_call_key(call)
-        if key in positions:
+        if key and key in positions:
             result[positions[key]] = call
         else:
-            positions[key] = len(result)
+            if key:
+                positions[key] = len(result)
             result.append(call)
     return result
 

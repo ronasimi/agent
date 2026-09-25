@@ -1,7 +1,7 @@
 # ==========================================
 # FILE: tools/tool_manager.py
 # ==========================================
-"""Manage optional workspace custom tools using the fast coder model with validation."""
+"""Manage optional workspace custom tools using the all-purpose model with validation."""
 from __future__ import annotations
 
 import ast
@@ -20,14 +20,16 @@ TOOLS_DIR = Path("/app/workspace/custom_tools")
 TOOLS_DIR.mkdir(parents=True, exist_ok=True)
 
 CONFIG = load_config()
-FAST_MODEL = CONFIG.get("agent", {}).get("fast_model", "agent-main")
-FAST_OPTIONS = CONFIG.get("agent", {}).get("fast_options", {"num_ctx": 16384, "temperature": 0.1, "top_p": 0.95, "top_k": 20})
-FAST_KEEP_ALIVE = CONFIG.get("agent", {}).get("fast_model_keep_alive", CONFIG.get("worker", {}).get("fast_model_keep_alive", 0))
+# Compatibility names refer to the single configured all-purpose model.
+FAST_MODEL = CONFIG["agent"]["model"]
+FAST_OPTIONS = dict(CONFIG["agent"]["main_options"])
+FAST_KEEP_ALIVE = CONFIG["agent"].get("keep_alive", -1)
+MODEL_TRANSPORT_TIMEOUT = float(CONFIG["agent"].get("model_transport", {}).get("timeout_seconds", 60))
 OLLAMA_HOST = CONFIG.get("agent", {}).get("host", os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434"))
 
 
 def _fast_client() -> Client:
-    return Client(host=os.environ.get("OLLAMA_HOST", OLLAMA_HOST))
+    return Client(host=os.environ.get("OLLAMA_HOST", OLLAMA_HOST), timeout=MODEL_TRANSPORT_TIMEOUT)
 
 
 def list_tool_files() -> str:

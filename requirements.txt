@@ -21,3 +21,4 @@ websockets
 python-multipart
 pillow
 cryptography>=43,<47
+jsonschema>=4.23,<5

@@ -1,190 +1,117 @@
-<p align="center">
-  <img src="webui/static/assets/agent-logo.png" alt="Al Agent logo" width="300">
-</p>
-
 # Al Agent
 
-Al Agent is a local-first AI assistant for Ollama. It combines a browser chat interface with tools, persistent conversations, memory, reminders, research, browser automation, and background jobs while keeping the default executor small and responsive.
+A local assistant for Ollama with autonomous tool selection and one all-purpose model. The default is your original distilled 4B model, exposed as `agent-main:4b`.
 
 ## Features
 
-- Browser-based chat UI with streaming responses
-- Optional live **Thinking** stream above the composer
-- Persistent conversations and timestamp-aware historical recall
-- Four-tier context and memory system optimized for small local models
-- Tool calling, reusable recipes, grounding, and bounded recovery
-- Cached startup model-conformance detection for tool calling, thinking, and streaming
-- Browser/UI automation with state tracking and verification
-- Background jobs, reminders, research, and report generation
-- Workspace file browser with uploads, previews, downloads, and inline media
-- Optional read-only Gmail, Calendar, and Google Drive connections
-- One-click **Generate Bug Report** for LLM-assisted troubleshooting
-- Local SQLite/WAL storage and encrypted credential storage
+- Browser chat, saved conversations, files, and generated artifacts.
+- Model-selected tools, arguments, execution order, and final answers.
+- Schema-constrained JSON actions by default; optional native tool calling.
+- Searchable tool catalog with bounded, dynamically loaded schemas.
+- Conversation-scoped memory and tool observations.
+- Research, reminders, browser automation, and durable background jobs.
+- One model for chat, tool decisions, research, maintenance, and custom-tool generation.
+- Strict argument validation, finite execution budgets, and cancellation.
+- Optional read-only Google integrations and local encrypted credential storage.
 
 ## Prerequisites
 
-You need:
-
-- Linux
-- Docker with the Docker Compose plugin
-- Ollama running on the host
-- Git for normal source-control workflows
-- Enough RAM/VRAM for the models configured in `config/config.yaml`
-
-The default setup expects Ollama at `http://127.0.0.1:11434`.
+- Linux and Docker with the Compose plugin.
+- Ollama running on the host, normally at http://127.0.0.1:11434.
+- Enough RAM or VRAM for the distilled 4B model with a 16,384-token context.
+- Python 3.11 or newer for development outside Docker.
 
 ## Quick start
 
-### 1. Clone the repository
-
-```bash
-git clone <repository-url>
-cd agent
-```
-
-### 2. Create the configured Ollama model aliases
+Extract the repository and open a terminal in its root directory.
 
 ```bash
 ./scripts/create_ollama_aliases.sh
-```
-
-You can change model names and context sizes later in `config/config.yaml`.
-
-The default interactive hierarchy is intentionally asymmetric:
-
-- **Decision — `agent-micro` → `qwen2.5-coder:0.5b`**: constrained plan/validator decisions only; never normal user prose.
-- **Executor — `agent-main` → `qwen2.5-coder:1.5b`**: default native tool caller, bounded argument constructor, and ordinary conversational model.
-- **Reasoning — `agent-reasoning` → `hf.co/empero-ai/Qwen3.8-4B-Distill-GGUF:Q4_K_M`**: lazy text reasoning/escalation for explicit Think, complex analysis, and bounded recovery.
-- **Vision — `qwen3.5:4b`**: separate multimodal path because the configured reasoning GGUF is text-only.
-- **Research — `agent-research` → `qwen3.5:9b`**: long-form research/report synthesis only.
-
-Deterministic routing, recipes, evidence checks, and scheduler transitions run before any model call. With `OLLAMA_MAX_LOADED_MODELS=2`, steady-state residency is executor + decision; reasoning or vision temporarily replaces decision, and `agent-micro` is restored asynchronously afterward.
-
-### 3. Start Al Agent
-
-```bash
 docker compose up -d --build
 ```
 
-Open:
+The alias script pulls `hf.co/empero-ai/Qwen3.8-4B-Distill-GGUF:Q4_K_M` and creates `agent-main:4b`. It creates one alias. To select an existing deployment's model, set AGENT_MODEL_SOURCE and AGENT_MODEL when running the script; keep the same AGENT_MODEL value when starting Compose.
 
-```text
-http://127.0.0.1:8080
-```
-
-### 4. Stop Al Agent
+Open http://127.0.0.1:8080. Stop the services with:
 
 ```bash
 docker compose down
 ```
 
-## First run
+The supplied ollama.env.example contains settings for the host Ollama service, including one loaded model and one parallel inference request. Apply them to that service and restart it as appropriate for your installation; Compose does not configure the host service.
 
-The Web UI guides you through basic profile setup. Google connections are optional and can be configured later from the wrench menu.
+## How tool selection works
 
-The main interface provides:
+Each turn presents the model with the tool-name inventory and the schemas for tool_search and load_tools. The model can answer immediately, inspect tool descriptions, load schemas, execute a tool, read its result, and select the next action.
 
-- **New Chat** and saved conversations in the left sidebar
-- **Jobs** and **Reminders** in the sidebar
-- a folder icon in the top bar for workspace files
-- a **Think** toggle in the composer
-- a wrench menu for **Profile Setup**, **Connections**, **Generate Bug Report**, and **UI Benchmarks**
+The default JSON protocol constrains the model to one typed tool action or final answer per response. The harness validates the completed response and arguments, executes the selected registered function, and supplies its result to the same model. No user-prompt keywords select a tool, recipe, workflow, or different model.
 
-## Thinking mode
-
-Thinking is off by default for faster everyday responses. When enabled, model reasoning is streamed live in a separate bubble above the chat input and the final answer remains in the conversation normally.
-
-## Files and persistent data
-
-The repository uses two runtime data directories:
-
-```text
-workspace/   user files, generated artifacts, downloads, research output
-memory/      SQLite state, conversations, context, profile data, traces
-```
-
-Both are ignored by Git.
-
-The folder icon in the Web UI opens the workspace drawer.
-
-## Generate a bug report
-
-For troubleshooting:
-
-1. Reproduce the problem.
-2. Open the wrench menu.
-3. Select **Generate Bug Report**.
-4. Look in the repository root for a file named like:
-
-```text
-al-agent-bug-report-20260924-012530Z.md
-```
-
-The report is designed to be supplied to an LLM together with the matching codebase. It includes bounded runtime state, recent timestamped conversation history, active working state, effective system prompts, recent model-call traces, failures, tool health, storage information, Git state/diff information, runtime versions, and a compact repository map.
-
-Known credential/token fields are redacted, but the report can contain conversation text and system prompts. Review it before sharing outside your trusted environment.
-
-Bug-report files are ignored by Git.
+Tool progress appears during execution. Final answer text is buffered until a complete, valid response arrives, so partial action JSON never appears as a chat answer. Thinking is optional and requires both an explicitly compatible model and supports_thinking enabled in configuration.
 
 ## Configuration
 
-The main configuration file is:
+Edit config/config.yaml. The primary settings are:
 
-```text
-config/config.yaml
+| Setting | Default | Purpose |
+|---|---|---|
+| agent.model | agent-main:4b | Every inference workload uses this model |
+| agent.tool_protocol | json | Set native only for a compatible tool-calling template |
+| agent.main_options.num_ctx | 16384 | Shared context size |
+| agent.main_options.num_predict | 2048 | Per-response output limit |
+| agent.max_model_calls_per_turn | 24 | Model-call budget |
+| agent.max_tool_calls_per_turn | 48 | Tool-call budget, including discovery |
+| agent.max_active_tools | 16 | Loaded task tools, plus discovery controls |
+| agent.max_tool_schema_chars | 20000 | Loaded task-schema allowance |
+| agent.turn_hard_timeout_seconds | 600 | Cooperative turn deadline |
+
+AGENT_MODEL and OLLAMA_HOST override the corresponding configuration values. Legacy role settings are normalized to the same model and options; different role overrides are ignored with a warning.
+
+The default distilled model is text-only. Image display, downloads, and document tools remain available; pixel understanding is unavailable. The harness never loads a vision model.
+
+## Files and existing installations
+
+Runtime data lives in workspace/ and memory/. Credentials use the existing Docker volume. These directories and credentials are excluded from this source archive.
+
+For an existing deployment, back up those data directories, retain your integration settings, and merge the new single-model agent configuration before rebuilding. Existing chat rows, observations, jobs, and recipes remain usable. Recent raw chat history is loaded independently of legacy compaction watermarks; older records remain searchable through tools.
+
+Explicit slash commands remain direct interface controls. Recipes, pipelines, and durable jobs still perform their documented operations when chosen by the model or explicitly requested through the interface.
+
+## Validate your deployment
+
+After Ollama and the containers are running:
+
+```bash
+docker compose exec webui python diagnostics/validate_ollama.py
 ```
 
-Common settings include:
+This read-only smoke test requires the actual model to discover and execute calculate and report 437 for 19 × 23. It exits unsuccessfully if the interaction fails.
 
-- Ollama model roles and context sizes
-- thinking and generation limits
-- memory/context compaction
-- tools and recipes
-- browser automation budgets
-- background jobs and reminders
-- research/report settings
+For development:
 
-Deployment-specific settings can also be supplied through environment variables in `docker-compose.yml` and `ollama.env.example`.
+```bash
+./scripts/bootstrap_venv.sh
+.venv/bin/python -m pytest -q
+.venv/bin/python diagnostics/simulate_turns.py
+RUN_OLLAMA_LIVE_TESTS=1 .venv/bin/python -m pytest -q tests/test_ollama_conformance_live.py
+```
 
-## Optional Google connections
+Offline validation: 587 tests passed and four environment-dependent tests skipped. The simulator covers direct answering, real calculation dispatch, and model-directed argument repair with a scripted model. Real SDK tests exercise both wire protocols through mocked HTTP transport. Live Ollama, model quality, and Docker deployment were not validated in the refactoring environment.
 
-Open **Connections** from the wrench menu to configure read-only Google access. The harness supports Gmail search/read, Calendar read access, and Google Drive metadata/listing. It does not send email or modify Google data through these read-only integrations.
+## Generate a bug report
 
-## Troubleshooting
+Use the wrench menu and choose **Generate Bug Report**. The report includes recent execution state, model-call traces, configuration, and repository details. Known secret fields are redacted, but reports can contain chat content; review them before sharing.
 
-View container logs:
+To view service logs:
 
 ```bash
 docker compose logs -f webui worker
 ```
 
-Rebuild after source changes:
-
-```bash
-docker compose up -d --build
-```
-
-For harder problems, generate a bug report from the wrench menu and provide it with the repository to the diagnosing LLM.
-
-Developer benchmarks and troubleshooting utilities live under `diagnostics/`. Setup and operational helper scripts remain under `scripts/`.
-
 ## Documentation
 
-Engineering documentation is under [`docs/`](docs/README.md).
-
-Useful starting points:
-
 - [Architecture](docs/ARCHITECTURE.md)
+- [Refactor findings, migration, and validation](docs/AUTONOMOUS_REFACTOR.md)
 - [Current state](docs/CURRENT_STATE.md)
-- [Context and memory tiers](docs/CONTEXT_TIERS_2026-09-23.md)
-- [Model capability/conformance layer](docs/MODEL_CAPABILITY_CONFORMANCE.md)
-- [Bug reports](docs/BUG_REPORTS.md)
+- [Documentation index](docs/README.md)
 
-## Security
-
-- The Web UI binds to `127.0.0.1` by default.
-- The UI does not provide multi-user authentication.
-- Credentials are kept outside model context in the local credential store.
-- Google integrations are read-only.
-- Bug reports redact known secret fields but may contain chat content and prompts.
-
+The UI binds to localhost by default and has no multi-user authentication. Preserve the existing credential, path-validation, and lifecycle controls when extending tools.

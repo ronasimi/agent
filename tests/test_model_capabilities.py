@@ -93,9 +93,7 @@ def test_capability_overrides_omit_explicitly_unsupported_optional_fields(monkey
 
 def test_unknown_profile_preserves_existing_runtime_behavior(monkeypatch):
     monkeypatch.setattr(caps, "_ACTIVE", {})
-    assert caps.capability_chat_overrides("new-model", think=True, tools=[]) == {
-        "think": True,
-    }
+    assert caps.capability_chat_overrides("new-model", think=True, tools=[]) == {}
 
 
 def test_behavioral_probe_must_verify_tool_call_before_runtime_uses_tools(monkeypatch):

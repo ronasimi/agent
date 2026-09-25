@@ -493,7 +493,9 @@ def capability_chat_overrides(
     """
     profile = get_active_model_capabilities(model)
     result: dict[str, Any] = {}
-    if think is not _UNSET and not (profile is not None and profile.think_parameter is False):
+    from tools.config import load_config
+    think_enabled = bool(load_config()["agent"].get("supports_thinking", False))
+    if think_enabled and think is not _UNSET and not (profile is not None and profile.think_parameter is False):
         result["think"] = think
     if tools is not _UNSET:
         # Never serialize an explicitly empty tool list. Omitting the optional

@@ -71,18 +71,6 @@ def test_jsonl_summary_tolerates_bad_records_and_reports_line_numbers():
     assert payload["source_truncated"] is False
 
 
-def test_jsonl_prompt_selects_native_tolerant_parser():
-    from tools import load_tools, select_tool_schemas
-
-    load_tools()
-    selected = {
-        item["function"]["name"]
-        for item in select_tool_schemas(
-            "Parse logs/events.jsonl, keep valid JSON records, and report malformed line numbers.",
-            max_tools=12,
-        )
-    }
-    assert "jsonl_summary" in selected
 
 
 def test_memory_search_ignores_conversational_stopword_matches(monkeypatch, tmp_path):
@@ -108,18 +96,6 @@ def test_capability_question_does_not_inherit_previous_task_frame():
     assert derive_task_frame("What else can you do?", {}) == {}
 
 
-def test_explicit_no_tools_constraint_blocks_all_tool_paths():
-    from tools import AVAILABLE_TOOLS_MAP, TOOL_METADATA
-    from tools.turn_policy import derive_turn_tool_policy
-
-    policy = derive_turn_tool_policy(
-        "Without using any tools, tell me the exact current time.",
-        set(AVAILABLE_TOOLS_MAP),
-        TOOL_METADATA,
-    )
-    assert policy.all_tools_blocked is True
-    assert not policy.allowed("current_time", TOOL_METADATA["current_time"])
-    assert len(policy.blocked) == len(AVAILABLE_TOOLS_MAP)
 
 
 def test_slash_parser_accepts_general_whitespace_separators():
@@ -138,60 +114,3 @@ def test_current_time_accepts_explicit_iana_timezone():
     payload = json.loads(current_time("Asia/Tokyo"))
     assert payload["timezone"] == "Asia/Tokyo"
     assert payload["utc_offset"] in {"+0900"}
-
-
-def test_time_request_uses_deterministic_pregrounding_and_skips_main_model(monkeypatch):
-    from al_agent import runtime as agent
-    from al_agent import turn_engine
-
-    calls = []
-
-    def fake_execute(name, args):
-        calls.append((name, dict(args)))
-        if name == "geocode_location":
-            return json.dumps([{"name": "Tokyo", "timezone": "Asia/Tokyo", "latitude": 35.6, "longitude": 139.7}])
-        if name == "current_time":
-            assert args.get("timezone_name") == "Asia/Tokyo"
-            return json.dumps({
-                "utc": "2026-09-20T13:00:00+00:00",
-                "local": "2026-09-20T22:00:00+09:00",
-                "date": "2026-09-20",
-                "time": "22:00:00",
-                "day_of_week": "Sunday",
-                "timezone": "Asia/Tokyo",
-                "timezone_abbreviation": "JST",
-                "utc_offset": "+0900",
-            })
-        raise AssertionError(name)
-
-    class NoModel:
-        def chat(self, **kwargs):
-            raise AssertionError("main model should not be called for a simple grounded time request")
-
-    monkeypatch.setattr(agent, "OLLAMA", NoModel())
-    lock_events = []
-    monkeypatch.setattr(agent, "_acquire_turn_lock", lambda: lock_events.append("turn_acquire") or object())
-    monkeypatch.setattr(agent, "_release_turn_lock", lambda lock: lock_events.append("turn_release"))
-    monkeypatch.setattr(agent, "_acquire_inference_lock", lambda: lock_events.append("model_acquire") or object())
-    monkeypatch.setattr(agent, "_release_inference_lock", lambda lock: lock_events.append("model_release"))
-    monkeypatch.setattr(agent, "record_monitor_state", lambda *a, **k: None)
-    monkeypatch.setattr(agent, "_queue_compaction_if_needed", lambda *a, **k: None)
-    monkeypatch.setattr(agent, "append_and_save", lambda messages, msg: messages.append(msg))
-    monkeypatch.setattr(turn_engine, "_execute_registered_tool", fake_execute)
-    monkeypatch.setattr(turn_engine, "WORKING_STATE_ENABLED", False)
-    monkeypatch.setattr(turn_engine, "RECIPES_ENABLED", False)
-    monkeypatch.setattr(turn_engine, "get_conversation_summary", lambda: "")
-    monkeypatch.setattr(turn_engine, "build_memory_context", lambda *_: "")
-    monkeypatch.setattr(turn_engine, "get_relevant_user_prompt_context", lambda *_: "")
-
-    events = []
-    messages = [{"role": "system", "content": "system"}]
-    with agent.frontend_event_context(events.append):
-        agent.handle_user_turn(messages, "What time is it in Tokyo?", False)
-
-    assert [name for name, _ in calls] == ["geocode_location", "current_time"]
-    assert messages[-1]["role"] == "assistant"
-    assert "10:00:00 PM JST" in messages[-1]["content"]
-    assert "Tokyo" in messages[-1]["content"]
-    assert any(event.get("type") == "assistant_final" and event.get("deterministic") for event in events)
-    assert lock_events == ["turn_acquire", "turn_release"]

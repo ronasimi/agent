@@ -71,57 +71,20 @@ SOURCE_ROOT = _DEFAULT_SOURCE_ROOT
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    """Warm/probe configured models without blocking frontend startup.
-
-    Conformance results are cached by model identity. A cold/new model is
-    probed only after the normal executor warm-up completes so capability
-    checks do not race the fast-model prewarm or contend with a foreground turn.
-    """
-    from al_agent.model_capabilities import schedule_model_capability_probe
-    from al_agent.model_residency import schedule_decision_model_prewarm, schedule_fast_model_prewarm
-
-    def _schedule_support_models() -> None:
-        if agent_runtime.WARMUP_FAST_MODEL:
-            schedule_fast_model_prewarm("startup")
-        if agent_runtime.WARMUP_DECISION_MODEL:
-            schedule_decision_model_prewarm("startup")
-
-    def _probe_main_then_fast() -> None:
-        if agent_runtime.MODEL_CAPABILITY_PROBE_MAIN:
-            from al_agent.background.resources import _interactive_busy
-            schedule_model_capability_probe(
-                agent_runtime.OLLAMA,
-                agent_runtime.MODEL,
-                options=agent_runtime.MAIN_OPTIONS,
-                keep_alive=-1,
-                cache_path=agent_runtime.MODEL_CAPABILITY_CACHE_PATH,
-                force=agent_runtime.MODEL_CAPABILITY_FORCE_PROBE,
-                on_complete=lambda _profile: _schedule_support_models(),
-                busy_check=_interactive_busy,
-                idle_delay_seconds=agent_runtime.MODEL_CAPABILITY_IDLE_DELAY_SECONDS,
-            )
-        else:
-            _schedule_support_models()
-
+    """Warm only the all-purpose model in an idle background slot."""
+    import threading
+    from al_agent.model_residency import background_inference_slot
+    from al_agent.model_protocol import warm_model
+    def warm():
+        try:
+            with background_inference_slot():
+                warm_model(agent_runtime.OLLAMA, agent_runtime.MODEL,
+                           options=agent_runtime.MAIN_OPTIONS, keep_alive=-1)
+        except Exception:
+            pass  # A foreground request can load the same model on demand.
     if agent_runtime.WARMUP_ENABLED:
-        from al_agent.model_protocol import warm_model_async
+        threading.Thread(target=warm, name="model-warmup", daemon=True).start()
 
-        warm_model_async(
-            agent_runtime.OLLAMA,
-            agent_runtime.MODEL,
-            options=agent_runtime.MAIN_OPTIONS,
-            keep_alive=-1,
-            system_prompt=(
-                agent_runtime.build_system_prompt() if agent_runtime.WARMUP_PRIME_PREFIX else ""
-            ),
-            on_success=_probe_main_then_fast,
-            on_error=lambda exc: print(f"[webui]: executor warm-up skipped: {exc}"),
-        )
-    else:
-        # Capability probing is independently configurable. It is still
-        # asynchronous; the UI is already serving while a cold/new model is
-        # characterized. Cached profiles usually complete after metadata only.
-        _probe_main_then_fast()
     yield
 
 
@@ -212,27 +175,10 @@ def commands() -> list[dict[str, Any]]:
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
-    """Return the configured model roles used by the browser status footer.
-
-    Keep this endpoint limited to stable runtime/configuration fields.  The old
-    ``MICRO_MODEL`` role was removed from the harness, but a stale reference
-    here made the entire endpoint return HTTP 500 and left the sidebar model
-    summary at its placeholder values.
-    """
-    return {
-        "ok": True,
-        # Explicit role names plus compatibility aliases for existing clients.
-        "executor_model": agent_runtime.EXECUTOR_MODEL,
-        "decision_model": agent_runtime.DECISION_MODEL,
-        "reasoning_model": agent_runtime.REASONING_MODEL,
-        "main_model": agent_runtime.MODEL,
-        "fast_model": agent_runtime.FAST_MODEL,
-        "vision_model": agent_runtime.VISION_MODEL,
-        "report_model": str(agent_runtime.AGENT_CFG.get("report_model") or ""),
-        "context": agent_runtime.MAX_CTX,
-        "decision_context": agent_runtime.DECISION_OPTIONS.get("num_ctx"),
-        "working_state": agent_runtime.WORKING_STATE_ENABLED,
-    }
+    """Return the one configured model and its context size."""
+    return {"ok": True, "model": agent_runtime.MODEL, "main_model": agent_runtime.MODEL,
+            "context": agent_runtime.MAX_CTX, "tool_protocol": agent_runtime.AGENT_CFG.get("tool_protocol", "json"),
+            "working_state": agent_runtime.WORKING_STATE_ENABLED}
 
 
 @app.get("/api/browser-benchmarks")

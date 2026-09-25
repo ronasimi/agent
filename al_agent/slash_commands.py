@@ -122,9 +122,10 @@ def _render_jobs(rows: list[dict[str, Any]]) -> str:
         return "No durable background jobs."
     lines = ["### Durable jobs", "", "| ID | Status | Type | Title |", "|---|---|---|---|"]
     for job in rows[:25]:
+        title = str(job.get("title") or "").replace("|", "\\|")
         lines.append(
             f"| `{str(job.get('id') or '')[:8]}` | {job.get('status') or '—'} | "
-            f"{job.get('job_type') or '—'} | {str(job.get('title') or '').replace('|', '\\|')} |"
+            f"{job.get('job_type') or '—'} | {title} |"
         )
     return "\n".join(lines)
 
