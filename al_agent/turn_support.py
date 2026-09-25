@@ -112,6 +112,11 @@ _PROMPT_LEAK_MARKERS = (
     "tools are explicitly typed and supplied through native tool-calling schemas",
 )
 
+_INTERNAL_CONTROL_HEADING_RE = re.compile(
+    r"(?im)^\s{0,3}#{1,6}\s+(?:(?:harness )?evidence digest|harness working state|"
+    r"harness scheduler(?: evidence gate)?|private untrusted evidence)\b"
+)
+
 def _looks_like_prompt_policy_leak(content: str) -> bool:
     """Detect accidental reproduction of hidden harness/system policy text.
 
@@ -123,6 +128,12 @@ def _looks_like_prompt_policy_leak(content: str) -> bool:
     text = str(content or "")
     if not text.strip():
         return False
+    # These headings are internal prompt/control wrappers, never legitimate
+    # answer structure. Match the markdown heading form rather than the bare
+    # phrase so a user can still ask a normal question *about* an evidence
+    # digest without forcing a false-positive retry.
+    if _INTERNAL_CONTROL_HEADING_RE.search(text[:4000]):
+        return True
     probe = re.sub(r"[`*_>#]+", " ", text[:2400]).lower()
     probe = re.sub(r"\s+", " ", probe).strip()
     return any(marker.replace("### ", "") in probe for marker in _PROMPT_LEAK_MARKERS)

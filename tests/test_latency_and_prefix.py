@@ -37,9 +37,11 @@ def test_working_state_is_merged_into_single_leading_system_message():
     contents = [str(m.get("content") or "") for m in result]
     history_index = next(i for i, c in enumerate(contents) if "CURRENT REQUEST" == c)
     state_index = next(i for i, c in enumerate(contents) if "Harness working state" in c)
-    evidence_index = next(i for i, c in enumerate(contents) if "evidence digest" in c)
+    evidence_index = next(i for i, c in enumerate(contents) if "Private untrusted evidence" in c)
     assert state_index == 0
-    assert history_index < evidence_index
+    assert evidence_index == 0
+    assert history_index > 0
+    assert all("Harness evidence digest" not in c for c in contents)
     assert "stable-system" in result[0]["content"]
 
 
@@ -342,3 +344,24 @@ def test_repeated_harness_control_notes_are_not_duplicated(monkeypatch, capsys):
         and str(message.get("content") or "").startswith("[Harness hard grounding gate]")
     ]
     assert len(gate_notes) <= 1
+
+
+def test_simple_chat_does_not_expose_private_harness_context(monkeypatch, capsys):
+    """Greetings must use the minimal conversational path, not narrate harness state."""
+    client, _events = _run_turn(
+        monkeypatch,
+        "Hi, how are you?",
+        lambda index, request: "Hi! I'm doing well, thanks for asking.",
+    )
+    capsys.readouterr()
+    assert len(client.requests) == 1
+    wire = "\n".join(str(message.get("content") or "") for message in client.requests[0]["messages"])
+    for private_marker in (
+        "Harness Evidence Digest",
+        "Harness working state",
+        "Harness scheduler",
+        "Harness recipe preflight",
+        "Private untrusted evidence",
+        "validator_history",
+    ):
+        assert private_marker not in wire

@@ -2,8 +2,8 @@
 """Benchmark configured Ollama roles with explicit cold/warm separation.
 
 The benchmark mirrors the harness' effective options, reports every latency
-sample, captures runner residency, and measures foreground TTFT while the fast
-model is being prewarmed in the background.
+sample, captures runner residency, and measures executor foreground TTFT while the decision
+model is being restored in the background.
 """
 from __future__ import annotations
 
@@ -326,20 +326,20 @@ def _residency_snapshot(client: Client) -> dict[str, Any]:
         return {"available": False, "models": [], "error": f"{type(exc).__name__}: {exc}"}
 
 
-def _foreground_during_fast_prewarm(
+def _foreground_during_decision_prewarm(
     client: Client,
     host: str,
-    main_model: str,
-    main_options: dict[str, Any],
-    fast_model: str,
-    fast_options: dict[str, Any],
-    fast_keep_alive: Any,
+    executor_model: str,
+    executor_options: dict[str, Any],
+    decision_model: str,
+    decision_options: dict[str, Any],
+    decision_keep_alive: Any,
     delay_ms: float,
 ) -> dict[str, Any]:
-    """Measure user-visible main TTFT while another connection loads fast."""
-    _warm_chat(client, main_model, main_options, -1)
-    _unload(client, fast_model)
-    _, baseline, baseline_error = _main_ttft_once(client, main_model, main_options)
+    """Measure executor TTFT while another connection restores the decision model."""
+    _warm_chat(client, executor_model, executor_options, -1)
+    _unload(client, decision_model)
+    _, baseline, baseline_error = _main_ttft_once(client, executor_model, executor_options)
     started = threading.Event()
     result: dict[str, Any] = {"prewarm_ms": None, "prewarm_error": None}
 
@@ -347,22 +347,22 @@ def _foreground_during_fast_prewarm(
         background_client = Client(host=host, timeout=180)
         started.set()
         try:
-            result["prewarm_ms"] = round(_warm_chat(background_client, fast_model, fast_options, fast_keep_alive), 2)
+            result["prewarm_ms"] = round(_warm_chat(background_client, decision_model, decision_options, decision_keep_alive), 2)
         except Exception as exc:
             result["prewarm_error"] = f"{type(exc).__name__}: {exc}"
 
-    thread = threading.Thread(target=_prewarm, name="benchmark-fast-prewarm", daemon=True)
+    thread = threading.Thread(target=_prewarm, name="benchmark-decision-prewarm", daemon=True)
     thread.start()
     started.wait(timeout=5.0)
     time.sleep(max(0.0, delay_ms) / 1000.0)
-    _, foreground, foreground_error = _main_ttft_once(client, main_model, main_options)
+    _, foreground, foreground_error = _main_ttft_once(client, executor_model, executor_options)
     thread.join(timeout=190.0)
     added = foreground - baseline if foreground is not None and baseline is not None else None
     ratio = foreground / baseline if foreground is not None and baseline else None
     return {
         "prewarm_start_delay_ms": round(max(0.0, delay_ms), 2),
-        "baseline_main_ttft_ms": round(baseline, 2) if baseline is not None else None,
-        "foreground_main_ttft_ms": round(foreground, 2) if foreground is not None else None,
+        "baseline_executor_ttft_ms": round(baseline, 2) if baseline is not None else None,
+        "foreground_executor_ttft_ms": round(foreground, 2) if foreground is not None else None,
         "added_latency_ms": round(added, 2) if added is not None else None,
         "slowdown_ratio": round(ratio, 2) if ratio is not None else None,
         "baseline_error": baseline_error,
@@ -389,55 +389,78 @@ def _model_residency(
         except Exception as exc:
             cold[role] = {"error": f"{type(exc).__name__}: {exc}"}
 
-    main_model, main_options, main_keep_alive = by_role["main"]
-    fast_model, fast_options, fast_keep_alive = by_role["fast"]
+    executor_model, executor_options, executor_keep_alive = by_role["executor"]
+    decision_model, decision_options, decision_keep_alive = by_role["decision"]
     report_model, report_options, report_keep_alive = by_role["report"]
     transitions: dict[str, Any] = {}
     snapshots: dict[str, Any] = {}
 
     _unload_all(client, all_models)
-    _warm_chat(client, main_model, main_options, main_keep_alive)
-    snapshots["main_only"] = _residency_snapshot(client)
-    transitions["main->fast_cold_beside_main"] = round(_warm_chat(client, fast_model, fast_options, fast_keep_alive), 2)
-    snapshots["main_fast_after_fast_load"] = _residency_snapshot(client)
-    transitions["warm_fast->main"] = round(_warm_chat(client, main_model, main_options, main_keep_alive), 2)
-    snapshots["after_warm_main_switch"] = _residency_snapshot(client)
-    transitions["warm_main->fast"] = round(_warm_chat(client, fast_model, fast_options, fast_keep_alive), 2)
-    snapshots["after_warm_fast_switch"] = _residency_snapshot(client)
+    _warm_chat(client, executor_model, executor_options, executor_keep_alive)
+    snapshots["executor_only"] = _residency_snapshot(client)
+    transitions["executor->decision_cold_beside_executor"] = round(
+        _warm_chat(client, decision_model, decision_options, decision_keep_alive), 2
+    )
+    snapshots["executor_decision_after_decision_load"] = _residency_snapshot(client)
+    transitions["warm_decision->executor"] = round(
+        _warm_chat(client, executor_model, executor_options, executor_keep_alive), 2
+    )
+    snapshots["after_warm_executor_switch"] = _residency_snapshot(client)
+    transitions["warm_executor->decision"] = round(
+        _warm_chat(client, decision_model, decision_options, decision_keep_alive), 2
+    )
+    snapshots["after_warm_decision_switch"] = _residency_snapshot(client)
 
-    _unload(client, main_model)
-    _unload(client, fast_model)
+    if "reasoning" in by_role:
+        reasoning_model, reasoning_options, reasoning_keep_alive = by_role["reasoning"]
+        _unload(client, decision_model)
+        transitions["executor+decision->reasoning_evict_decision"] = round(
+            _warm_chat(client, reasoning_model, reasoning_options, reasoning_keep_alive), 2
+        )
+        snapshots["executor_reasoning"] = _residency_snapshot(client)
+        _unload(client, reasoning_model)
+        transitions["reasoning->decision_restore"] = round(
+            _warm_chat(client, decision_model, decision_options, decision_keep_alive), 2
+        )
+        snapshots["executor_decision_restored"] = _residency_snapshot(client)
+
+    _unload(client, executor_model)
+    _unload(client, decision_model)
     transitions["interactive->report"] = round(_warm_chat(client, report_model, report_options, report_keep_alive), 2)
     snapshots["report_only"] = _residency_snapshot(client)
     _unload(client, report_model)
-    transitions["report->main_restore"] = round(_warm_chat(client, main_model, main_options, main_keep_alive), 2)
-    snapshots["after_report_main_restore"] = _residency_snapshot(client)
-    transitions["main->fast_background_prewarm_after_report"] = round(
-        _warm_chat(client, fast_model, fast_options, fast_keep_alive), 2
+    transitions["report->executor_restore"] = round(
+        _warm_chat(client, executor_model, executor_options, executor_keep_alive), 2
     )
-    snapshots["after_background_fast_prewarm"] = _residency_snapshot(client)
-    transitions["warm_fast->main_after_report"] = round(_warm_chat(client, main_model, main_options, main_keep_alive), 2)
+    snapshots["after_report_executor_restore"] = _residency_snapshot(client)
+    transitions["executor->decision_background_restore_after_report"] = round(
+        _warm_chat(client, decision_model, decision_options, decision_keep_alive), 2
+    )
+    snapshots["after_background_decision_restore"] = _residency_snapshot(client)
+    transitions["warm_decision->executor_after_report"] = round(
+        _warm_chat(client, executor_model, executor_options, executor_keep_alive), 2
+    )
 
-    contention = _foreground_during_fast_prewarm(
-        client, host, main_model, main_options, fast_model, fast_options,
-        fast_keep_alive, contention_delay_ms,
+    contention = _foreground_during_decision_prewarm(
+        client, host, executor_model, executor_options, decision_model, decision_options,
+        decision_keep_alive, contention_delay_ms,
     )
     snapshots["after_foreground_contention_test"] = _residency_snapshot(client)
     return {
         "cold_load_ms": cold,
         "transition_ms": transitions,
-        "foreground_during_background_fast_prewarm": contention,
+        "foreground_during_background_decision_prewarm": contention,
         "residency_snapshots": snapshots,
     }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--runs", type=int, default=20, help="warm interactive/fast/embed repetitions")
+    parser.add_argument("--runs", type=int, default=20, help="warm executor/decision/embed repetitions")
     parser.add_argument("--report-runs", type=int, default=1, help="9B report repetitions")
     parser.add_argument("--config", default=str(ROOT / "config" / "config.yaml"))
     parser.add_argument("--contention-delay-ms", type=float, default=250.0,
-                        help="delay after starting fast prewarm before the foreground probe")
+                        help="delay after starting decision prewarm before the executor foreground probe")
     parser.add_argument("--skip-residency", "--skip-load-swap", dest="skip_residency", action="store_true",
                         help="skip explicit unload/load, residency, and contention measurements")
     args = parser.parse_args()
@@ -446,17 +469,21 @@ def main() -> int:
     agent = dict(cfg.get("agent") or {})
     host = str(agent.get("host") or "http://127.0.0.1:11434")
     client = Client(host=host, timeout=180)
-    main_model = str(agent.get("model") or "agent-main:4b")
-    fast_model = str(agent.get("fast_model") or "agent-main:2b")
-    report_model = str(agent.get("report_model") or "agent-report:9b")
+    executor_model = str(agent.get("executor_model") or agent.get("model") or "agent-main")
+    decision_model = str(agent.get("decision_model") or "agent-micro")
+    reasoning_model = str(agent.get("reasoning_model") or "agent-reasoning")
+    report_model = str(agent.get("report_model") or "agent-research")
     embed_model = str(agent.get("embed_model") or "nomic-embed-text")
     main_options = dict(agent.get("main_options") or {})
-    fast_options = dict(agent.get("fast_options") or {})
+    decision_options = dict(agent.get("decision_options") or {})
+    reasoning_options = dict(agent.get("reasoning_options") or {})
+    fast_options = decision_options  # compatibility output alias only
     validator_cfg = dict(agent.get("tool_loop_validator") or {})
-    validator_options = {**fast_options, **dict(validator_cfg.get("options") or {})}
+    validator_options = {**decision_options, **dict(validator_cfg.get("options") or {})}
     report_options = dict(agent.get("report_options") or {})
-    fast_keep_alive = agent.get("fast_model_keep_alive", -1)
-    validator_keep_alive = validator_cfg.get("keep_alive", fast_keep_alive)
+    decision_keep_alive = agent.get("decision_model_keep_alive", -1)
+    validator_keep_alive = validator_cfg.get("keep_alive", decision_keep_alive)
+    reasoning_keep_alive = agent.get("reasoning_model_keep_alive", "2m")
     report_keep_alive = agent.get("report_model_keep_alive", "10m")
     semantic_enabled = bool(agent.get("semantic_memory_enabled", False))
     warmup_cfg = dict(agent.get("warmup") or {})
@@ -465,31 +492,49 @@ def main() -> int:
 
     output: dict[str, Any] = {
         "host": host,
-        "roles": {"main": main_model, "fast": fast_model, "report": report_model, "embedding": embed_model},
+        "roles": {
+            "executor": executor_model,
+            "decision": decision_model,
+            "reasoning": reasoning_model,
+            "report": report_model,
+            "embedding": embed_model,
+        },
         "effective_config": {
+            "executor_num_ctx": main_options.get("num_ctx"),
+            "decision_num_ctx": decision_options.get("num_ctx"),
+            "reasoning_num_ctx": reasoning_options.get("num_ctx"),
             "main_num_ctx": main_options.get("num_ctx"),
             "fast_num_ctx": fast_options.get("num_ctx"),
             "validator_num_ctx": validator_options.get("num_ctx"),
             "report_num_ctx": report_options.get("num_ctx"),
-            "report_fast_restore_mode": "nonblocking_prewarm",
-            "fast_keep_alive": fast_keep_alive,
+            "report_decision_restore_mode": "nonblocking_prewarm",
+            "decision_keep_alive": decision_keep_alive,
+            "startup_decision_prewarm": bool(warmup_cfg.get("decision_model_prewarm", True)),
+            # Compatibility diagnostics for older parsers.
+            "fast_keep_alive": decision_keep_alive,
             "startup_fast_prewarm": bool(warmup_cfg.get("fast_model_prewarm", True)),
             "thinking_default": bool(agent.get("thinking_default", False)),
             "semantic_memory_enabled": semantic_enabled,
             "warm_samples_per_role": runs,
         },
-        "main_ttft": _main_latency(client, main_model, main_options, runs),
-        "fast_validator": _fast_validator(client, fast_model, validator_options, validator_keep_alive, runs),
+        "executor_ttft": _main_latency(client, executor_model, main_options, runs),
+        "decision_validator": _fast_validator(client, decision_model, validator_options, validator_keep_alive, runs),
+        "reasoning_ttft": _main_latency(client, reasoning_model, reasoning_options, runs),
         "embedding_latency": _embedding_latency(client, embed_model, runs, enabled=semantic_enabled),
     }
+
+    # Compatibility keys retained for existing tooling.
+    output["main_ttft"] = output["executor_ttft"]
+    output["fast_validator"] = output["decision_validator"]
 
     output["report_throughput"] = _report_throughput(
         client, report_model, report_options, report_keep_alive, report_runs
     )
     if not args.skip_residency:
         output["model_residency"] = _model_residency(client, host, [
-            ("main", main_model, main_options, -1),
-            ("fast", fast_model, fast_options, fast_keep_alive),
+            ("executor", executor_model, main_options, -1),
+            ("decision", decision_model, decision_options, decision_keep_alive),
+            ("reasoning", reasoning_model, reasoning_options, reasoning_keep_alive),
             ("report", report_model, report_options, report_keep_alive),
         ], max(0.0, float(args.contention_delay_ms)))
 

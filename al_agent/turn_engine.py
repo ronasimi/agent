@@ -74,7 +74,12 @@ from .model_protocol import (
     tool_result_message,
 )
 from .model_capabilities import ModelCapabilityError, capability_chat_overrides, get_active_model_capabilities
-from .model_residency import evict_report_model_for_interactive
+from .model_residency import (
+    evict_report_model_for_interactive, prepare_decision_model_for_interactive,
+    prepare_reasoning_model_for_interactive, prepare_vision_model_for_interactive,
+    schedule_decision_model_prewarm,
+)
+from .model_roles import should_start_with_reasoning, validator_requests_reasoning
 from .model_traces import record_model_trace
 from .vision import has_images, route_multimodal_messages
 from .state import *  # stable runtime configuration/service aliases
@@ -223,6 +228,10 @@ def handle_user_turn(
     reasoning_recovery_pending = False
     zero_tool_recovery_attempts = 0
     zero_tool_recovery_pending = False
+    reasoning_escalation_pending = False
+    reasoning_model_calls = 0
+    reasoning_model_used = False
+    vision_model_used = False
     inference_lock = None
     model_lock_requested_at: float | None = None
     model_lock_acquired_at: float | None = None
@@ -325,7 +334,7 @@ def handle_user_turn(
             msg["images"] = detected_images
             print(f"  \033[92m[System]: Attached {len(detected_images)} media file(s).\033[0m")
         elif unsupported_image_paths:
-            print("  \033[93m[System]: Configured agent-main GGUF is text-only; image pixels were not sent to the model.\033[0m")
+            print("  \033[93m[System]: Configured vision model could not accept image pixels; visual inspection is unavailable for this turn.\033[0m")
         _append_and_save_fn(messages, msg)
         current_turn_id = int(msg.get("_db_id") or 0)
 
@@ -377,15 +386,16 @@ def handle_user_turn(
             def _before_plan_model_call() -> None:
                 nonlocal plan_model_requested, auxiliary_fast_calls
                 ensure_inference_lock()
+                prepare_decision_model_for_interactive()
                 plan_model_requested = True
                 auxiliary_fast_calls += 1
 
             compiled_steps = compile_structured_plan(
                 _validator_client,
-                model=FAST_MODEL,
+                model=DECISION_MODEL,
                 objective=user_input,
-                options=FAST_OPTIONS,
-                keep_alive=FAST_MODEL_KEEP_ALIVE,
+                options=DECISION_OPTIONS,
+                keep_alive=DECISION_MODEL_KEEP_ALIVE,
                 min_chars=STRUCTURED_PLAN_MIN_CHARS,
                 min_commands=STRUCTURED_PLAN_MIN_COMMANDS,
                 max_steps=STRUCTURED_PLAN_MAX_STEPS,
@@ -395,7 +405,7 @@ def handle_user_turn(
                 "structured_plan",
                 compiled=bool(compiled_steps),
                 step_count=len(compiled_steps),
-                compiler_model=FAST_MODEL if plan_model_requested else "deterministic",
+                compiler_model=DECISION_MODEL if plan_model_requested else "deterministic",
                 model_call=plan_model_requested,
             )
 
@@ -663,7 +673,11 @@ def handle_user_turn(
                 }
             ]
         recalled_context = "\n\n".join(recalled_parts)
-        if RECIPES_ENABLED and not recipe_preflight.get("checked"):
+        if (
+            RECIPES_ENABLED
+            and not recipe_preflight.get("checked")
+            and (plan_enabled or bool(required_tools) or bool(selected_tool_schemas))
+        ):
             recipe_tool = "search_recipes"
             if recipe_tool not in {str(x.get("function", {}).get("name") or "") for x in tool_schemas}:
                 schema = get_tool_schema(recipe_tool)
@@ -673,13 +687,28 @@ def handle_user_turn(
             tool_schemas[:] = _bounded_active_schemas(
                 tool_schemas, required_tools, STRUCTURED_PLAN_MAX_TOOLS,
             )
+        # A zero-tool conversational turn does not need the task ledger, evidence
+        # digest, recipe preflight, validator metadata, or other harness control
+        # wrappers in the model prompt. Keeping those blocks out prevents small
+        # models from imitating headings such as "Harness Evidence Digest" and
+        # also makes greetings/meta-chat pay only for actual conversation context.
+        direct_answer_minimal = bool(
+            not plan_enabled
+            and not selection_only
+            and not tool_schemas
+            and not active_requirement_ledger.requirements
+            and not required_fact_types
+            and not detected_images
+            and not historical_recall
+            and not evidence_reuse_request
+        )
         model_user_msg = model_message(msg)
         if plan_enabled:
             # The original objective is durable harness state. The main model
             # sees only the scheduler's current atomic requirement.
             model_user_msg["content"] = active_request
         request_context = []
-        capability_policy = build_turn_capability_context(
+        capability_policy = "" if direct_answer_minimal else build_turn_capability_context(
             active_request,
             {str(schema.get("function", {}).get("name") or "") for schema in tool_schemas},
         )
@@ -693,14 +722,16 @@ def handle_user_turn(
                 "If matches is empty, say that no matching saved history was found rather than guessing.\n"
                 + historical_context
             )
-        learned_failures = render_failure_lessons(
+        learned_failures = "" if direct_answer_minimal else render_failure_lessons(
             active_request,
             {str(schema.get("function", {}).get("name") or "") for schema in tool_schemas},
             limit=3,
         )
         if learned_failures:
             request_context.append(learned_failures)
-        reflection_context = render_relevant_reflections(get_active_conversation_id(), active_request, limit=2)
+        reflection_context = "" if direct_answer_minimal else render_relevant_reflections(
+            get_active_conversation_id(), active_request, limit=2
+        )
         if reflection_context:
             request_context.append(reflection_context)
         if skill_index:
@@ -712,14 +743,14 @@ def handle_user_turn(
             )
         elif unsupported_image_paths:
             request_context.append(
-                "[Harness vision capability: the configured vision role is the text-only agent-main GGUF. "
+                "[Harness vision capability: the configured vision role could not accept the supplied image. "
                 "No image pixels were supplied. Do not claim to have inspected the image; state that visual inspection is unavailable.]"
             )
-        if RECIPES_ENABLED:
+        if RECIPES_ENABLED and not direct_answer_minimal:
             request_context.append(render_recipe_preflight(recipe_preflight))
         if selection_only_candidates:
             request_context.append(selection_only_candidates)
-        if recalled_context and not WORKING_STATE_ENABLED:
+        if recalled_context and (not WORKING_STATE_ENABLED or direct_answer_minimal):
             request_context.append("### Relevant stored context\n" + recalled_context)
         if request_context:
             model_user_msg["content"] = (
@@ -790,10 +821,10 @@ def handle_user_turn(
             prompt_state = WORKING_STATE.load() if WORKING_STATE_ENABLED else None
             canonical_state = (
                 WORKING_STATE.render(include_tool_capabilities=False, state=prompt_state)
-                if WORKING_STATE_ENABLED else ""
+                if WORKING_STATE_ENABLED and not direct_answer_minimal else ""
             )
             evidence_context = ""
-            if WORKING_STATE_ENABLED:
+            if WORKING_STATE_ENABLED and not direct_answer_minimal:
                 if plan_enabled:
                     # A structured scheduler step is an evidence boundary as well
                     # as a tool/schema boundary.  Earlier versions replayed the
@@ -828,7 +859,7 @@ def handle_user_turn(
                     )
             prefix = build_active_messages(
                 system_prompt=system_prompt,
-                summary="" if WORKING_STATE_ENABLED else summary,
+                summary=(summary if direct_answer_minimal else ("" if WORKING_STATE_ENABLED else summary)),
                 history=model_history,
                 max_ctx_tokens=MAX_CTX,
                 reserve_tokens=RESERVE_TOKENS,
@@ -836,7 +867,10 @@ def handle_user_turn(
                 extra_prompt_tokens=schema_tokens + TOOL_LOOP_RESERVE,
                 working_state=canonical_state,
                 evidence_context=evidence_context,
-                max_history_turns=WORKING_STATE_HISTORY_TURNS if WORKING_STATE_ENABLED else None,
+                max_history_turns=(
+                    4 if direct_answer_minimal
+                    else (WORKING_STATE_HISTORY_TURNS if WORKING_STATE_ENABLED else None)
+                ),
                 volatile_last=VOLATILE_CONTEXT_LAST,
             )
             return prefix, schema_tokens
@@ -2306,6 +2340,8 @@ def handle_user_turn(
                     return {"limit": int(scope.get("limit") or 3)}
                 if item.tool == "dns_query" and target:
                     return {"name": target, "record_type": str(scope.get("record_type") or "A")}
+                if item.tool == "route_lookup" and target:
+                    return {"target": target}
                 if item.tool == "tcp_connect" and target:
                     return {"host": target, "port": int(scope.get("port") or 443), "timeout": 5.0}
                 return None
@@ -4887,10 +4923,11 @@ def handle_user_turn(
                         }
                     else:
                         validator_calls += 1
-                        with OperationStatus("Fast-model stalled-step validation"):
+                        prepare_decision_model_for_interactive()
+                        with OperationStatus("Decision-model stalled-step validation"):
                             stall_validation = validate_stalled_step(
                                 _validator_client,
-                                FAST_MODEL,
+                                DECISION_MODEL,
                                 active_request,
                                 turn_tail,
                                 pending_stall_signal,
@@ -4906,6 +4943,22 @@ def handle_user_turn(
                     else:
                         shared_context.add_validator_event(stall_validation, pending_stall_signal)
                     validator_decision = str(stall_validation.get("decision") or "")
+                    if (
+                        MODEL_ESCALATION_ENABLED
+                        and reasoning_model_calls < MAX_REASONING_CALLS_PER_TURN
+                        and validator_requests_reasoning(
+                            stall_validation,
+                            low_confidence_enabled=MODEL_ESCALATE_LOW_VALIDATOR_CONFIDENCE,
+                        )
+                    ):
+                        reasoning_escalation_pending = True
+                        emit_event(
+                            "model_escalation_requested",
+                            from_role="decision",
+                            to_role="reasoning",
+                            diagnosis=str(stall_validation.get("diagnosis") or "unknown"),
+                            confidence=str(stall_validation.get("confidence") or "medium"),
+                        )
                     if validator_decision in {"blocked", "finish"}:
                         stalled_key = str(pending_stall_signal.get("key") or "")
                         stalled_tool = stalled_key
@@ -5015,10 +5068,11 @@ def handle_user_turn(
                     }
                 else:
                     validator_calls += 1
-                    with OperationStatus("Fast-model tool-loop validation"):
+                    prepare_decision_model_for_interactive()
+                    with OperationStatus("Decision-model tool-loop validation"):
                         recovery_validation = validate_tool_loop(
                             _validator_client,
-                            FAST_MODEL,
+                            DECISION_MODEL,
                             active_request,
                             turn_tail,
                             [name for name in tool_names if name],
@@ -5072,13 +5126,52 @@ def handle_user_turn(
             zero_tool_recovery_pending = False
 
             try:
-                if has_images(active) and VISION_MODEL != MODEL and VISION_SIDECAR_WHEN_DISTINCT:
+                reasoning_for_call = bool(
+                    MODEL_ESCALATION_ENABLED
+                    and reasoning_model_calls < MAX_REASONING_CALLS_PER_TURN
+                    and (
+                        reasoning_escalation_pending
+                        or reasoning_recovery_for_call
+                        or zero_tool_recovery_for_call
+                        or should_start_with_reasoning(
+                            active_request,
+                            thinking_enabled=bool(thinking_enabled),
+                            scheduler_finalizing=bool(scheduler_finalizing),
+                            tool_count=len(tool_schemas),
+                            enabled=MODEL_ESCALATION_ENABLED,
+                            complex_direct=MODEL_ESCALATION_COMPLEX_DIRECT,
+                            min_complex_chars=MODEL_ESCALATION_MIN_COMPLEX_CHARS,
+                        )
+                    )
+                )
+                selected_model = REASONING_MODEL if reasoning_for_call else MODEL
+                selected_options = REASONING_OPTIONS if reasoning_for_call else MAIN_OPTIONS
+                selected_keep_alive = REASONING_MODEL_KEEP_ALIVE if reasoning_for_call else -1
+                if reasoning_for_call:
+                    prepare_reasoning_model_for_interactive()
+                    reasoning_model_calls += 1
+                    reasoning_model_used = True
+                    reasoning_escalation_pending = False
+                    emit_event(
+                        "model_escalation",
+                        from_role="executor",
+                        to_role="reasoning",
+                        model=selected_model,
+                        call_index=model_calls + 1,
+                    )
+                if has_images(active) and VISION_MODEL != selected_model:
+                    try:
+                        prepare_vision_model_for_interactive()
+                    except Exception:
+                        pass
+                if has_images(active) and VISION_MODEL != selected_model and VISION_SIDECAR_WHEN_DISTINCT:
                     emit_event("vision_start", model=VISION_MODEL, role="vision")
                 vision_route = route_multimodal_messages(
                     _ollama_client,
                     active,
-                    main_model=MODEL,
-                    main_options=MAIN_OPTIONS,
+                    main_model=selected_model,
+                    main_options=selected_options,
+                    main_keep_alive=selected_keep_alive,
                     vision_model=VISION_MODEL,
                     vision_options=VISION_OPTIONS,
                     vision_keep_alive=VISION_MODEL_KEEP_ALIVE,
@@ -5086,8 +5179,15 @@ def handle_user_turn(
                     max_observation_chars=VISION_MAX_OBSERVATION_CHARS,
                     cache=vision_observation_cache,
                 )
-                generation_role = "vision" if vision_route.model == VISION_MODEL and has_images(vision_route.messages) else "main"
+                if vision_route.model == VISION_MODEL and has_images(vision_route.messages):
+                    generation_role = "vision"
+                    vision_model_used = True
+                elif vision_route.model == REASONING_MODEL:
+                    generation_role = "reasoning"
+                else:
+                    generation_role = "executor"
                 if vision_route.used_sidecar:
+                    vision_model_used = True
                     emit_event("vision_complete", model=VISION_MODEL, role="vision", sidecar=True)
                 emit_event(
                     "model_start",
@@ -5265,9 +5365,28 @@ def handle_user_turn(
                         error=str(exc)[:1200],
                         model=str((current_model_request or {}).get("model") or MODEL),
                     )
+                    failed_role = str((current_model_request or {}).get("role") or "")
+                    if (
+                        MODEL_ESCALATION_ENABLED
+                        and failed_role == "executor"
+                        and REASONING_MODEL != MODEL
+                        and reasoning_model_calls < MAX_REASONING_CALLS_PER_TURN
+                    ):
+                        reasoning_escalation_pending = True
+                        append_control_note(
+                            "[Harness model escalation] The executor model lacks a capability required for this step. "
+                            "Retry exactly once with the reasoning model using the same bounded tools and evidence."
+                        )
+                        emit_event(
+                            "model_escalation_requested",
+                            from_role="executor",
+                            to_role="reasoning",
+                            diagnosis="executor_capability_missing",
+                        )
+                        continue
                     safe = (
-                        "The configured model does not support the tool-calling capability required for this task. "
-                        "A deterministic recipe may still work, but model-directed tool use is unavailable for this model."
+                        "The configured execution/reasoning models do not support the capability required for this task. "
+                        "A deterministic recipe may still work, but model-directed tool use is unavailable."
                     )
                     _append_and_save_fn(messages, {"role": "assistant", "content": safe})
                     if WORKING_STATE_ENABLED:
@@ -5292,6 +5411,14 @@ def handle_user_turn(
                 if signal:
                     pending_stall_signal = signal
                 model_no_progress_retries += 1
+                if (
+                    MODEL_ESCALATION_ENABLED
+                    and str((current_model_request or {}).get("role") or "") == "executor"
+                    and reasoning_model_calls < MAX_REASONING_CALLS_PER_TURN
+                    and model_no_progress_retries < MODEL_NO_PROGRESS_MAX_RETRIES
+                ):
+                    reasoning_escalation_pending = True
+                    emit_event("model_escalation_requested", from_role="executor", to_role="reasoning", diagnosis="executor_inference_failure")
                 if model_no_progress_retries >= MODEL_NO_PROGRESS_MAX_RETRIES:
                     error_text = str(exc or "")
                     timeout_like = isinstance(exc, TimeoutError) or "timeout" in error_text.lower() or "timed out" in error_text.lower()
@@ -5466,6 +5593,8 @@ def handle_user_turn(
                 ):
                     reasoning_recovery_attempts += 1
                     reasoning_recovery_pending = True
+                    if MODEL_ESCALATION_ENABLED and vision_route.model == MODEL and reasoning_model_calls < MAX_REASONING_CALLS_PER_TURN:
+                        reasoning_escalation_pending = True
                     append_control_note(
                         "[Harness reasoning recovery] The previous completion ended during internal reasoning and "
                         "produced no user-visible answer or tool call. Conclude immediately. Keep any internal "
@@ -5750,10 +5879,98 @@ def handle_user_turn(
                     and not step_successful_tools
                 ):
                     if iteration < iteration_limit:
+                        # A prose-only completion on an operational step is a
+                        # model no-progress event, not a free retry. The old
+                        # branch discarded the prose and immediately continued,
+                        # bypassing the retry counter/validator/escalation path;
+                        # a small model could therefore repeat the same 128-token
+                        # pseudo-plan for the full 208-iteration scheduler budget.
+                        done_reason = str(perf_stats.get("done_reason") or "")
+                        failure_reason = (
+                            "operational scheduler step required a native tool call but the model returned prose only"
+                            + (f" (done_reason={done_reason})" if done_reason else "")
+                        )
+                        tracker.record_model_failure("scheduler_tool_required_prose", failure_reason)
+                        model_no_progress_retries += 1
+                        signal = tracker.consume_signal()
+                        if signal:
+                            pending_stall_signal = signal
+                        role = str((current_model_request or {}).get("role") or "executor")
+                        emit_event(
+                            "model_no_progress",
+                            kind="scheduler_tool_required_prose",
+                            retry=model_no_progress_retries,
+                            retry_limit=MODEL_NO_PROGRESS_MAX_RETRIES,
+                            role=role,
+                            done_reason=done_reason,
+                        )
+
+                        # One ordinary correction is allowed. At the configured
+                        # no-progress limit, promote the same bounded request to
+                        # the 4B reasoner rather than asking the executor again.
+                        if (
+                            role == "executor"
+                            and MODEL_ESCALATION_ENABLED
+                            and reasoning_model_calls < MAX_REASONING_CALLS_PER_TURN
+                            and model_no_progress_retries >= MODEL_NO_PROGRESS_MAX_RETRIES
+                        ):
+                            reasoning_escalation_pending = True
+                            append_control_note(
+                                "[Harness model escalation] The executor repeatedly answered an operational step in prose "
+                                "instead of issuing a supplied native tool call. Retry this active requirement once with "
+                                "the reasoning model. Issue the smallest suitable native tool call; do not describe shell "
+                                "commands or expected output in prose."
+                            )
+                            emit_event(
+                                "model_escalation_requested",
+                                from_role="executor",
+                                to_role="reasoning",
+                                diagnosis="scheduler_tool_required_prose",
+                            )
+                            full_content = ""
+                            continue
+
+                        # Three repeated failures (normally two executor misses
+                        # plus one reasoning miss) produce the tracker signal.
+                        # Let the tiny validator arbitrate exactly once before
+                        # another model action. If its corrective instruction is
+                        # then ignored, fail only this atomic step below.
+                        if pending_stall_signal and LOOP_VALIDATOR_ENABLED:
+                            full_content = ""
+                            continue
+
+                        if active_stall_recovery is not None:
+                            if fail_active_scheduler_step(
+                                "model ignored the validator's bounded corrective action for a tool-required step",
+                                result="No successful native tool call was obtained after executor, reasoning, and validator recovery.",
+                                status="FAIL",
+                                event_reason="scheduler_tool_required_prose_exhausted",
+                            ):
+                                full_content = ""
+                                continue
+
+                        # If validation is unavailable, one failed reasoning
+                        # attempt is already sufficient to terminate this step;
+                        # never fall back to the long scheduler iteration budget.
+                        if (
+                            role == "reasoning"
+                            and model_no_progress_retries > MODEL_NO_PROGRESS_MAX_RETRIES
+                            and not LOOP_VALIDATOR_ENABLED
+                        ):
+                            if fail_active_scheduler_step(
+                                "executor and reasoning models both failed to issue a required native tool call",
+                                result="No successful tool observation was obtained for this operational requirement.",
+                                status="FAIL",
+                                event_reason="scheduler_tool_required_prose_exhausted",
+                            ):
+                                full_content = ""
+                                continue
+
                         append_control_note(
                             "[Harness scheduler evidence gate] This active requirement is operational and no successful "
                             "tool observation has been recorded for it yet. Execute the smallest suitable supplied native "
-                            "tool before reporting the step complete. Do not infer runtime values from prior prose."
+                            "tool before reporting the step complete. Do not describe a command that could perform the action; "
+                            "issue the supplied native tool call itself. Do not infer runtime values from prior prose."
                         )
                         full_content = ""
                         continue
@@ -6487,6 +6704,11 @@ def handle_user_turn(
         if inference_lock is not None:
             _release_lock_fn(inference_lock)
             inference_lock = None
+        if reasoning_model_used or vision_model_used:
+            try:
+                schedule_decision_model_prewarm("post-reasoning-or-vision")
+            except Exception:
+                pass
         total_turn_ms = (time.monotonic() - turn_started) * 1000.0
         turn_queue_wait_ms = (turn_lock_acquired - turn_started) * 1000.0
         model_queue_wait_ms = model_queue_wait_total_ms

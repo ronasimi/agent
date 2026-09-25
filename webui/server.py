@@ -74,15 +74,17 @@ async def _lifespan(_app: FastAPI):
     """Warm/probe configured models without blocking frontend startup.
 
     Conformance results are cached by model identity. A cold/new model is
-    probed only after the normal main-model warm-up completes so capability
+    probed only after the normal executor warm-up completes so capability
     checks do not race the fast-model prewarm or contend with a foreground turn.
     """
     from al_agent.model_capabilities import schedule_model_capability_probe
-    from al_agent.model_residency import schedule_fast_model_prewarm
+    from al_agent.model_residency import schedule_decision_model_prewarm, schedule_fast_model_prewarm
 
-    def _schedule_fast() -> None:
+    def _schedule_support_models() -> None:
         if agent_runtime.WARMUP_FAST_MODEL:
             schedule_fast_model_prewarm("startup")
+        if agent_runtime.WARMUP_DECISION_MODEL:
+            schedule_decision_model_prewarm("startup")
 
     def _probe_main_then_fast() -> None:
         if agent_runtime.MODEL_CAPABILITY_PROBE_MAIN:
@@ -94,12 +96,12 @@ async def _lifespan(_app: FastAPI):
                 keep_alive=-1,
                 cache_path=agent_runtime.MODEL_CAPABILITY_CACHE_PATH,
                 force=agent_runtime.MODEL_CAPABILITY_FORCE_PROBE,
-                on_complete=lambda _profile: _schedule_fast(),
+                on_complete=lambda _profile: _schedule_support_models(),
                 busy_check=_interactive_busy,
                 idle_delay_seconds=agent_runtime.MODEL_CAPABILITY_IDLE_DELAY_SECONDS,
             )
         else:
-            _schedule_fast()
+            _schedule_support_models()
 
     if agent_runtime.WARMUP_ENABLED:
         from al_agent.model_protocol import warm_model_async
@@ -113,7 +115,7 @@ async def _lifespan(_app: FastAPI):
                 agent_runtime.build_system_prompt() if agent_runtime.WARMUP_PRIME_PREFIX else ""
             ),
             on_success=_probe_main_then_fast,
-            on_error=lambda exc: print(f"[webui]: main-model warm-up skipped: {exc}"),
+            on_error=lambda exc: print(f"[webui]: executor warm-up skipped: {exc}"),
         )
     else:
         # Capability probing is independently configurable. It is still
@@ -219,11 +221,16 @@ def health() -> dict[str, Any]:
     """
     return {
         "ok": True,
+        # Explicit role names plus compatibility aliases for existing clients.
+        "executor_model": agent_runtime.EXECUTOR_MODEL,
+        "decision_model": agent_runtime.DECISION_MODEL,
+        "reasoning_model": agent_runtime.REASONING_MODEL,
         "main_model": agent_runtime.MODEL,
         "fast_model": agent_runtime.FAST_MODEL,
         "vision_model": agent_runtime.VISION_MODEL,
         "report_model": str(agent_runtime.AGENT_CFG.get("report_model") or ""),
         "context": agent_runtime.MAX_CTX,
+        "decision_context": agent_runtime.DECISION_OPTIONS.get("num_ctx"),
         "working_state": agent_runtime.WORKING_STATE_ENABLED,
     }
 

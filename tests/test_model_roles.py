@@ -3,26 +3,45 @@ from pathlib import Path
 from tools.config import load_config
 
 
-def test_runtime_uses_explicit_generation_roles_plus_embedding_model():
+def test_runtime_uses_explicit_decision_executor_reasoning_roles_plus_embedding_model():
     cfg = load_config()["agent"]
-    assert cfg["model"] == "agent-main:4b"
-    assert cfg["fast_model"] == "agent-main:2b"
-    assert cfg["vision_model"] == "agent-main:4b"
-    assert cfg["report_model"] == "agent-report:9b"
+    assert cfg["executor_model"] == "agent-main"
+    assert cfg["decision_model"] == "agent-micro"
+    assert cfg["reasoning_model"] == "agent-reasoning"
+    assert cfg["model"] == cfg["executor_model"]
+    assert cfg["fast_model"] == cfg["executor_model"]
+    assert cfg["vision_model"] == "qwen3.5:4b"
+    assert cfg["report_model"] == "agent-research"
     assert cfg["embed_model"] == "nomic-embed-text"
 
 
-def test_alias_helper_contains_only_generation_role_aliases():
+def test_alias_helper_contains_executor_reasoning_aliases_and_decision_pull():
     text = (Path(__file__).resolve().parents[1] / "scripts" / "create_ollama_aliases.sh").read_text(encoding="utf-8")
-    assert "hf.co/empero-ai/Qwen3.8-2B-Distill-GGUF:Q8_0" in text
-    assert 'ollama cp "$main_src" agent-main:4b' in text
-    assert 'ollama cp "$fast_src" agent-main:2b' in text
-    assert "agent-fast:2b" not in text
+    assert 'decision_src="qwen2.5-coder:0.5b"' in text
+    assert 'executor_src="qwen2.5-coder:1.5b"' in text
+    assert 'ollama cp "$decision_src" agent-micro' in text
+    assert 'ollama cp "$executor_src" agent-main' in text
+    assert 'ollama cp "$reasoning_src" agent-reasoning' in text
+    assert 'ollama cp "$report_src" agent-research' in text
+    assert 'vision_src="qwen3.5:4b"' in text
+    assert "qwen3.5:9b" in text
 
 
-def test_vision_role_reuses_main_runner_by_default():
+def test_vision_role_stays_on_multimodal_4b_not_text_only_reasoning_gguf():
     from al_agent import state
 
-    assert state.VISION_MODEL == state.MODEL == "agent-main:4b"
-    assert state.VISION_OPTIONS["num_ctx"] == state.MAIN_OPTIONS["num_ctx"]
-    assert state.VISION_MODEL_KEEP_ALIVE == -1
+    assert state.MODEL == state.EXECUTOR_MODEL == "agent-main"
+    assert state.DECISION_MODEL == "agent-micro"
+    assert state.REASONING_MODEL == "agent-reasoning"
+    assert state.VISION_MODEL == "qwen3.5:4b"
+    assert state.VISION_MODEL != state.REASONING_MODEL
+    assert state.VISION_MODEL_KEEP_ALIVE == "2m"
+
+
+def test_decision_context_is_small_and_executor_reasoning_contexts_stay_full():
+    from al_agent import state
+
+    assert state.DECISION_OPTIONS["num_ctx"] == 8192
+    assert state.MAIN_OPTIONS["num_ctx"] == 16384
+    assert state.REASONING_OPTIONS["num_ctx"] == 16384
+    assert state.LOOP_VALIDATOR_OPTIONS["num_ctx"] == 8192

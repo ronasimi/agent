@@ -170,7 +170,7 @@ def _runtime_snapshot(conversation_id: str) -> dict[str, Any]:
     try:
         from al_agent.model_capabilities import get_active_model_capabilities
         capability_profiles = {}
-        for role, model in (("main", agent_runtime.MODEL), ("fast", agent_runtime.FAST_MODEL), ("vision", agent_runtime.VISION_MODEL)):
+        for role, model in (("executor", agent_runtime.EXECUTOR_MODEL), ("decision", agent_runtime.DECISION_MODEL), ("reasoning", agent_runtime.REASONING_MODEL), ("vision", agent_runtime.VISION_MODEL)):
             profile = get_active_model_capabilities(model)
             if profile is not None:
                 capability_profiles[role] = profile.to_dict()
@@ -179,12 +179,18 @@ def _runtime_snapshot(conversation_id: str) -> dict[str, Any]:
     return {
         "conversation_id": conversation_id,
         "models": {
-            "main": agent_runtime.MODEL,
-            "fast": agent_runtime.FAST_MODEL,
+            "executor": agent_runtime.EXECUTOR_MODEL,
+            "decision": agent_runtime.DECISION_MODEL,
+            "reasoning": agent_runtime.REASONING_MODEL,
+            "main_compat": agent_runtime.MODEL,
+            "fast_compat": agent_runtime.FAST_MODEL,
             "vision": agent_runtime.VISION_MODEL,
             "report": str(agent_runtime.AGENT_CFG.get("report_model") or ""),
         },
         "context": {
+            "executor_num_ctx": agent_runtime.MAIN_OPTIONS.get("num_ctx"),
+            "decision_num_ctx": agent_runtime.DECISION_OPTIONS.get("num_ctx"),
+            "reasoning_num_ctx": agent_runtime.REASONING_OPTIONS.get("num_ctx"),
             "main_num_ctx": agent_runtime.MAIN_OPTIONS.get("num_ctx"),
             "fast_num_ctx": agent_runtime.FAST_OPTIONS.get("num_ctx"),
             "max_context": agent_runtime.MAX_CTX,
@@ -204,8 +210,12 @@ def _runtime_snapshot(conversation_id: str) -> dict[str, Any]:
             "structured_plan_max_iterations": agent_runtime.STRUCTURED_PLAN_MAX_ITERATIONS,
             "structured_plan_soft_timeout_seconds": agent_runtime.STRUCTURED_PLAN_SOFT_TIMEOUT_SECONDS,
             "structured_plan_hard_timeout_seconds": agent_runtime.STRUCTURED_PLAN_HARD_TIMEOUT_SECONDS,
+            "executor_options": agent_runtime.MAIN_OPTIONS,
+            "decision_options": agent_runtime.DECISION_OPTIONS,
+            "reasoning_options": agent_runtime.REASONING_OPTIONS,
             "main_options": agent_runtime.MAIN_OPTIONS,
             "fast_options": agent_runtime.FAST_OPTIONS,
+            "max_reasoning_calls_per_turn": agent_runtime.MAX_REASONING_CALLS_PER_TURN,
         },
         "features": {
             "grounding": agent_runtime.GROUNDING_ENABLED,

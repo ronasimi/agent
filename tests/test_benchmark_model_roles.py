@@ -37,12 +37,12 @@ def test_summary_emits_individual_samples(monkeypatch):
     assert result["median_ms"] == 2.0
 
 
-def test_main_and_validator_separate_cold_from_warm(monkeypatch):
+def test_executor_and_decision_validator_separate_cold_from_warm(monkeypatch):
     benchmark = _load_benchmark(monkeypatch)
     client = FakeClient()
 
-    main = benchmark._main_latency(client, "main:4b", {"num_ctx": 16384}, 3)
-    validator = benchmark._fast_validator(client, "fast:2b", {"num_ctx": 4096}, -1, 4)
+    main = benchmark._main_latency(client, "executor:2b", {"num_ctx": 16384}, 3)
+    validator = benchmark._fast_validator(client, "decision:0.8b", {"num_ctx": 8192}, -1, 4)
 
     assert main["cold"]["error"] is None
     assert main["warm"]["runs"] == 3
@@ -52,7 +52,7 @@ def test_main_and_validator_separate_cold_from_warm(monkeypatch):
     assert len(validator["samples_ms"]) == 4
 
 
-def test_contention_probe_uses_separate_background_client(monkeypatch):
+def test_decision_contention_probe_uses_separate_background_client(monkeypatch):
     benchmark = _load_benchmark(monkeypatch)
     clients = []
 
@@ -62,9 +62,9 @@ def test_contention_probe_uses_separate_background_client(monkeypatch):
         return client
 
     monkeypatch.setattr(benchmark, "Client", factory)
-    result = benchmark._foreground_during_fast_prewarm(
-        FakeClient(), "http://ollama", "main:4b", {"num_ctx": 16384},
-        "fast:2b", {"num_ctx": 4096}, -1, 0,
+    result = benchmark._foreground_during_decision_prewarm(
+        FakeClient(), "http://ollama", "executor:2b", {"num_ctx": 16384},
+        "decision:0.8b", {"num_ctx": 8192}, -1, 0,
     )
 
     assert len(clients) == 1

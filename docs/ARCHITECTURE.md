@@ -104,7 +104,7 @@ The Google Workspace adapter is intentionally split into three layers: FastAPI o
 
 ## Fact grounding gate
 
-Before a fact-retrieval answer can finalize, `tools/grounding.py` compares the requested fact type with harness-owned successful observations. This is a deterministic control boundary: main-model or fast-validator text cannot override `missing_evidence`. Weather requires verified weather-bearing provenance (current `web_search` + `browse_url`, a verified weather recipe/API result, or a fresh carried observation). The turn engine performs one built-in weather recipe/fallback recovery and re-runs the gate before finalization. Working-state observations persist compact `fact_types`, `source_tools`, `weather_verified`, `turn_id`, and timestamp metadata so the check does not depend on clipped model-visible excerpts.
+Before a fact-retrieval answer can finalize, `tools/grounding.py` compares the requested fact type with harness-owned successful observations. This is a deterministic control boundary: executor/reasoning or decision-validator text cannot override `missing_evidence`. Weather requires verified weather-bearing provenance (current `web_search` + `browse_url`, a verified weather recipe/API result, or a fresh carried observation). The turn engine performs one built-in weather recipe/fallback recovery and re-runs the gate before finalization. Working-state observations persist compact `fact_types`, `source_tools`, `weather_verified`, `turn_id`, and timestamp metadata so the check does not depend on clipped model-visible excerpts.
 
 ## Pipelines and recipes
 
@@ -134,14 +134,22 @@ Large results are persisted as tool observations. Preview compaction may render 
 
 ## Model roles
 
-The runtime uses three generative Ollama roles plus an optional embedding model:
+The runtime uses a deterministic-first **decision → executor → reasoning → research** hierarchy with a separate vision path:
 
-- `agent-main:4b` (`hf.co/empero-ai/Qwen3.8-4B-Distill-GGUF:Q4_K_M`) is the foreground reasoning, coding, conversation, tool-orchestration, and default configured vision model. It uses a 16K context.
-- `agent-main:2b` (`hf.co/empero-ai/Qwen3.8-2B-Distill-GGUF:Q8_0`) is the bounded fast role for loop validation/recovery, research planning/source distillation, and advisory recipe-parameter naming. It also uses a 16K context and is prewarmed/pinned by default.
-- `agent-report:9b` (`qwen3.5:9b`) is admitted only for long-form research synthesis and factuality repair with an 8K context; the worker evicts normal interactive residency before loading it and restores the interactive roles afterward.
-- `nomic-embed-text` is optional because `semantic_memory_enabled` defaults to `false`. It is used only by semantic-memory embedding operations (`remember_semantic`, `search_semantic_memory`/`get_relevant_memories` when enabled) and the optional embedding benchmark. Recipe search, skill search, tool discovery, observations, and ordinary routing do not use it.
+- `agent-micro` (`qwen2.5-coder:0.5b`) handles constrained plan compilation, validation, and retry/switch/block arbitration. It never authors normal user-facing prose or arbitrary tool arguments.
+- `agent-main` (`qwen2.5-coder:1.5b`) is the default executor and native tool caller. It handles bounded arguments, ordinary conversation, and support/extraction work after deterministic routing has reduced the action space.
+- `agent-reasoning` (`hf.co/empero-ai/Qwen3.8-4B-Distill-GGUF:Q4_K_M`) is the lazy text reasoning escalation role for explicit Think, complex no-tool analysis, structured-plan final synthesis, capability fallback, and bounded recovery.
+- `qwen3.5:4b` is the distinct multimodal vision runner. The configured reasoning GGUF is text-only, so image inputs never route to `agent-reasoning`.
+- `agent-research` (`qwen3.5:9b`) is admitted only for long-form research synthesis and factuality repair.
+- `nomic-embed-text` remains optional while semantic memory is disabled.
 
-Deterministic routing, requirements, grounding, safety policy, parameter validation, recipe execution, and exact fast-path renderers remain authoritative and bypass model inference whenever possible. Fast-model helpers return bounded advisory JSON and fail back to deterministic behavior. `diagnostics/benchmarks/benchmark_model_roles.py` measures the live deployment cost of each role so additional model tiers are added only when they demonstrate a net benefit on the target host.
+Steady state keeps the 1.5B executor and 0.5B decision model resident. Reasoning or vision explicitly frees the decision-model slot while preserving the executor, then restores `agent-micro` asynchronously. This matches a two-runner Ollama budget without forcing ordinary turns through a 4B model.
+
+Deterministic routing, requirements, grounding, safety policy, parameter validation, recipe execution, scheduler advancement, and obvious typed steps such as route-table checks bypass model inference whenever possible. An operational step that receives prose instead of a required native tool call consumes a bounded no-progress budget and escalates/terminalizes rather than looping. Capability probes must verify actual native tool-call behavior before a cached profile is considered tool-capable.
+
+Internal working state and evidence remain system-private. Simple chat omits those blocks entirely; tool/evidence context is injected only when relevant and is never represented as a user-authored evidence digest.
+
+`diagnostics/benchmarks/benchmark_model_roles.py` measures executor TTFT, decision-validator latency, reasoning TTFT, research throughput, residency swaps, and contention.
 
 ## Multi-fact turn model
 

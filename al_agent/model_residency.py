@@ -1,7 +1,7 @@
 """Ollama model residency helpers for memory-bounded background stages.
 
-The interactive model and fast validator normally share the server.  A larger
-research report model may not fit alongside them, so the research worker uses
+The executor and decision model normally share the server. A larger reasoning
+or research-report model may not fit alongside them, so the runtime uses
 this module to temporarily swap model residency around synthesis.  All swaps
 are explicit and best-effort; the normal Ollama request path remains the final
 source of truth if a warm-up call is evicted under pressure.
@@ -20,17 +20,25 @@ from ollama import Client
 from tools.runtime import get_monitor_state, record_monitor_state, utc_now
 
 from .background.config import (
+    DECISION_MODEL,
+    DECISION_MODEL_KEEP_ALIVE,
+    DECISION_OPTIONS,
     FAST_MODEL,
     FAST_MODEL_KEEP_ALIVE,
     FAST_OPTIONS,
     MAIN_OPTIONS,
     MODEL,
     OLLAMA_HOST,
+    REASONING_MODEL,
+    REASONING_MODEL_KEEP_ALIVE,
+    REASONING_OPTIONS,
     REPORT_MODEL,
     REPORT_MODEL_KEEP_ALIVE,
     REPORT_OPTIONS,
     REPORT_RESTORE_MODELS,
     VISION_MODEL,
+    VISION_MODEL_KEEP_ALIVE,
+    VISION_OPTIONS,
 )
 
 INFERENCE_LOCK_PATH = os.environ.get("AGENT_INFERENCE_LOCK", "/app/workspace/.agent_inference.lock")
@@ -41,6 +49,7 @@ _REPORT_STATE_KEY = "agent.report_model_active"
 _MODEL_MAINTENANCE_LOCK = threading.Lock()
 _PREWARM_STATE_LOCK = threading.Lock()
 _fast_prewarm_thread: threading.Thread | None = None
+_decision_prewarm_thread: threading.Thread | None = None
 
 
 def _client() -> Client:
@@ -77,14 +86,14 @@ def _model_name(value: Any) -> str:
     return str(getattr(value, "model", None) or getattr(value, "name", None) or "")
 
 
-def _fast_runner_resident(client: Any) -> bool:
-    """Return True only for the canonical fast runner/context combination."""
+def _runner_resident(client: Any, model: str, options: dict[str, Any]) -> bool:
+    """Return True only when a model is resident at the requested context size."""
     try:
         response = client.ps()
         models = response.get("models", []) if isinstance(response, dict) else getattr(response, "models", [])
-        expected_ctx = int((FAST_OPTIONS or {}).get("num_ctx", 0) or 0)
+        expected_ctx = int((options or {}).get("num_ctx", 0) or 0)
         for item in models or []:
-            if _model_name(item) != FAST_MODEL:
+            if _model_name(item) != model:
                 continue
             context = getattr(item, "context_length", None)
             if context is None and isinstance(item, dict):
@@ -93,6 +102,15 @@ def _fast_runner_resident(client: Any) -> bool:
     except Exception:
         return False
     return False
+
+
+def _decision_runner_resident(client: Any) -> bool:
+    return _runner_resident(client, DECISION_MODEL, DECISION_OPTIONS)
+
+
+def _fast_runner_resident(client: Any) -> bool:
+    """Return True only for the canonical support/extraction runner."""
+    return _runner_resident(client, FAST_MODEL, FAST_OPTIONS)
 
 
 @contextmanager
@@ -134,8 +152,14 @@ def _prewarm_fast_when_idle(reason: str) -> None:
         from .background.resources import _interactive_busy
 
         while True:
-            while _interactive_busy():
-                time.sleep(0.25)
+            try:
+                while _interactive_busy():
+                    time.sleep(0.25)
+            except Exception:
+                # Startup/tests may briefly observe an uninitialized runtime DB.
+                # Prewarm is best-effort and must never surface as a background
+                # thread failure or interfere with foreground startup.
+                return
             try:
                 with model_maintenance_slot(blocking=False):
                     # Close the race between the idle check and maintenance-lock
@@ -168,6 +192,134 @@ def _prewarm_fast_when_idle(reason: str) -> None:
     finally:
         with _PREWARM_STATE_LOCK:
             _fast_prewarm_thread = None
+
+
+def _prewarm_decision_when_idle(reason: str) -> None:
+    """Restore the tiny decision model without ever queueing ahead of a user."""
+    global _decision_prewarm_thread
+    try:
+        from .background.resources import _interactive_busy
+        while True:
+            try:
+                while _interactive_busy():
+                    time.sleep(0.25)
+            except Exception:
+                # Startup/tests may briefly observe an uninitialized runtime DB.
+                # Prewarm is best-effort and must never surface as a background
+                # thread failure or interfere with foreground startup.
+                return
+            try:
+                with model_maintenance_slot(blocking=False):
+                    if _interactive_busy():
+                        continue
+                    client = _client()
+                    if not _decision_runner_resident(client):
+                        if REASONING_MODEL and REASONING_MODEL not in {MODEL, DECISION_MODEL}:
+                            if _runner_resident(client, REASONING_MODEL, REASONING_OPTIONS):
+                                _unload(client, REASONING_MODEL)
+                        if VISION_MODEL and VISION_MODEL not in {MODEL, DECISION_MODEL, REASONING_MODEL}:
+                            if _runner_resident(client, VISION_MODEL, VISION_OPTIONS):
+                                _unload(client, VISION_MODEL)
+                        _warm(client, DECISION_MODEL, DECISION_OPTIONS, DECISION_MODEL_KEEP_ALIVE)
+                    try:
+                        from . import state as _state
+                        if _state.MODEL_CAPABILITY_PROBE_DECISION and DECISION_MODEL != MODEL:
+                            from .model_capabilities import probe_model_capabilities
+                            probe_model_capabilities(
+                                client, DECISION_MODEL, options=dict(DECISION_OPTIONS or {}),
+                                keep_alive=DECISION_MODEL_KEEP_ALIVE,
+                                cache_path=_state.MODEL_CAPABILITY_CACHE_PATH,
+                                force=_state.MODEL_CAPABILITY_FORCE_PROBE,
+                            )
+                    except Exception:
+                        pass
+                    break
+            except BlockingIOError:
+                time.sleep(0.1)
+    finally:
+        with _PREWARM_STATE_LOCK:
+            _decision_prewarm_thread = None
+
+
+def schedule_decision_model_prewarm(reason: str = "idle") -> bool:
+    """Schedule one deduplicated decision-model warm-up."""
+    global _decision_prewarm_thread
+    if not DECISION_MODEL or DECISION_MODEL == MODEL:
+        return False
+    with _PREWARM_STATE_LOCK:
+        if _decision_prewarm_thread is not None and _decision_prewarm_thread.is_alive():
+            return False
+        thread = threading.Thread(
+            target=_prewarm_decision_when_idle,
+            args=(str(reason or "idle"),),
+            name="decision-model-prewarm",
+            daemon=True,
+        )
+        _decision_prewarm_thread = thread
+        thread.start()
+        return True
+
+
+
+def prepare_decision_model_for_interactive() -> bool:
+    """Free a lingering reasoning slot before foreground decision inference.
+
+    With ``OLLAMA_MAX_LOADED_MODELS=2`` the desired steady state is executor +
+    decision. A previous 4B escalation must never force Ollama to choose which
+    of those two models to evict when the next validator/compiler call arrives.
+    Called only while the foreground inference lock is held.
+    """
+    if not DECISION_MODEL or DECISION_MODEL == MODEL:
+        return False
+    client = _client()
+    if _decision_runner_resident(client):
+        return False
+    changed = False
+    if REASONING_MODEL and REASONING_MODEL not in {MODEL, DECISION_MODEL}:
+        if _runner_resident(client, REASONING_MODEL, REASONING_OPTIONS):
+            changed = _unload(client, REASONING_MODEL) or changed
+    if VISION_MODEL and VISION_MODEL not in {MODEL, DECISION_MODEL, REASONING_MODEL}:
+        if _runner_resident(client, VISION_MODEL, VISION_OPTIONS):
+            changed = _unload(client, VISION_MODEL) or changed
+    return changed
+
+def prepare_reasoning_model_for_interactive() -> bool:
+    """Free the decision-model slot before a lazy 4B reasoning escalation.
+
+    Called only while the foreground inference lock is held. The executor is
+    kept resident so normal turns resume cheaply; the micro model is restored
+    asynchronously after the reasoning call/turn.
+    """
+    if not REASONING_MODEL or REASONING_MODEL in {MODEL, DECISION_MODEL}:
+        return False
+    client = _client()
+    if _runner_resident(client, REASONING_MODEL, REASONING_OPTIONS):
+        return False
+    changed = _unload(client, DECISION_MODEL)
+    if VISION_MODEL and VISION_MODEL not in {MODEL, DECISION_MODEL, REASONING_MODEL}:
+        if _runner_resident(client, VISION_MODEL, VISION_OPTIONS):
+            changed = _unload(client, VISION_MODEL) or changed
+    return changed
+
+
+def prepare_vision_model_for_interactive() -> bool:
+    """Reserve the second Ollama runner for the distinct multimodal model.
+
+    The steady state is executor + micro. A vision request temporarily replaces
+    the micro decision runner with the multimodal 4B while preserving the warm
+    executor. A lingering text reasoner is also removed so Ollama never has to
+    choose an eviction victim under ``OLLAMA_MAX_LOADED_MODELS=2``.
+    """
+    if not VISION_MODEL or VISION_MODEL == MODEL:
+        return False
+    client = _client()
+    if _runner_resident(client, VISION_MODEL, VISION_OPTIONS):
+        return False
+    changed = _unload(client, DECISION_MODEL)
+    if REASONING_MODEL and REASONING_MODEL not in {MODEL, DECISION_MODEL, VISION_MODEL}:
+        if _runner_resident(client, REASONING_MODEL, REASONING_OPTIONS):
+            changed = _unload(client, REASONING_MODEL) or changed
+    return changed
 
 
 def schedule_fast_model_prewarm(reason: str = "idle") -> bool:
@@ -223,7 +375,7 @@ def enter_report_model_stage(job_id: str = "") -> dict[str, Any]:
     client = _client()
     with model_maintenance_slot():
         with background_inference_slot():
-            for model in dict.fromkeys([MODEL, FAST_MODEL, VISION_MODEL]):
+            for model in dict.fromkeys([MODEL, FAST_MODEL, DECISION_MODEL, REASONING_MODEL, VISION_MODEL]):
                 if model and model != REPORT_MODEL:
                     _unload(client, model)
             loaded = _warm(client, REPORT_MODEL, REPORT_OPTIONS, REPORT_MODEL_KEEP_ALIVE)
@@ -252,7 +404,7 @@ def enter_report_model_stage(job_id: str = "") -> dict[str, Any]:
 def exit_report_model_stage(job_id: str = "", *, restore: bool = True) -> dict[str, Any]:
     """Unload the report model and optionally restore normal model residency."""
     client = _client()
-    result = {"report_unloaded": False, "main_restored": False, "fast_prewarm_scheduled": False}
+    result = {"report_unloaded": False, "main_restored": False, "fast_prewarm_scheduled": False, "decision_prewarm_scheduled": False}
     with model_maintenance_slot():
         with background_inference_slot():
             result["report_unloaded"] = _unload(client, REPORT_MODEL)
@@ -263,11 +415,12 @@ def exit_report_model_stage(job_id: str = "", *, restore: bool = True) -> dict[s
     # lock have both been released. A user turn can therefore take priority.
     if restore and REPORT_RESTORE_MODELS and result["main_restored"]:
         result["fast_prewarm_scheduled"] = schedule_fast_model_prewarm("post-report")
+        result["decision_prewarm_scheduled"] = schedule_decision_model_prewarm("post-report")
     return result
 
 
 def evict_report_model_for_interactive() -> bool:
-    """Called with the interactive inference lock held before main-model work.
+    """Called with the interactive inference lock held before interactive-model work.
 
     If a background report stage left the large writer resident, evict it before
     Ollama loads the interactive model.  This makes foreground recovery safe

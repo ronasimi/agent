@@ -87,6 +87,7 @@ def route_multimodal_messages(
     *,
     main_model: str,
     main_options: dict[str, Any],
+    main_keep_alive: Any = -1,
     vision_model: str,
     vision_options: dict[str, Any],
     vision_keep_alive: Any,
@@ -106,7 +107,7 @@ def route_multimodal_messages(
     selection/reasoning responsibilities.
     """
     if not has_images(messages):
-        return VisionRoute(list(messages), main_model, dict(main_options or {}), -1, False)
+        return VisionRoute(list(messages), main_model, dict(main_options or {}), main_keep_alive, False)
 
     if vision_model == main_model or not sidecar_when_distinct:
         return VisionRoute(list(messages), vision_model, dict(vision_options or {}), vision_keep_alive, False)
@@ -143,4 +144,4 @@ def route_multimodal_messages(
         message["content"] = f"{original}\n\n{visual_block}" if original else visual_block
         routed.append(message)
 
-    return VisionRoute(routed, main_model, dict(main_options or {}), -1, True)
+    return VisionRoute(routed, main_model, dict(main_options or {}), main_keep_alive, True)

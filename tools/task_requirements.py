@@ -116,6 +116,16 @@ _RULES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     ("filesystem", "filesystem_snapshot", "filesystem capacity/inode state", (r"\bfilesystem", r"\binode", r"\bdisk capacity\b")),
     ("services", "service_health", "failed/unhealthy service state", (r"\b(?:failed|unhealthy) services?\b", r"\bservice health\b", r"\bservice warnings?\b")),
     ("network_state", "network_snapshot", "network interfaces/routes/listeners", (r"\bnetwork (?:interfaces|routes|health|state|status)\b", r"\blistening sockets?\b")),
+    # Route-table requirements are intentionally narrower than the broad
+    # network snapshot. Structured-plan route checks should execute these
+    # primitives deterministically instead of asking a tiny executor to infer
+    # obvious tool choices from prose.
+    ("route_list", "route_list", "kernel routing table/default route", (
+        r"\brouting table\b", r"\bdefault route\b", r"\bdefault gateway\b",
+    )),
+    ("route_lookup", "route_lookup", "kernel route cross-check", (
+        r"\broute lookup\b", r"\bcross[- ]?check\b.{0,120}\broute\b",
+    )),
     ("neighbors", "neighbor_snapshot", "network neighbor table", (r"\bnetwork neighbors?\b", r"\bnetwork\b[^.\n]{0,100}\bneighbors?\b", r"\bneighbor table\b", r"\barp(?: table)?\b", r"\bndp(?: table)?\b")),
     ("connections", "connection_snapshot", "established network connections", (r"\bestablished connections?\b", r"\bconnection snapshot\b", r"\bactive connections?\b")),
     ("local_subnets", "local_subnets", "active local private subnets", (
@@ -1109,6 +1119,20 @@ def _extract_target(tool: str, text: str) -> str:
         if not match:
             match = re.search(r"\bnetwork\s+path\s+to\s+([a-z0-9.:-]+)", lower, re.I)
         return plausible_host(match.group(1)) if match else ""
+    if tool == "route_lookup":
+        match = re.search(
+            r"\broute\s+lookup(?:\s+(?:against|for|to))?\s+([a-z0-9.:-]+)",
+            lower, re.I,
+        )
+        if match:
+            candidate = plausible_host(match.group(1))
+            if candidate and candidate not in {"a", "an", "the", "harmless", "public", "address"}:
+                return candidate
+        # Stress/audit prompts often intentionally avoid pinning an external
+        # host and say only "a harmless public address". Use a fixed public DNS
+        # address solely as a kernel route-selection target; no packet is sent.
+        if re.search(r"\b(?:harmless\s+)?public\s+address\b", lower, re.I):
+            return "8.8.8.8"
     return ""
 
 

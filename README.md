@@ -4,7 +4,7 @@
 
 # Al Agent
 
-Al Agent is a local-first AI assistant for Ollama. It combines a browser chat interface with tools, persistent conversations, memory, reminders, research, browser automation, and background jobs while keeping the main model small and responsive.
+Al Agent is a local-first AI assistant for Ollama. It combines a browser chat interface with tools, persistent conversations, memory, reminders, research, browser automation, and background jobs while keeping the default executor small and responsive.
 
 ## Features
 
@@ -49,6 +49,16 @@ cd agent
 ```
 
 You can change model names and context sizes later in `config/config.yaml`.
+
+The default interactive hierarchy is intentionally asymmetric:
+
+- **Decision — `agent-micro` → `qwen2.5-coder:0.5b`**: constrained plan/validator decisions only; never normal user prose.
+- **Executor — `agent-main` → `qwen2.5-coder:1.5b`**: default native tool caller, bounded argument constructor, and ordinary conversational model.
+- **Reasoning — `agent-reasoning` → `hf.co/empero-ai/Qwen3.8-4B-Distill-GGUF:Q4_K_M`**: lazy text reasoning/escalation for explicit Think, complex analysis, and bounded recovery.
+- **Vision — `qwen3.5:4b`**: separate multimodal path because the configured reasoning GGUF is text-only.
+- **Research — `agent-research` → `qwen3.5:9b`**: long-form research/report synthesis only.
+
+Deterministic routing, recipes, evidence checks, and scheduler transitions run before any model call. With `OLLAMA_MAX_LOADED_MODELS=2`, steady-state residency is executor + decision; reasoning or vision temporarily replaces decision, and `agent-micro` is restored asynchronously afterward.
 
 ### 3. Start Al Agent
 

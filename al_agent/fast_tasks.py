@@ -85,7 +85,7 @@ def _explicit_numbered_requirement_plan(user_text: str, max_steps: int) -> list[
 
     Large benchmark/audit prompts often say that *every numbered requirement*
     is independent and then use markdown headings such as ``## 17. Network
-    Path``.  Sending that document to a 2B compiler can mistake the separate
+    Path``.  Sending that document to a decision-model compiler can mistake the separate
     numbered safety list for work and can fragment bullet lists into bogus
     tasks.  When the user's structure is unambiguous, preserve it exactly.
     """
@@ -184,7 +184,7 @@ def _deterministic_plan_fallback(user_text: str, max_steps: int = 32) -> list[st
 
 
 def structured_plan_compiler_prompt(user_text: str) -> list[dict[str, str]]:
-    """Build the exact 2B compiler prompt used for structured plan generation."""
+    """Build the exact decision-model compiler prompt used for structured plan generation."""
     system = (
         "You are a deterministic task-plan compiler. You do not execute tasks and you do not choose tools. "
         "Convert the user's actual requested work into a JSON array of short, sequential, self-contained task strings. "
@@ -223,7 +223,7 @@ def compile_structured_plan(
     max_steps: int = 32,
     before_model_call: Callable[[], None] | None = None,
 ) -> list[str]:
-    """Compile a complex request into validated atomic tasks using the fast role.
+    """Compile a complex request into validated atomic tasks using the decision role.
 
     The model receives no tool schemas and is constrained with Ollama structured
     output. Any malformed/failed response falls back to a deterministic splitter;

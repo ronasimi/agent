@@ -39,8 +39,8 @@ CONFIG = load_config()
 AGENT_CFG = CONFIG.get("agent", {})
 OPT_CFG = CONFIG.get("self_optimization", {})
 WORKSPACE_ROOT = Path(str(OPT_CFG.get("workspace_root", "/app/workspace/self_optimization")))
-MODEL = str(AGENT_CFG.get("model", "agent-main:4b"))
-FAST_MODEL = str(AGENT_CFG.get("fast_model", "agent-main:2b"))
+MODEL = str(AGENT_CFG.get("model", "agent-main"))
+FAST_MODEL = str(AGENT_CFG.get("fast_model", "agent-main"))
 OLLAMA_HOST = str(AGENT_CFG.get("host", os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")))
 SELF_OPTIONS = OPT_CFG.get("model_options") or {
     "num_ctx": 16384, "temperature": 0.6, "top_p": 0.95, "top_k": 20, "num_predict": 4096,

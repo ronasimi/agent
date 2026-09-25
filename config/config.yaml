@@ -4,19 +4,30 @@
 agent:
   # The Ollama server is intentionally external to this container.
   host: "http://127.0.0.1:11434"
-  model: "agent-main:4b"
-  fast_model: "agent-main:2b"
-  # Multimodal role. For now this aliases the 4B main runner, so
-  # image turns pay no extra model load or sidecar inference. Point this at a
-  # dedicated vision model later; the harness will then use it as a no-tools
-  # visual sidecar and return the observation to the main agent.
-  vision_model: "agent-main:4b"
-  vision_model_keep_alive: -1
+  # Explicit model-role architecture. The harness resolves deterministic work
+  # before inference, then uses the smallest capable model and escalates only
+  # when ambiguity/recovery requires more reasoning.
+  executor_model: "agent-main"
+  decision_model: "agent-micro"
+  reasoning_model: "agent-reasoning"
+
+  # Backward-compatible aliases used by older tools/plugins. `model` is the
+  # normal interactive executor; `fast_model` remains the 1.5B support/extraction
+  # role rather than the 0.5B decision-only model.
+  model: "agent-main"
+  fast_model: "agent-main"
+  decision_model_keep_alive: -1
+  reasoning_model_keep_alive: "2m"
+  # The requested Qwen3.8-Distill reasoning GGUF is text-only. Keep image
+  # understanding on the official multimodal 4B model instead of advertising
+  # a vision capability the reasoning alias cannot actually provide.
+  vision_model: "qwen3.5:4b"
+  vision_model_keep_alive: "2m"
 
   # Dedicated long-form research writer/verifier. /research uses this model
   # only after source collection. The worker temporarily evicts the interactive
   # and fast models while this larger model is resident, then restores them.
-  report_model: "agent-report:9b"
+  report_model: "agent-research"
   report_model_keep_alive: "10m"
   report_options:
     num_ctx: 8192
@@ -58,13 +69,13 @@ agent:
     enabled: true
     min_tool_iterations: 4
 
-  # Load the main model (and pre-fill its byte-stable system prefix) in the
-  # background at frontend startup so the first turn pays neither the model
-  # load nor the system-prompt prefill. The warm-up deliberately uses
-  # main_options so Ollama does not reload the runner on the first real turn.
+  # Warm the 1.5B executor at frontend startup and restore the 0.5B decision
+  # runner during idle time. Deterministic fast paths still run before either
+  # model is consulted.
   warmup:
     enabled: true
     fast_model_prewarm: true
+    decision_model_prewarm: true
     # Tool-capable chat templates may place dynamic schemas before messages, so
     # a system-only prime often is not a reusable prefix. Keep it off by default;
     # use diagnostics/benchmarks/benchmark_warmup.py and model_stats.cache_hit_pct to verify before enabling.
@@ -77,6 +88,7 @@ agent:
     enabled: true
     probe_main_on_startup: true
     probe_fast_when_warmed: true
+    probe_decision_when_warmed: true
     cache_path: "/app/memory/model_capabilities.json"
     # Let the UI become interactive before a cold/new-model probe starts. Any
     # active/recent user turn restarts this idle window.
@@ -124,6 +136,17 @@ agent:
     # a boolean thinking gate; string effort levels enter full reasoning.
     tool_num_predict: 1024
     final_num_predict: 2048
+  model_escalation:
+    enabled: true
+    # Directly use 4B for explicit Think, final synthesis of compiled plans, and
+    # clearly complex no-tool reasoning. Ordinary tool turns stay on 1.5B.
+    complex_direct_reasoning: true
+    min_complex_chars: 280
+    # A low-confidence 0.5B validator decision or executor no-progress can request
+    # one 4B recovery call before the step is failed/blocked.
+    escalate_on_low_validator_confidence: true
+    max_reasoning_calls_per_turn: 4
+
   max_validator_calls_per_turn: 2
   max_recovery_attempts_per_requirement: 2
   tool_turn_num_predict: 384
@@ -135,9 +158,10 @@ agent:
   # deterministic fallback set. This prevents irrelevant schemas from bloating
   # prompt prefill and tempting small models into substitute tools.
   requirement_led_schema_only: true
-  # Complex multi-intent turns are compiled by the warm 2B role before the 4B
-  # tool loop. Only one atomic requirement and its tiny schema set are exposed
-  # to the main model at a time.
+  # Complex multi-intent turns are compiled by the 0.5B decision role only
+  # when deterministic numbered-plan parsing cannot resolve them. Each atomic
+  # step then stays on deterministic execution or the 1.5B executor, with 4B
+  # reasoning reserved for bounded escalation/final synthesis.
   structured_plan:
     enabled: true
     min_chars: 900
@@ -150,8 +174,8 @@ agent:
     # Structured plans have a separate bounded runtime budget. The normal
     # interactive six-call/180s circuit breakers remain unchanged for ordinary
     # turns. Stop/cancel remains available throughout scheduled execution.
-    # A tool-using step generally consumes two main-model calls: select/execute
-    # the tool, then consume its result and close the requirement.
+    # Deterministic and evidence-backed steps may consume zero model calls.
+    # The budget remains a hard ceiling for genuinely semantic/recovery steps.
     max_model_calls: 193
     max_iterations: 208
     soft_timeout_seconds: 3600
@@ -163,8 +187,8 @@ agent:
   # Independent read-only calls emitted in the same native batch can execute concurrently.
   max_parallel_readonly_tools: 3
 
-  # Tool-produced screenshots/images are injected into the following Ollama
-  # message so the multimodal main model can inspect the actual pixels.
+  # Tool-produced screenshots/images are handled by the configured vision
+  # role, either directly or as a sidecar observation for the executor.
   vision:
     sidecar_when_distinct: true
     max_observation_chars: 5000
@@ -176,9 +200,9 @@ agent:
     # Set false again if the Ollama runner rejects multimodal requests.
     supports_images: true
 
-  # Share bounded semantic state between the distinct main (4B) and fast (2B)
-  # roles. Both use a 16K context, but this is prompt-level state sharing, not a
-  # cross-model KV cache.
+  # Share bounded semantic state across executor/support roles. This is
+  # prompt-level state sharing, not a cross-model KV cache. The decision model
+  # receives only bounded classification/validator payloads.
   # Raw tool output stays in the normal loop transcript and remains untrusted.
   model_context_sharing:
     enabled: true
@@ -188,9 +212,9 @@ agent:
     memory_chars: 1200
     tool_chars: 1600
 
-  # Canonical harness-owned state shared by the main and fast models.
-  # When enabled, this replaces duplicated old raw conversation context in the
-  # main-model prompt instead of being appended on top of it.
+  # Canonical harness-owned state shared by the interactive execution roles.
+  # When enabled, this replaces duplicated raw history in the active model
+  # prompt instead of appending it on top.
   working_state:
     enabled: true
     main_history_turns: 1
@@ -227,7 +251,7 @@ agent:
     scheduler_steps: 96
 
   # Before the last allowed tool-loop iteration, the fast model classifies the
-  # loop and the harness injects constrained recovery guidance for the main model.
+  # loop and the harness injects constrained recovery guidance for the active executor/reasoning model.
   tool_loop_validator:
     enabled: true
     # Three failed/no-progress attempts trigger validation before a fourth
@@ -237,11 +261,10 @@ agent:
     max_candidate_tools: 24
     timeout_seconds: 25
     max_transcript_chars: 12000
-    # Use the same indefinite residency policy and 16K runner configuration as
-    # every other fast-role request so Ollama does not reload it for validation.
+    # Validator uses the dedicated 0.5B coder decision role.
     keep_alive: -1
     options:
-      num_ctx: 16384
+      num_ctx: 8192
       temperature: 0.1
       top_p: 0.95
       top_k: 20
@@ -286,12 +309,12 @@ agent:
   # Native tool schemas are selected deterministically per turn to reduce prefill.
   max_tools_per_turn: 12
 
-  # Context compaction normally reuses the main model so a single-model Ollama
+  # Context compaction normally reuses the executor model so Ollama
   # server does not evict the interactive model. Set this to the fast model only
   # when the server can keep both models resident.
   compaction_model: ""
   # num_ctx here is used only when compaction_model is a *different* model.
-  # Ollama keys a loaded runner by context size, so reusing the main model with
+  # Ollama keys a loaded runner by context size, so reusing the executor with
   # a smaller num_ctx would unload the warm interactive model; the worker
   # therefore keeps main_options.num_ctx in that case.
   compaction_options:
@@ -323,15 +346,37 @@ agent:
     # caching optimization.
     volatile_blocks_last: false
 
+  # Executor (1.5B coder): normal tool selection, bounded argument construction, and
+  # routine user-facing synthesis.
   main_options:
     num_ctx: 16384
-    temperature: 0.6
-    top_p: 0.95
+    temperature: 0.3
+    top_p: 0.9
     top_k: 20
 
+  # Compatibility/support 1.5B role used by parameter extraction and background
+  # helpers. It aliases executor_model, so keep the runner context identical.
   fast_options:
     num_ctx: 16384
     temperature: 0.1
+    top_p: 0.9
+    top_k: 20
+
+  # Decision (0.5B coder): constrained JSON classification only. Never use this role
+  # for normal prose or arbitrary tool arguments. Small context keeps validation
+  # and plan-arbitration TTFT low.
+  decision_options:
+    num_ctx: 8192
+    temperature: 0.0
+    top_p: 0.9
+    top_k: 20
+    num_predict: 128
+
+  # Reasoning (4B): lazy escalation for explicit Think turns, complex no-tool
+  # analysis, executor no-progress recovery, and final structured-plan synthesis.
+  reasoning_options:
+    num_ctx: 16384
+    temperature: 0.4
     top_p: 0.95
     top_k: 20
 

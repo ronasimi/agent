@@ -338,6 +338,7 @@ def test_prompt_policy_leak_guard_detects_runtime_policy_but_not_normal_tool_dis
 
     assert _looks_like_prompt_policy_leak("### Agent Runtime Policy\nTools are explicitly typed and supplied through native tool-calling schemas.")
     assert _looks_like_prompt_policy_leak("### Runtime contract\n- Answer the user's current request directly.")
+    assert _looks_like_prompt_policy_leak("# Evidence Digest\n## Current State\nInternal state follows.")
     assert not _looks_like_prompt_policy_leak("A tool call is a structured request to an external function.")
 
 

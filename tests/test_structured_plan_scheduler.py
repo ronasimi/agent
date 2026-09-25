@@ -17,7 +17,7 @@ def test_compound_prompt_crosses_structured_plan_threshold():
     assert not should_compile_structured_plan("Check the weather in London", min_chars=900, min_commands=3)
 
 
-def test_fast_compiler_uses_strict_json_array_and_no_tool_schemas():
+def test_decision_compiler_uses_strict_json_array_and_no_tool_schemas():
     from al_agent.fast_tasks import STRUCTURED_PLAN_SCHEMA, compile_structured_plan
 
     class FakeClient:
@@ -40,7 +40,7 @@ def test_fast_compiler_uses_strict_json_array_and_no_tool_schemas():
     objective = "Check weather in London, then read my latest unread Gmail, then scan 192.168.1.0/24"
     plan = compile_structured_plan(
         client,
-        model="agent-main:2b",
+        model="agent-micro",
         objective=objective,
         options={"num_ctx": 4096},
         min_chars=10,
@@ -53,7 +53,7 @@ def test_fast_compiler_uses_strict_json_array_and_no_tool_schemas():
         "Scan the local 192.168.1.0/24 subnet",
     ]
     call = client.calls[0]
-    assert call["model"] == "agent-main:2b"
+    assert call["model"] == "agent-micro"
     assert call["format"] == STRUCTURED_PLAN_SCHEMA
     assert call["stream"] is False
     assert call["options"]["temperature"] == 0.0
@@ -72,7 +72,7 @@ def test_fast_compiler_allows_one_item_instead_of_inventing_tasks():
 
     objective = "Review this architecture carefully. " + ("context " * 180)
     plan = compile_structured_plan(
-        FakeClient(), model="agent-main:2b", objective=objective, min_chars=100, min_commands=3,
+        FakeClient(), model="agent-main", objective=objective, min_chars=100, min_commands=3,
     )
     assert plan == ["Review the supplied architecture document"]
 
@@ -90,7 +90,7 @@ def test_fast_compiler_filters_global_constraints_from_executable_steps():
 
     plan = compile_structured_plan(
         FakeClient(),
-        model="agent-main:2b",
+        model="agent-main",
         objective="Do not install packages. Then check the time, then read the README. " + ("context " * 40),
         min_chars=10,
         min_commands=2,
@@ -131,7 +131,7 @@ Summarize all completed requirements.
 """
     plan = compile_structured_plan(
         CompilerMustNotRun(),
-        model="agent-main:2b",
+        model="agent-main",
         objective=prompt,
         min_chars=10,
         min_commands=2,
@@ -462,7 +462,7 @@ Collect the host snapshot.
 Summarize the results.
 """
     plan = compile_structured_plan(
-        CompilerMustNotRun(), model="agent-main:2b", objective=prompt,
+        CompilerMustNotRun(), model="agent-main", objective=prompt,
         min_chars=10, min_commands=2, max_steps=96,
     )
     assert len(plan) == 2
@@ -1076,7 +1076,7 @@ Inspect mounted filesystems.
 
     plan = compile_structured_plan(
         CompilerMustNotRun(),
-        model="agent-main:2b",
+        model="agent-main",
         objective=prompt,
         min_chars=10,
         min_commands=2,
@@ -1088,7 +1088,7 @@ Inspect mounted filesystems.
     assert lock_requests == []
 
 
-def test_fast_plan_compiler_requests_inference_slot_only_when_model_is_needed():
+def test_decision_plan_compiler_requests_inference_slot_only_when_model_is_needed():
     from al_agent.fast_tasks import compile_structured_plan
 
     order = []
@@ -1100,7 +1100,7 @@ def test_fast_plan_compiler_requests_inference_slot_only_when_model_is_needed():
 
     plan = compile_structured_plan(
         FakeClient(),
-        model="agent-main:2b",
+        model="agent-main",
         objective="Check weather, then read README. " + ("context " * 30),
         min_chars=10,
         min_commands=2,
@@ -1140,8 +1140,9 @@ def test_stress_first_nine_steps_complete_without_intermediate_model_calls(monke
                 "clock": {"timezone": "America/Toronto"}, "host_hostname": "muninn",
                 "runtime_hostname": "muninn", "platform": "Linux-7.2.6-arch2-1-x86_64-with-glibc2.44",
                 "kernel": "7.2.6-arch2-1", "architecture": "x86_64", "python": "3.14.7",
-                "main_model": "agent-main:4b", "fast_model": "agent-main:2b",
-                "context_tokens": 16384, "workspace_available": True,
+                "executor_model": "agent-main", "decision_model": "agent-micro",
+                "reasoning_model": "agent-reasoning", "main_model": "agent-main",
+                "fast_model": "agent-main", "context_tokens": 16384, "workspace_available": True,
             })
         if name == "uptime":
             return json.dumps({"boot_time": "2026-09-20T20:28:46-04:00", "uptime_seconds": 324008.7})
@@ -1273,6 +1274,7 @@ Summarize all completed requirements.
     assert len(scheduler["steps"]) == 9
     assert all(step["status"] == "PASS" for step in scheduler["steps"])
     assert len(model.calls) == 1
+    assert model.calls[0]["model"] == te.REASONING_MODEL
     assert messages[-1]["content"] == "final stress synthesis"
     names = [name for name, _ in executed]
     assert "tool_health" in names
@@ -1393,4 +1395,128 @@ Summarize both requirements.
     assert len(model.calls) == 4  # exactly 3 failing attempts + final synthesis
     assert store.scheduler_complete()
     assert store.load()["status"] == "complete"
+    assert messages[-1]["content"] == "final synthesis"
+
+
+def test_tool_required_prose_is_bounded_and_escalates_then_advances(monkeypatch, tmp_path):
+    """Regression for the route-step prose loop seen with a small executor.
+
+    An operational scheduler step with supplied tools may get one corrective
+    executor retry. A second prose-only miss escalates to the reasoner; if that
+    also refuses to emit a native call and validation is disabled, only the
+    active step fails and the scheduler advances. It must never consume the
+    208-iteration structured-plan budget repeating prose.
+    """
+    from al_agent import turn_engine as te
+    from tools import working_state
+    from tools.catalog import get_tool_schema
+    from tools.task_requirements import TaskRequirementLedger
+
+    class EmptyRequirementLedger(TaskRequirementLedger):
+        @classmethod
+        def from_request(cls, user_text: str):
+            return cls([])
+
+    class ScriptedClient:
+        def __init__(self):
+            self.calls = []
+
+        def chat(self, **kwargs):
+            self.calls.append(kwargs)
+            index = len(self.calls)
+            if index <= 3:
+                assert kwargs.get("tools")
+                role_model = str(kwargs.get("model") or "")
+                if index <= 2:
+                    assert role_model == te.MODEL
+                else:
+                    assert role_model == te.REASONING_MODEL
+                return iter([{
+                    "done": True,
+                    "done_reason": "length",
+                    "prompt_eval_count": 10,
+                    "eval_count": 128,
+                    "message": {
+                        "content": "Use `ip route show` and inspect the default gateway.",
+                        "tool_calls": [],
+                    },
+                }])
+            assert not kwargs.get("tools")
+            return iter([{
+                "done": True,
+                "done_reason": "stop",
+                "message": {"content": "final synthesis", "tool_calls": []},
+            }])
+
+    monkeypatch.setattr(working_state, "DB_PATH", str(tmp_path / "bounded-prose-loop.db"))
+    store = working_state.WorkingStateStore(limits={"max_render_chars": 8000})
+    model = ScriptedClient()
+    monkeypatch.setattr(te, "WORKING_STATE", store)
+    monkeypatch.setattr(te, "WORKING_STATE_ENABLED", True)
+    monkeypatch.setattr(te, "STRUCTURED_PLAN_ENABLED", True)
+    monkeypatch.setattr(te, "STRUCTURED_PLAN_MIN_CHARS", 10)
+    monkeypatch.setattr(te, "STRUCTURED_PLAN_MIN_COMMANDS", 2)
+    monkeypatch.setattr(te, "RECIPES_ENABLED", False)
+    monkeypatch.setattr(te, "GROUNDING_ENABLED", False)
+    monkeypatch.setattr(te, "LOOP_VALIDATOR_ENABLED", False)
+    monkeypatch.setattr(te, "MODEL_TRACE_ENABLED", False)
+    monkeypatch.setattr(te, "MODEL_NO_PROGRESS_MAX_RETRIES", 2)
+    monkeypatch.setattr(te, "MODEL_ESCALATION_ENABLED", True)
+    monkeypatch.setattr(te, "MAX_REASONING_CALLS_PER_TURN", 2)
+    monkeypatch.setattr(te, "get_conversation_summary", lambda: "")
+    monkeypatch.setattr(te, "build_memory_context", lambda *_: "")
+    monkeypatch.setattr(te, "get_relevant_user_prompt_context", lambda *_: "")
+    monkeypatch.setattr(te, "get_user_location", lambda: "")
+    monkeypatch.setattr(te, "build_historical_recall_context", lambda *a, **k: "")
+    monkeypatch.setattr(te, "render_relevant_skill_index", lambda *a, **k: "")
+    monkeypatch.setattr(te, "render_failure_lessons", lambda *a, **k: "")
+    monkeypatch.setattr(te, "render_relevant_reflections", lambda *a, **k: "")
+    monkeypatch.setattr(te, "evict_report_model_for_interactive", lambda: None)
+    monkeypatch.setattr(te, "prepare_reasoning_model_for_interactive", lambda: None)
+    monkeypatch.setattr(te, "schedule_decision_model_prewarm", lambda *a, **k: False)
+    monkeypatch.setattr(te, "_prune_compacted_history", lambda _messages: None)
+    monkeypatch.setattr(te, "log_perf_stats", lambda *a, **k: None)
+    monkeypatch.setattr(
+        te,
+        "select_tool_schemas",
+        lambda *a, **k: [get_tool_schema("route_list")],
+    )
+
+    prompt = """# Bounded prose-loop regression
+Treat every numbered requirement below as independent.
+
+## 1. Route Inspection
+Inspect routing behavior using the supplied route primitive.
+
+## 2. Tool Selection
+Identify the primitive for current time without executing it yet.
+
+# FINAL REPORT
+Summarize both requirements.
+"""
+    messages = [{"role": "system", "content": "system"}]
+    te.handle_user_turn(
+        messages,
+        prompt,
+        False,
+        runtime_overrides={
+            "OLLAMA": model,
+            "LOOP_VALIDATOR_CLIENT": model,
+            "TaskRequirementLedger": EmptyRequirementLedger,
+            "record_monitor_state": lambda *a, **k: None,
+            "append_and_save": lambda rows, item: rows.append(item),
+            "acquire_turn_lock": lambda: object(),
+            "release_turn_lock": lambda _lock: None,
+            "acquire_inference_lock": lambda: object(),
+            "release_inference_lock": lambda _lock: None,
+            "queue_compaction_if_needed": lambda *a, **k: None,
+        },
+    )
+
+    scheduler = store.scheduler_snapshot()
+    assert [step["status"] for step in scheduler["steps"]] == ["FAIL", "PASS"]
+    assert "native tool call" in scheduler["steps"][0]["reason"]
+    assert scheduler["steps"][1]["reason"] == "deterministic capability metadata"
+    assert len(model.calls) == 4  # two executor misses, one reasoning miss, final synthesis
+    assert store.scheduler_complete()
     assert messages[-1]["content"] == "final synthesis"

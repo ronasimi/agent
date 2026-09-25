@@ -82,7 +82,7 @@ def main() -> int:
     args = parser.parse_args()
 
     cfg = load_config().get("agent", {})
-    model = args.model or str(cfg.get("model") or "agent-main:4b")
+    model = args.model or str(cfg.get("model") or "agent-main")
     host = args.host or str(cfg.get("host") or "http://127.0.0.1:11434")
     options = dict(cfg.get("main_options") or {})
     system_prompt = build_system_prompt()

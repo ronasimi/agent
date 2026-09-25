@@ -1,51 +1,45 @@
-# Al Agent current state — 2026-09-23
+# Al Agent current state — 2026-09-24
 
 This file is the canonical point-in-time summary of the harness as shipped in this repository. `README.md` is the operator/user guide and `ARCHITECTURE.md` describes extension boundaries. The other dated review/audit documents are historical records; where they disagree with this file, this file and the current code/configuration are authoritative.
 
 ## Runtime model roles
 
-The default deployment uses three generative Ollama roles. The embedding model is optional because semantic memory is disabled by default.
+The default deployment uses four aliased text-generation roles, a separate multimodal vision runner, and an optional embedding model. Deterministic code is always preferred before inference.
 
 | Role | Default model | Context | Residency/use |
 | --- | --- | ---: | --- |
-| Main | `agent-main:4b` → `hf.co/empero-ai/Qwen3.8-4B-Distill-GGUF:Q4_K_M` | 16K | Foreground chat, reasoning, coding, tool orchestration; also the default vision role |
-| Fast | `agent-main:2b` → `hf.co/empero-ai/Qwen3.8-2B-Distill-GGUF:Q8_0` | 16K | Bounded validator/recovery work, research support, source distillation, and advisory recipe-parameter naming |
-| Report | `agent-report:9b` → `qwen3.5:9b` | 8K | Long-form research synthesis/factuality repair only; loaded for report stages and released afterward |
-| Embedding (optional) | `nomic-embed-text` | n/a | Used only by semantic-memory embedding calls and the embedding benchmark when semantic memory is enabled |
+| Decision | `agent-micro` → `qwen2.5-coder:0.5b` | 8K | Constrained JSON plan compilation, loop validation, retry/switch/block arbitration; never normal user prose |
+| Executor | `agent-main` → `qwen2.5-coder:1.5b` | 16K | Default foreground native tool selection, bounded parameter construction, routine synthesis; also the compatibility `model`/`fast_model` alias |
+| Reasoning | `agent-reasoning` → `hf.co/empero-ai/Qwen3.8-4B-Distill-GGUF:Q4_K_M` | 16K | Lazy text-only escalation for explicit Think, complex no-tool analysis, executor failure/capability recovery, and structured-plan final synthesis |
+| Vision | `qwen3.5:4b` | 16K | Multimodal image/screenshot understanding; separate because the configured reasoning GGUF has no vision projector |
+| Research | `agent-research` → `qwen3.5:9b` | 8K | Long-form research synthesis/factuality repair only; loaded for report stages and released afterward |
+| Embedding (optional) | `nomic-embed-text` | n/a | Used only by semantic-memory embedding calls when semantic memory is enabled |
 
-`vision_model` currently aliases `agent-main:4b`. `vision.supports_images` is enabled experimentally in `config/config.yaml`; if the configured runner rejects image payloads, disable that flag or point `vision_model` at a supported multimodal model.
+Steady-state interactive residency is **executor + decision**. With `OLLAMA_MAX_LOADED_MODELS=2`, a reasoning or vision request evicts the 0.5B decision runner while preserving the 1.5B executor. After the temporary 4B runner is released, the decision model is restored asynchronously. This prevents arbitrary Ollama eviction and keeps routine TTFT low.
 
-The main and fast roles use distinct models but both use a 16K runner configuration. `fast_model_keep_alive: -1` pins the fast role after it is loaded; startup prewarms main and then fast. The report role has a finite keep-alive and temporarily displaces interactive residency when required.
+### Escalation and tool-call policy
+
+The 4B reasoner is not consulted on successful deterministic or ordinary 1.5B tool turns. Escalation is bounded and occurs for explicit Think mode, final synthesis of a compiled multi-step plan, clearly complex direct no-tool reasoning, missing executor capabilities, repeated executor no-progress, or low/medium-confidence `agent-micro` validator diagnoses such as `wrong_tool` / `bad_arguments`. An operational scheduler step that returns prose instead of a required native tool call consumes the no-progress budget; it can no longer retry for free.
+
+Tool capability probing is behavioral: accepting a `tools` parameter without actually producing a native tool call is recorded as `accepted_unverified` and is not sufficient for tool-bearing execution. The executor then escalates rather than silently looping.
+
+### Prompt-boundary policy
+
+Simple conversational turns use a minimal prompt path and do not receive working-state, evidence-digest, recipe-control, or scheduler blocks. When evidence is needed, it is private system context rather than a synthetic user message. Output leakage guards reject internal harness headings.
 
 ### Model installation
 
-`scripts/create_ollama_aliases.sh` pulls and creates the main and fast aliases. The report alias is separate:
+`scripts/create_ollama_aliases.sh` installs the four aliases and the separate vision runner:
 
 ```bash
 ./scripts/create_ollama_aliases.sh
-ollama pull qwen3.5:9b
-ollama cp qwen3.5:9b agent-report:9b
 ```
 
-`nomic-embed-text` is **not required for normal operation with the default configuration**:
-
-```yaml
-agent:
-  semantic_memory_enabled: false
-  embed_model: "nomic-embed-text"
-```
-
-With semantic memory disabled, normal turn memory lookup uses the deterministic lexical `search_memory()` path. Pull the embedding model only if semantic memory or explicit semantic-memory tools are required:
-
-```bash
-ollama pull nomic-embed-text
-```
-
-The embedding model is currently used by `remember_semantic()`, `search_semantic_memory()` / `get_relevant_memories()` when semantic memory is enabled, and the optional embedding-latency benchmark. Recipe search, skill search, tool discovery, observation retrieval, and ordinary routing do not require it.
+`nomic-embed-text` is not required for normal operation while `semantic_memory_enabled: false`.
 
 ## Tool routing and execution
 
-The harness exposes a bounded, deterministic subset of the registered tools rather than placing the complete catalog in every prompt. The generated builtin manifest currently contains **235 tools**.
+The harness exposes a bounded, deterministic subset of the registered tools rather than placing the complete catalog in every prompt. The generated builtin manifest currently contains **237 tools**.
 
 Important routing properties:
 
@@ -87,7 +81,7 @@ This allows large deterministic plans to remain inspectable/resumable without in
 
 Large tool results are persisted as durable observations. Prompt/state previews may contain `…[clipped]…`; this is display/storage compaction and **is not an observation-truncation signal**.
 
-Actual middle truncation is tracked by structured harness metadata and a recoverable observation ID. The turn engine performs deterministic recovery during execution and then performs an authoritative **final settlement after the last deterministic tool call** (including cleanup/recipe-retention checks that may themselves create archived results). Rule/audit/finalization state is evaluated only from that settled snapshot. Recovery is bounded. If recovery fails or stops making contiguous progress, the affected evidence is marked terminally unresolved instead of reopening the main-model recovery loop until the model-call budget is exhausted. `read_observation` results do not recursively generate artificial truncation requirements.
+Actual middle truncation is tracked by structured harness metadata and a recoverable observation ID. The turn engine performs deterministic recovery during execution and then performs an authoritative **final settlement after the last deterministic tool call** (including cleanup/recipe-retention checks that may themselves create archived results). Rule/audit/finalization state is evaluated only from that settled snapshot. Recovery is bounded. If recovery fails or stops making contiguous progress, the affected evidence is marked terminally unresolved instead of reopening the interactive-model recovery loop until the model-call budget is exhausted. `read_observation` results do not recursively generate artificial truncation requirements.
 
 ## Recipes
 
@@ -188,7 +182,7 @@ Drive metadata access also requires the Google Drive API to be enabled in the OA
 
 ## Research and reports
 
-`/research` collects sources with bounded web primitives, uses the fast role for planning/distillation, and admits `agent-report:9b` only for long-form synthesis/factuality repair. Reports target approximately 1,700–2,400 words by default, can include bounded inline images, and use claim/evidence checks before final output.
+`/research` collects sources with bounded web primitives, uses the fast role for planning/distillation, and admits `agent-research` only for long-form synthesis/factuality repair. Reports target approximately 1,700–2,400 words by default, can include bounded inline images, and use claim/evidence checks before final output.
 
 ## Current validation baseline
 

@@ -98,6 +98,20 @@ def test_unknown_profile_preserves_existing_runtime_behavior(monkeypatch):
     }
 
 
+def test_behavioral_probe_must_verify_tool_call_before_runtime_uses_tools(monkeypatch):
+    profile = caps.ModelCapabilityProfile(
+        model="chatty", identity="v2:chatty:x", think_parameter=True,
+        tools_parameter=True, tool_call_mode="accepted_unverified",
+        tool_result_continuation=None,
+    )
+    monkeypatch.setattr(caps, "_ACTIVE", {"chatty": profile})
+    with pytest.raises(caps.ModelCapabilityError, match="did not emit a verifiable tool call"):
+        caps.capability_chat_overrides(
+            "chatty", think=False,
+            tools=[{"type": "function", "function": {"name": "demo", "parameters": {"type": "object"}}}],
+        )
+
+
 class NoThinkClient(FakeClient):
     def chat(self, **kwargs):
         self.chat_calls.append(kwargs)

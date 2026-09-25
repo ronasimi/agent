@@ -24,7 +24,7 @@ from typing import Any, Callable
 
 from .model_protocol import extract_qwen_xml_tool_calls, is_prompt_protocol_error, tool_result_message
 
-PROBE_VERSION = 1
+PROBE_VERSION = 2
 DEFAULT_CACHE_PATH = "/app/memory/model_capabilities.json"
 _CACHE_LOCK = threading.RLock()
 _ACTIVE: dict[str, "ModelCapabilityProfile"] = {}
@@ -503,6 +503,10 @@ def capability_chat_overrides(
             if profile is not None and profile.tools_parameter is False:
                 raise ModelCapabilityError(
                     f"model '{model}' rejected Ollama tool schemas during startup conformance probing"
+                )
+            if profile is not None and profile.tool_call_mode == "accepted_unverified":
+                raise ModelCapabilityError(
+                    f"model '{model}' accepted tool schemas but did not emit a verifiable tool call during behavioral conformance probing"
                 )
             if profile is not None and profile.tool_result_continuation is False:
                 raise ModelCapabilityError(

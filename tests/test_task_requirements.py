@@ -473,3 +473,14 @@ def test_browser_semantic_observation_requires_browser_step():
 def test_browser_session_requires_browser_step():
     text = "Browser Session: Open a safe public demo page and report the active tab and state version."
     assert "browser_step" in TaskRequirementLedger.from_request(text).required_tools()
+
+
+def test_routes_compile_to_deterministic_route_list_and_lookup_requirements():
+    """The stress-suite route step should not require model-based tool routing."""
+    ledger = TaskRequirementLedger.from_request(
+        "Inspect the routing table. Identify the default route, default gateway, and interface used by the "
+        "default route. Cross-check using route lookup against a harmless public address."
+    )
+    assert ledger.required_tools() == ["route_list", "route_lookup"]
+    lookup = next(item for item in ledger.requirements if item.tool == "route_lookup")
+    assert lookup.scope.get("target") == "8.8.8.8"

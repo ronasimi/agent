@@ -58,10 +58,11 @@ def test_successful_completed_readonly_repeat_is_suppressed_after_all_work_finis
 def test_fallback_finalizer_preserves_latest_media(monkeypatch):
     from al_agent import runtime as agent
 
-    captured = {}
+    captured = {"calls": []}
 
     class FakeClient:
         def chat(self, **kwargs):
+            captured["calls"].append(kwargs)
             captured["messages"] = kwargs["messages"]
             return {"message": {"content": "final"}}
 
@@ -76,4 +77,9 @@ def test_fallback_finalizer_preserves_latest_media(monkeypatch):
     ]
     agent._finalize_after_limit(messages, tail)
     assert [i for i, message in enumerate(captured["messages"]) if message.get("role") == "system"] == [0]
-    assert any(message.get("images") == ["base64-image"] for message in captured["messages"])
+    # With a distinct 4B vision/reasoning role, the image is consumed by the
+    # sidecar and a bounded visual observation is passed to the 2B executor.
+    assert any(
+        any(message.get("images") == ["base64-image"] for message in call.get("messages", []))
+        for call in captured["calls"]
+    )
