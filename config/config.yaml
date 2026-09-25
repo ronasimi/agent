@@ -31,12 +31,21 @@ agent:
   model_no_progress_max_retries: 3
   turn_hard_timeout_seconds: 600
   model_transport:
-    timeout_seconds: 60
+    # Allow long local-model prefill, but fail quickly if an established stream stalls.
+    timeout_seconds: 120
+    first_byte_timeout_seconds: 120
+    stream_idle_timeout_seconds: 60
     queue_timeout_seconds: 90
   context:
     reserve_tokens: 2560
     max_tool_output_chars: 6000
+    # DB retrieval bound; only the recent conversational surface below reaches the model.
     recent_messages: 100
+    recent_conversation_turns: 3
+    state_tape_entries: 6
+    state_tape_unresolved_entries: 3
+    state_tape_entry_chars: 520
+    rolling_summary_chars: 3200
   warmup:
     enabled: true
     # Prime the exact initial tool-schema/system prefix used by real turns.

@@ -27,6 +27,7 @@ from tools.memory import (
     get_conversation_summary,
 )
 from tools.runtime import DB_PATH, get_monitor_state, list_jobs, list_monitor_events
+from tools.state_tape import StateTapeStore
 from tools.working_state import WorkingStateStore
 
 _SECRET_KEY_RE = re.compile(
@@ -174,10 +175,16 @@ def _runtime_snapshot(conversation_id: str) -> dict[str, Any]:
         },
         "context": {"max_context": agent_runtime.MAX_CTX,
                     "configured_context": agent_runtime.AGENT_CFG.get("context", {})},
-        "generation": {"options": agent_runtime.MAIN_OPTIONS,
-                       "tool_protocol": agent_runtime.AGENT_CFG.get("tool_protocol", "json"),
-                       "max_model_calls_per_turn": agent_runtime.MAX_MODEL_CALLS_PER_TURN,
-                       "model_transport_timeout": agent_runtime.MODEL_TRANSPORT_TIMEOUT},
+        "generation": {
+            "options": agent_runtime.MAIN_OPTIONS,
+            "tool_protocol": agent_runtime.AGENT_CFG.get("tool_protocol", "json"),
+            "max_model_calls_per_turn": agent_runtime.MAX_MODEL_CALLS_PER_TURN,
+            "model_transport": {
+                "first_byte_timeout_seconds": agent_runtime.MODEL_FIRST_BYTE_TIMEOUT,
+                "stream_idle_timeout_seconds": agent_runtime.MODEL_STREAM_IDLE_TIMEOUT,
+                "queue_timeout_seconds": agent_runtime.INFERENCE_LOCK_TIMEOUT_SECONDS,
+            },
+        },
         "routing": {
             "mode": "deterministic_catalog_prefilter",
             "decision_model": agent_runtime.MODEL,
@@ -189,7 +196,16 @@ def _runtime_snapshot(conversation_id: str) -> dict[str, Any]:
             "llm_calls": 0,
             "warmup": get_monitor_state("agent.model_warmup", {}),
         },
-        "features": {"autonomous_tools": True, "recipes": agent_runtime.RECIPES_ENABLED},
+        "features": {
+            "autonomous_tools": True,
+            "recipes": agent_runtime.RECIPES_ENABLED,
+            "state_tape": {
+                "recent_conversation_turns": agent_runtime.RECENT_CONVERSATION_TURNS,
+                "recent_entries": agent_runtime.STATE_TAPE_RECENT_ENTRIES,
+                "unresolved_entries": agent_runtime.STATE_TAPE_UNRESOLVED_ENTRIES,
+                "rolling_summary_chars": agent_runtime.STATE_TAPE_ROLLING_SUMMARY_CHARS,
+            },
+        },
         "ollama_host": agent_runtime.OLLAMA_HOST,
         "model_trace_path": agent_runtime.MODEL_TRACE_PATH,
         "interaction_state": {"active_turns": get_monitor_state("agent.foreground_turns", {}),
@@ -318,6 +334,27 @@ def generate_bug_report(source_root: Path, conversation_id: str = "default") -> 
     except Exception as exc:
         benchmark_payload = {"error": str(exc)}
 
+    try:
+        tape_store = StateTapeStore(cid)
+        state_tape = {
+            "recent": [entry.__dict__ if hasattr(entry, "__dict__") else {
+                "turn_id": entry.turn_id,
+                "source_message_id": entry.source_message_id,
+                "status": entry.status,
+                "summary": entry.summary,
+                "resolved": entry.resolved,
+                "created_at": entry.created_at,
+            } for entry in tape_store.recent(limit=12, resolved_only=False)],
+            "unresolved": [{
+                "turn_id": entry.turn_id,
+                "status": entry.status,
+                "summary": entry.summary,
+                "resolved": entry.resolved,
+            } for entry in tape_store.unresolved(limit=8)],
+        }
+    except Exception as exc:
+        state_tape = {"error": f"{type(exc).__name__}: {exc}"}
+
     sections: list[tuple[str, Any]] = [
         ("Triage summary", _failure_signals(working_state, traces, monitor_events)),
         ("Runtime snapshot", _runtime_snapshot(cid)),
@@ -328,6 +365,7 @@ def generate_bug_report(source_root: Path, conversation_id: str = "default") -> 
             "compacted_through_message_id": compacted_through,
             "summary": summary,
         }),
+        ("State Tape", state_tape),
         ("Recent timestamped conversation history", history),
         ("Recent model-call wire traces", traces),
         ("Durable jobs", jobs),

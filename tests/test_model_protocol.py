@@ -216,6 +216,74 @@ def test_consume_chat_stream_suppresses_policy_leak_before_release():
     assert capture.first_visible_at is None
 
 
+def test_consume_chat_stream_never_releases_split_leading_control_prefix():
+    visible = []
+    capture = consume_chat_stream(
+        [
+            {"message": {"content": "   <to"}},
+            {"message": {"content": "ol_"}},
+            {"message": {"content": "call>"}},
+            {"message": {"content": "<function=current_time>"}, "done": True},
+        ],
+        content_stream_allowed=True,
+        leak_detector=lambda text: "<tool_call" in text.lower(),
+        on_visible_content=visible.append,
+        guard_chars=4,
+        guard_line_chars=4,
+        control_prefixes=("<tool_call>",),
+    )
+
+    assert capture.content.startswith("   <tool_call>")
+    assert capture.policy_leak_detected is True
+    assert visible == []
+    assert capture.first_visible_at is None
+
+
+def test_consume_chat_stream_keeps_late_split_control_xml_off_visible_stream():
+    visible = []
+    capture = consume_chat_stream(
+        [
+            {"message": {"content": "Plain answer text"}},
+            {"message": {"content": " and more <"}},
+            {"message": {"content": "tool_"}},
+            {"message": {"content": "call>"}},
+            {"message": {"content": "<function=current_time>"}, "done": True},
+        ],
+        content_stream_allowed=True,
+        leak_detector=lambda text: "<tool_call" in text.lower(),
+        on_visible_content=visible.append,
+        guard_chars=4,
+        guard_line_chars=4,
+        control_prefixes=("<tool_call>",),
+    )
+
+    assert "".join(visible) == "Plain answer text and more "
+    assert "<tool" not in "".join(visible).lower()
+    assert capture.policy_leak_detected is True
+
+
+def test_thinking_streams_while_control_content_is_buffered():
+    visible = []
+    thinking = []
+    capture = consume_chat_stream(
+        [
+            {"message": {"thinking": "reason ", "content": "<tool_"}},
+            {"message": {"thinking": "continues", "content": "call>"}, "done": True},
+        ],
+        content_stream_allowed=True,
+        leak_detector=lambda text: "<tool_call" in text.lower(),
+        on_visible_content=visible.append,
+        on_thinking=thinking.append,
+        guard_chars=4,
+        guard_line_chars=4,
+        control_prefixes=("<tool_call>",),
+    )
+
+    assert thinking == ["reason ", "continues"]
+    assert capture.thinking == "reason continues"
+    assert visible == []
+
+
 def test_consume_chat_stream_honors_cancellation_without_draining_stream():
     consumed = []
 
@@ -259,3 +327,42 @@ def test_qwen_xml_parser_preserves_multiline_parameter_content_and_rejects_suffi
     calls, errors = extract_qwen_xml_tool_calls(text + "\nnot allowed after tool call")
     assert calls == []
     assert errors == ["unexpected text after final Qwen XML tool call"]
+
+
+def test_stream_has_separate_first_chunk_timeout():
+    import time
+    import pytest
+    from al_agent.model_protocol import StreamTimeoutError, consume_chat_stream
+
+    def delayed():
+        time.sleep(0.05)
+        yield {"message": {"content": "late"}, "done": True}
+
+    with pytest.raises(StreamTimeoutError, match="first response chunk"):
+        consume_chat_stream(
+            delayed(),
+            content_stream_allowed=True,
+            leak_detector=lambda _: False,
+            first_chunk_timeout_seconds=0.01,
+            idle_timeout_seconds=0.5,
+        )
+
+
+def test_stream_has_tighter_idle_timeout_after_first_chunk():
+    import time
+    import pytest
+    from al_agent.model_protocol import StreamTimeoutError, consume_chat_stream
+
+    def stalls():
+        yield {"message": {"content": "hello"}, "done": False}
+        time.sleep(0.05)
+        yield {"message": {"content": "world"}, "done": True}
+
+    with pytest.raises(StreamTimeoutError, match="stream activity"):
+        consume_chat_stream(
+            stalls(),
+            content_stream_allowed=True,
+            leak_detector=lambda _: False,
+            first_chunk_timeout_seconds=0.5,
+            idle_timeout_seconds=0.01,
+        )

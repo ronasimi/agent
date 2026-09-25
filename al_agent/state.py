@@ -41,13 +41,26 @@ RESERVE_TOKENS = max(
     int(CONTEXT_CFG.get("reserve_tokens", 2560)),
 )
 RECENT_MESSAGES = int(CONTEXT_CFG.get("recent_messages", 100))
+RECENT_CONVERSATION_TURNS = max(1, int(CONTEXT_CFG.get("recent_conversation_turns", 3)))
+STATE_TAPE_RECENT_ENTRIES = max(1, int(CONTEXT_CFG.get("state_tape_entries", 6)))
+STATE_TAPE_UNRESOLVED_ENTRIES = max(1, int(CONTEXT_CFG.get("state_tape_unresolved_entries", 3)))
+STATE_TAPE_ENTRY_CHARS = max(180, int(CONTEXT_CFG.get("state_tape_entry_chars", 520)))
+STATE_TAPE_ROLLING_SUMMARY_CHARS = max(800, int(CONTEXT_CFG.get("rolling_summary_chars", 3200)))
 MAX_TOOL_OUTPUT = int(CONTEXT_CFG.get("max_tool_output_chars", 6000))
 MAX_MODEL_CALLS_PER_TURN = int(AGENT_CFG.get("max_model_calls_per_turn", 24))
 MAX_TOOL_CALLS_PER_ITERATION = int(AGENT_CFG.get("max_tool_calls_per_iteration", 6))
 MODEL_NO_PROGRESS_MAX_RETRIES = int(AGENT_CFG.get("model_no_progress_max_retries", 3))
 TURN_HARD_TIMEOUT_SECONDS = float(AGENT_CFG.get("turn_hard_timeout_seconds", 600))
 MODEL_TRANSPORT_CFG = AGENT_CFG.get("model_transport", {})
-MODEL_TRANSPORT_TIMEOUT = float(MODEL_TRANSPORT_CFG.get("timeout_seconds", 60))
+MODEL_FIRST_BYTE_TIMEOUT = float(
+    MODEL_TRANSPORT_CFG.get("first_byte_timeout_seconds", MODEL_TRANSPORT_CFG.get("timeout_seconds", 120))
+)
+MODEL_STREAM_IDLE_TIMEOUT = float(
+    MODEL_TRANSPORT_CFG.get("stream_idle_timeout_seconds", 60)
+)
+# Compatibility alias used by background helpers; foreground streaming has a
+# separate first-byte and post-first-chunk idle deadline.
+MODEL_TRANSPORT_TIMEOUT = MODEL_FIRST_BYTE_TIMEOUT
 INFERENCE_LOCK_TIMEOUT_SECONDS = float(
     MODEL_TRANSPORT_CFG.get("queue_timeout_seconds", 90)
 )

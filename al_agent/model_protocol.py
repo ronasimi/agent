@@ -7,6 +7,7 @@ unit-tested without importing the Ollama client or initializing agent state.
 from __future__ import annotations
 
 import json
+import queue
 import re
 import threading
 import time
@@ -14,6 +15,69 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
+
+
+class StreamTimeoutError(TimeoutError):
+    """Raised when a streamed model response misses a harness deadline."""
+
+
+def _iter_stream_with_timeouts(
+    stream: Iterable[Any],
+    *,
+    first_chunk_timeout_seconds: float | None,
+    idle_timeout_seconds: float | None,
+) -> Iterator[Any]:
+    """Yield stream chunks with separate prefill/first-chunk and idle deadlines.
+
+    Ollama/httpx exposes one read timeout for the whole response.  A local model
+    may legitimately spend longer on prompt prefill than we want to tolerate
+    between already-started stream chunks.  Pumping the iterator on a daemon
+    thread lets the harness distinguish those two phases without buffering the
+    response or blocking UI streaming.  The caller closes the underlying stream
+    on timeout, which normally interrupts the producer thread immediately.
+    """
+
+    first_timeout = (
+        float(first_chunk_timeout_seconds)
+        if first_chunk_timeout_seconds is not None and float(first_chunk_timeout_seconds) > 0
+        else None
+    )
+    idle_timeout = (
+        float(idle_timeout_seconds)
+        if idle_timeout_seconds is not None and float(idle_timeout_seconds) > 0
+        else None
+    )
+    if first_timeout is None and idle_timeout is None:
+        yield from stream
+        return
+
+    events: queue.Queue[tuple[str, Any]] = queue.Queue()
+
+    def pump() -> None:
+        try:
+            for item in stream:
+                events.put(("item", item))
+            events.put(("done", None))
+        except BaseException as exc:  # provider iterator boundary
+            events.put(("error", exc))
+
+    threading.Thread(target=pump, name="ollama-stream-pump", daemon=True).start()
+    first = True
+    while True:
+        timeout = first_timeout if first else idle_timeout
+        try:
+            kind, payload = events.get(timeout=timeout) if timeout is not None else events.get()
+        except queue.Empty as exc:
+            phase = "first response chunk" if first else "stream activity"
+            raise StreamTimeoutError(
+                f"Timed out waiting for {phase} after {timeout:.1f}s"
+            ) from exc
+        if kind == "done":
+            return
+        if kind == "error":
+            raise payload
+        first = False
+        yield payload
 
 def _tool_call_parts(call: Any) -> tuple[str, str, Any]:
     """Return ``(id, name, arguments)`` for dict or Ollama ToolCall objects."""
@@ -198,6 +262,9 @@ def consume_chat_stream(
     now: Callable[[], float] = time.monotonic,
     guard_chars: int = 96,
     guard_line_chars: int = 32,
+    control_prefixes: tuple[str, ...] = (),
+    first_chunk_timeout_seconds: float | None = None,
+    idle_timeout_seconds: float | None = None,
 ) -> StreamCapture:
     """Consume Ollama chunks while preserving native streaming semantics.
 
@@ -215,8 +282,70 @@ def consume_chat_stream(
     guard_buffer = ""
     guard_released = False
     policy_leak_detected = False
+    control_tail = ""
+    normalized_control_prefixes = tuple(
+        prefix.lower() for prefix in control_prefixes if str(prefix or "")
+    )
 
-    for chunk in stream:
+    def _ambiguous_control_prefix(text: str) -> bool:
+        """Return True while the visible prefix could still become a control token.
+
+        Qwen tool XML can be split at arbitrary token/chunk boundaries.  Never
+        release ``<tool_`` merely because the initial latency guard expired; wait
+        until the prefix is either a complete control marker or normal prose.
+        """
+        if not normalized_control_prefixes:
+            return False
+        candidate = str(text or "").lstrip().lower()
+        if not candidate:
+            return True
+        return any(prefix.startswith(candidate) for prefix in normalized_control_prefixes)
+
+    def _safe_visible_piece(text: str) -> str:
+        """Return streamable prose while retaining possible split control suffixes.
+
+        This guard remains active *after* ordinary prose has started streaming.
+        A late/malformed tool envelope therefore cannot leak parser XML to the UI.
+        Only the shortest suffix that might become a control prefix is withheld.
+        """
+        nonlocal control_tail, policy_leak_detected
+        if not normalized_control_prefixes or policy_leak_detected:
+            return text if not policy_leak_detected else ""
+        combined = control_tail + str(text or "")
+        lowered = combined.lower()
+        marker_positions = [
+            lowered.find(prefix) for prefix in normalized_control_prefixes
+            if lowered.find(prefix) >= 0
+        ]
+        if marker_positions:
+            cut = min(marker_positions)
+            safe = combined[:cut]
+            control_tail = ""
+            policy_leak_detected = True
+            return safe
+
+        keep = 0
+        max_keep = min(
+            len(combined),
+            max((len(prefix) - 1 for prefix in normalized_control_prefixes), default=0),
+        )
+        lower_combined = combined.lower()
+        for size in range(1, max_keep + 1):
+            suffix = lower_combined[-size:]
+            if any(prefix.startswith(suffix) for prefix in normalized_control_prefixes):
+                keep = size
+        if keep:
+            safe = combined[:-keep]
+            control_tail = combined[-keep:]
+            return safe
+        control_tail = ""
+        return combined
+
+    for chunk in _iter_stream_with_timeouts(
+        stream,
+        first_chunk_timeout_seconds=first_chunk_timeout_seconds,
+        idle_timeout_seconds=idle_timeout_seconds,
+    ):
         if cancel_requested is not None and cancel_requested():
             return StreamCapture(
                 content=full_content,
@@ -271,29 +400,38 @@ def consume_chat_stream(
         if not content_stream_allowed or policy_leak_detected:
             continue
         if guard_released:
-            if first_visible_at is None:
-                first_visible_at = now()
-            if on_visible_content is not None:
-                on_visible_content(text)
+            safe = _safe_visible_piece(text)
+            if safe:
+                if first_visible_at is None:
+                    first_visible_at = now()
+                if on_visible_content is not None:
+                    on_visible_content(safe)
             continue
 
         guard_buffer += text
         if leak_detector(guard_buffer):
             policy_leak_detected = True
             continue
-        if len(guard_buffer) >= guard_chars or ("\n" in guard_buffer and len(guard_buffer) >= guard_line_chars):
-            if first_visible_at is None:
-                first_visible_at = now()
-            if on_visible_content is not None:
-                on_visible_content(guard_buffer)
+        ready = len(guard_buffer) >= guard_chars or (
+            "\n" in guard_buffer and len(guard_buffer) >= guard_line_chars
+        )
+        if ready and not _ambiguous_control_prefix(guard_buffer):
+            safe = _safe_visible_piece(guard_buffer)
+            if safe:
+                if first_visible_at is None:
+                    first_visible_at = now()
+                if on_visible_content is not None:
+                    on_visible_content(safe)
             guard_buffer = ""
             guard_released = True
 
-    if content_stream_allowed and guard_buffer and not policy_leak_detected:
-        if first_visible_at is None:
-            first_visible_at = now()
-        if on_visible_content is not None:
-            on_visible_content(guard_buffer)
+    if content_stream_allowed and not policy_leak_detected:
+        final_piece = guard_buffer if not guard_released else control_tail
+        if final_piece:
+            if first_visible_at is None:
+                first_visible_at = now()
+            if on_visible_content is not None:
+                on_visible_content(final_piece)
 
     return StreamCapture(
         content=full_content,

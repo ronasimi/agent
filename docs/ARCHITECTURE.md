@@ -17,7 +17,8 @@ The default protocol is `qwen_xml`. Tool definitions are sent through Ollama's n
 | `al_agent/deterministic_router.py` | Non-generative catalog ranking and bounded schema preselection |
 | `al_agent/agent_loop.py` | Bounded model/action/result iteration |
 | `al_agent/tool_session.py` | Turn-local catalog discovery, activation, validation, and dispatch |
-| `al_agent/model_protocol.py` | Stream consumption and provider wire normalization |
+| `al_agent/model_protocol.py` | Stream consumption, split first-byte/idle deadlines, and provider wire normalization |
+| `tools/state_tape.py` | Three-tier prompt compaction, turn collapse, unresolved state, and deterministic rolling summaries |
 | `al_agent/events.py` | Frontend event context and bounded process locks |
 | `tools/catalog.py` | Registration, duplicate detection, and registry snapshots |
 | `tools/executor.py` | Lifecycle checks and isolated execution support |
@@ -28,11 +29,20 @@ The default protocol is `qwen_xml`. Tool definitions are sent through Ollama's n
 
 A cheap lexical/metadata scorer ranks the registered catalog before the first model call. Unrelated schemas receive zero routing relevance. Persistent global/context outcome statistics may slightly reorder already-related candidates, but cannot manufacture relevance for an unrelated tool.
 
-A high-confidence, well-separated result activates one schema. Ambiguous or multi-intent requests activate a bounded candidate set (six by default). The resident 4B model receives only those schemas plus the stable `tool_search`/`load_tools` controls and remains authoritative about whether and what to execute.
+A high-confidence, well-separated result activates one schema. Ambiguous or multi-intent requests activate a bounded candidate set (eight by default). The resident 4B model receives only those schemas plus the stable `tool_search`/`load_tools` controls and remains authoritative about whether and what to execute.
 
 `tool_search` uses the same deterministic scorer and performs zero Ollama calls. It returns compact metadata only; complete schemas appear only in the next native `tools` field. Each search replaces the prior active task-schema set, preventing prompt growth across a turn. `load_tools` remains an exact-name escape hatch.
 
 Routing outcomes are stored in the main SQLite database. Infrastructure timeouts are recorded without penalizing a tool.
+
+
+## State Tape prompt lifecycle
+
+Prompt history uses three tiers instead of replaying the SQLite chat transcript verbatim. Tier 1 is the active turn: the current user request, current routed schemas, raw current-turn call/result transactions, and transient reasoning. When the turn closes, native schemas and raw tool protocol are discarded from model-facing context. Raw rows remain durable in SQLite for audit/search only.
+
+Tier 2 keeps at most three recent conversational turns as user/final-assistant surface text plus a bounded State Tape of compact deterministic outcomes. Discovery calls are excluded. Large JSON/XML results are collapsed before persistence to the tape, while the full tool observation remains retrievable from the observation store. Blocked or scheduler-incomplete work is retained as compact unresolved state and is re-routed on a later turn rather than carrying its old schema.
+
+Tier 3 deterministically rolls older resolved tape entries into `conversation_context.summary` and advances the prompt-facing history watermark. No LLM call is required for normal compaction. This keeps the leading system policy byte-stable, prevents historical schema/result replay, and makes prompt growth bounded by configuration rather than conversation age.
 
 ## Execution invariants
 
@@ -45,9 +55,11 @@ Routing outcomes are stored in the main SQLite database. Infrastructure timeouts
 7. Inference locks are released before tool I/O. Conversation locks preserve serialized history updates.
 8. Turn-local schemas and conversation context are not shared across concurrent chats.
 
-## Warmup and residency
+## Warmup, residency, and prefill controls
 
-WebUI startup primes only `agent-main:4b`, using the stable system prompt and discovery-control schemas when configured. No router warmup, router residency polling, or secondary model load exists. With `keep_alive: -1`, foreground requests reuse the same runner until Ollama or the host unloads/restarts it.
+WebUI startup primes only `agent-main:4b`, using the stable system policy prefix and discovery-control schemas when configured. Turn-specific inventory text is no longer appended to the system message; native schemas live only in the active `tools` field. No router warmup, router residency polling, or secondary model load exists. With `keep_alive: -1`, foreground requests reuse the same runner until Ollama or the host unloads/restarts it.
+
+Foreground streaming separates the prefill/first-response deadline from the post-start stream-idle deadline. Prompt traces record message count, message/schema characters, estimated input tokens, and historical tool-protocol counts before every model call, plus harness first-token/first-visible timings when available.
 
 ## Limits
 

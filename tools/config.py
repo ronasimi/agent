@@ -115,10 +115,27 @@ def normalize_config(raw: dict) -> dict:
         agent[role + "_model"] = model
         agent[role + "_options"] = dict(options)
         agent[role + "_model_keep_alive"] = keep_alive
-    agent["context"] = {
+    context = {
         **dict(agent.get("context") or {}),
         "num_ctx": options["num_ctx"],
     }
+    context.setdefault("recent_messages", 100)
+    context.setdefault("recent_conversation_turns", 3)
+    context.setdefault("state_tape_entries", 6)
+    context.setdefault("state_tape_unresolved_entries", 3)
+    context.setdefault("state_tape_entry_chars", 520)
+    context.setdefault("rolling_summary_chars", 3200)
+    agent["context"] = context
+
+    transport = dict(agent.get("model_transport") or {})
+    legacy_timeout = float(transport.get("timeout_seconds", 120))
+    transport.setdefault("first_byte_timeout_seconds", max(legacy_timeout, 120.0))
+    transport.setdefault("stream_idle_timeout_seconds", min(max(legacy_timeout, 1.0), 60.0))
+    transport.setdefault("queue_timeout_seconds", 90)
+    # Keep the legacy field as the underlying HTTP read timeout.  The stream
+    # consumer enforces the tighter idle timeout after the first chunk.
+    transport["timeout_seconds"] = float(transport["first_byte_timeout_seconds"])
+    agent["model_transport"] = transport
     agent["semantic_memory_enabled"] = False
     agent["report_restore_models_after_stage"] = False
     agent["model_escalation"] = {"enabled": False}

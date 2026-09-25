@@ -15,6 +15,8 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
+from tools.context import estimate_messages_tokens, estimate_tokens
+
 from .model_protocol import (
     consume_chat_stream,
     extract_qwen_xml_tool_calls,
@@ -42,6 +44,8 @@ class LoopConfig:
     timeout_seconds: float = 600
     max_output_chars: int = 6000
     reserve_tokens: int = 2048
+    first_byte_timeout_seconds: float = 120
+    stream_idle_timeout_seconds: float = 60
 
     def __post_init__(self):
         if self.protocol not in {"qwen_xml", "native", "json"}:
@@ -55,6 +59,8 @@ class LoopConfig:
             self.max_no_progress,
             self.timeout_seconds,
             self.max_output_chars,
+            self.first_byte_timeout_seconds,
+            self.stream_idle_timeout_seconds,
         ):
             if value <= 0:
                 raise ValueError("Loop budgets must be positive")
@@ -247,6 +253,32 @@ def tool_outcome(raw: Any) -> tuple[bool, Any]:
     return True, parsed
 
 
+def _prompt_telemetry(messages: list[dict], schemas: list[dict]) -> dict[str, Any]:
+    """Return cheap model-call telemetry before bytes are sent to Ollama."""
+
+    schema_json = json.dumps(schemas, ensure_ascii=False, separators=(",", ":"))
+    message_chars = sum(len(str(message.get("content") or "")) for message in messages)
+    tool_call_chars = sum(
+        len(json.dumps(message.get("tool_calls"), ensure_ascii=False, default=str))
+        for message in messages
+        if message.get("tool_calls")
+    )
+    message_tokens = estimate_messages_tokens(messages)
+    schema_tokens = estimate_tokens(schema_json) if schema_json else 0
+    return {
+        "message_count": len(messages),
+        "message_chars": message_chars,
+        "tool_call_chars": tool_call_chars,
+        "schema_count": len(schemas),
+        "schema_chars": len(schema_json),
+        "estimated_message_tokens": message_tokens,
+        "estimated_schema_tokens": schema_tokens,
+        "estimated_input_tokens": message_tokens + schema_tokens,
+        "historical_tool_messages": sum(1 for message in messages if message.get("role") == "tool"),
+        "historical_tool_call_messages": sum(1 for message in messages if message.get("tool_calls")),
+    }
+
+
 def run_loop(
     messages: list[dict],
     *,
@@ -308,6 +340,9 @@ def run_loop(
         wire = fit_context(
             current, schemas if config.protocol in {"native", "qwen_xml"} else [], config
         )
+        telemetry = _prompt_telemetry(
+            wire, schemas if config.protocol in {"native", "qwen_xml"} else []
+        )
         request = {
             "model": config.model,
             "messages": wire,
@@ -321,8 +356,13 @@ def run_loop(
             request["format"] = action_schema(schemas)
         else:
             request["tools"] = schemas
-        emit("model_start", model=config.model, call_index=call_index)
+        emit(
+            "model_start", model=config.model, call_index=call_index,
+            prompt_telemetry=telemetry,
+        )
         capture = None
+        request_started_at = clock()
+        trace_request = {**request, "prompt_telemetry": telemetry}
         try:
             with inference_slot():
                 check()
@@ -331,11 +371,11 @@ def run_loop(
                     capture = consume_chat_stream(
                         stream,
                         # Final-answer prose should reach the Web UI as soon as it
-                        # is generated.  The short protocol guard keeps a leading
-                        # Qwen <tool_call> envelope off the visible stream; if a
-                        # non-conforming response emits prose before a later tool
-                        # call, the completed decode below sends assistant_reset
-                        # before any tool is executed.
+                        # is generated.  The protocol gate keeps Qwen control XML
+                        # off the visible stream even when <tool_call> is split
+                        # across chunks or appears late in malformed output.
+                        # Thinking uses its own event stream and is never delayed by
+                        # this content gate.
                         content_stream_allowed=True,
                         leak_detector=(
                             (lambda text: "<tool_call" in str(text).lower())
@@ -354,11 +394,27 @@ def run_loop(
                         # first visible prose latency close to native streaming.
                         guard_chars=16,
                         guard_line_chars=8,
+                        control_prefixes=("<tool_call>",)
+                        if config.protocol == "qwen_xml"
+                        else (),
+                        first_chunk_timeout_seconds=config.first_byte_timeout_seconds,
+                        idle_timeout_seconds=config.stream_idle_timeout_seconds,
                     )
                 finally:
                     close = getattr(stream, "close", None)
                     if close:
                         close()
+            if capture is not None:
+                if capture.first_token_at is not None:
+                    capture.perf_stats["harness_first_token_ms"] = round(
+                        (capture.first_token_at - request_started_at) * 1000, 3
+                    )
+                if capture.first_visible_at is not None:
+                    capture.perf_stats["harness_first_visible_ms"] = round(
+                        (capture.first_visible_at - request_started_at) * 1000, 3
+                    )
+                capture.perf_stats["harness_prompt_estimated_tokens"] = telemetry["estimated_input_tokens"]
+                capture.perf_stats["harness_schema_chars"] = telemetry["schema_chars"]
             check()
             if capture.cancelled:
                 raise LoopStopped("Turn cancelled")
@@ -378,7 +434,7 @@ def run_loop(
         except (ValueError, TypeError) as exc:
             no_progress += 1
             trace(
-                call_index=call_index, request=request, capture=capture, error=str(exc)
+                call_index=call_index, request=trace_request, capture=capture, error=str(exc)
             )
             if no_progress >= config.max_no_progress:
                 raise LoopStopped(
@@ -390,10 +446,10 @@ def run_loop(
             # Never replay a partial stream, promote thinking to an answer, or
             # infer a tool invocation from arbitrary prose/XML.
             trace(
-                call_index=call_index, request=request, capture=capture, error=str(exc)
+                call_index=call_index, request=trace_request, capture=capture, error=str(exc)
             )
             raise LoopStopped(f"Model request failed: {exc}") from exc
-        trace(call_index=call_index, request=request, capture=capture, error="")
+        trace(call_index=call_index, request=trace_request, capture=capture, error="")
         if calls and capture is not None and capture.first_visible_at is not None:
             # A strict Qwen tool turn should contain only XML tool-call blocks,
             # so normally nothing was made visible.  If the model violated that

@@ -432,6 +432,9 @@ def clear_chat_history(conversation_id: str | None = None) -> str:
     with _connect() as conn:
         conn.execute("DELETE FROM chat_history WHERE conversation_id=?", (cid,))
         conn.execute("DELETE FROM tool_observations WHERE conversation_id=?", (cid,))
+        # State Tape may be absent in databases created by older revisions.
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='state_tape_entries'").fetchone():
+            conn.execute("DELETE FROM state_tape_entries WHERE conversation_id=?", (cid,))
         conn.execute("UPDATE conversation_context SET summary = '', compacted_through_id = 0, updated_at = CURRENT_TIMESTAMP WHERE conversation_id = ?", (cid,))
         if cid == DEFAULT_CONVERSATION_ID:
             conn.execute("UPDATE conversation_state SET summary = '', compacted_through_id = 0, updated_at = CURRENT_TIMESTAMP WHERE id = 1")

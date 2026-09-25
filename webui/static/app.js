@@ -536,7 +536,7 @@ function connect(){
     else if(e.type==='recipe_check')setStatus(e.best_match?`Recipe checked: ${e.best_match}`:'Recipes checked','busy');
     else if(e.type==='thinking_delta')appendThinking(e.content||'');
     else if(e.type==='assistant_delta')appendAssistant(e.content||'');
-    else if(e.type==='assistant_reset'){resetAssistantStream();resetThinkingStream();}
+    else if(e.type==='assistant_reset'){resetAssistantStream();}
     else if(e.type==='tool_start'){finalizeThinkingStream();finalizeAssistantStream();assistantNode=null;assistantStreamBuffer='';setStatus(`Running ${e.name}…`,'busy');}
     else if(e.type==='tool_result'){addTool(e.name,e.status,e.content);addMedia(e.media);if(e.name==='set_profile_image'&&e.status==='ok')refreshProfileImage();setStatus(activeThinkingEnabled?'Thinking…':'Generating…','busy');if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}
     else if(e.type==='artifact_created'){finalizeThinkingStream();finalizeAssistantStream();assistantNode=null;assistantStreamBuffer='';void addArtifact(e.artifact||{});setStatus(`Created ${(e.artifact&&e.artifact.name)||'file'}`,'busy');if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}

@@ -496,3 +496,23 @@ def test_native_stream_preserves_distinct_identical_argument_calls():
     calls = merge_stream_tool_calls([], [a, b])
     assert len(calls) == 2
     assert len(merge_stream_tool_calls(calls, [a])) == 2
+
+
+def test_prompt_telemetry_is_attached_to_model_trace_request():
+    traced = []
+    session = ToolSession([SCHEMA], lambda *_: {"value": 1})
+    client = FakeClient([final("done")])
+    run_loop(
+        [{"role": "system", "content": "policy"}, {"role": "user", "content": "hello"}],
+        client=client,
+        tools=session,
+        config=CFG,
+        append=lambda _: None,
+        emit=lambda *args, **kwargs: None,
+        trace=lambda **kwargs: traced.append(kwargs),
+    )
+    telemetry = traced[-1]["request"]["prompt_telemetry"]
+    assert telemetry["message_count"] == 2
+    assert telemetry["estimated_input_tokens"] > 0
+    assert telemetry["schema_chars"] > 0
+    assert telemetry["historical_tool_messages"] == 0

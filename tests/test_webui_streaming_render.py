@@ -30,6 +30,11 @@ def test_turn_end_flushes_pending_stream_before_clearing_state() -> None:
     assert flush < clear
 
 
+def test_parser_retraction_does_not_erase_live_thinking_stream() -> None:
+    assert "else if(e.type==='assistant_reset'){resetAssistantStream();}" in APP_JS
+    assert "else if(e.type==='assistant_reset'){resetAssistantStream();resetThinkingStream();}" not in APP_JS
+
+
 def test_thinking_stream_is_separate_frame_batched_and_flushed() -> None:
     assert "function appendThinking(content)" in APP_JS
     assert "requestAnimationFrame(paintThinkingStream)" in APP_JS

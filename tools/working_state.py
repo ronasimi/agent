@@ -866,10 +866,17 @@ class WorkingStateStore:
         if not blocked and not self.scheduler_complete(state=state):
             state["status"] = "active"
             state["current_plan"] = []
+            # The unfinished scheduler state is compact and durable; native tool
+            # schemas are still turn-scoped and must be re-routed next turn.
+            state["tool_capabilities"] = []
             _save(state, self._cid())
             return
         state["status"] = "blocked" if blocked else "complete"
         state["current_plan"] = []
+        # Tool schemas are Tier-1 state.  Keep them while a structured scheduler
+        # is still active, but strip them as soon as the turn reaches a terminal
+        # state so diagnostics/prompt projections cannot accidentally replay them.
+        state["tool_capabilities"] = []
         _save(state, self._cid())
 
     def render_evidence(
