@@ -164,15 +164,35 @@ def requested_fact_types(
     text = " ".join(str(user_request or "").split())
     if is_nonexecuting_tool_selection_request(user_request):
         return set()
+    # Recall must be grounded in the earlier record, not a fresh measurement.
+    # Mixed requests that explicitly ask for a new reading keep the normal gates.
+    if (re.search(r"\b(?:earlier|previously|last time|we determined|we found)\b", text, re.I)
+            and re.search(r"\b(?:cpu|gpu|weather|inbox|emails?|host|exact|sensor|observation|profile|value|measurement|reading)\b", text, re.I)
+            and not re.search(r"\b(?:now|current|today|again|recheck)\b", text, re.I)):
+        return {"historical_evidence"}
     frame = dict(task_frame or {})
     result: set[str] = set()
     result.update(str(key) for key in dict(fact_frames or {}) if str(key))
     explicit_intent = classify_request_intent(text)
     implementation = is_implementation_request(text)
-    if frame.get("intent") == "weather" or explicit_intent == "weather" or (
+    hardware_temperature = bool(re.search(r"\b(?:cpu|gpu|processor|host|sensor)\b.*\b(?:temp(?:erature)?|thermal)\b|\btemperature\b.*\b(?:cpu|gpu|processor)\b", text, re.I))
+    if (not hardware_temperature or re.search(r"\b(?:weather|forecast)\b", text, re.I)) and (frame.get("intent") == "weather" or explicit_intent == "weather" or (
         not implementation and (is_weather_fact_request(text) or any(pattern.search(text) for pattern in _WEATHER_REQUEST_PATTERNS))
-    ):
+    )):
         result.add("weather")
+    elif hardware_temperature:
+        result.discard("weather")
+    if not implementation:
+        if hardware_temperature:
+            result.add("host_temperature")
+        if re.search(r"\b(?:gmail|inbox|mailbox|unread|emails?|e-mails?)\b", text, re.I) and not re.search(r"\b(?:write|draft|compose|explain|example)\b", text, re.I):
+            result.add("gmail")
+        if re.search(r"\b(?:my (?:profile|name|timezone|location)|where do i live|what city do i live|saved about me)\b", text, re.I):
+            result.add("profile")
+        if re.search(r"\b(?:calculate|compute the value|evaluate the expression)\b", text, re.I):
+            result.add("calculation")
+        if re.search(r"\b(?:read|summarize|inspect)\b.{0,80}\b(?:file|document)\b", text, re.I):
+            result.add("file_content")
     if frame.get("intent") == "current_time" or explicit_intent == "current_time" or (not implementation and _TIME_REQUEST_RE.search(text)):
         result.add("current_time")
     if frame.get("intent") == "host_state" or explicit_intent == "host_state" or (not implementation and _HOST_REQUEST_RE.search(text)):
@@ -187,7 +207,9 @@ def requested_fact_types(
         result.add("news")
     if frame.get("intent") == "market_price" or explicit_intent == "market_price" or (not implementation and is_market_price_request(text)):
         result.add("market_price")
-    if _WEB_FACT_REQUEST_RE.search(text) and not result and not implementation:
+    if _WEB_FACT_REQUEST_RE.search(text) and not implementation and (
+        not result or re.search(r"\b(?:search the web|web research|verify .*source|official .*documentation)\b", text, re.I)
+    ):
         result.add("web_fact")
     if not result and encyclopedic_lookup_query(text):
         result.add("encyclopedic")
@@ -457,6 +479,30 @@ def classify_fact_types(tool_name: str, content: str) -> set[str]:
     text = str(content or "")
     payload = _json_payload(text)
     result: set[str] = set()
+    # Catalog rows may contain arbitrary tool names/descriptions. Their payload
+    # must never confer provider provenance, even if it resembles provider JSON.
+    if name in {"tool_search", "load_tools"}:
+        return result
+    if (name == "read_observation" and isinstance(payload, dict)
+            and payload.get("observation_id") and payload.get("returned_chars", 0) > 0
+            and payload.get("tool") not in {None, "", "tool_search", "load_tools"}):
+        result.add("historical_evidence")
+    if name in {"gmail_search_messages", "gmail_read_message", "gmail_inbox_counts"} and isinstance(payload, dict) and payload.get("ok") is True:
+        if (name == "gmail_search_messages" and isinstance(payload.get("messages"), list)) or (name == "gmail_read_message" and payload.get("message")) or (name == "gmail_inbox_counts" and isinstance(payload.get("messages_total"), int)):
+            result.add("gmail")
+    if name == "get_user_profile" and isinstance(payload, dict) and isinstance(payload.get("identity"), dict):
+        result.add("profile")
+    if name == "calculate" and isinstance(payload, dict) and "result" in payload and not payload.get("error"):
+        result.add("calculation")
+    if name in {"read_file", "read_text", "read_lines", "document_text"} and text.strip() and not text.lstrip().lower().startswith("error"):
+        result.add("file_content")
+    if name in {"temperature_sensors", "host_snapshot"} and isinstance(payload, dict):
+        def has_temperature(value):
+            if isinstance(value, dict):
+                return any((key in {"current", "temperature", "temperature_celsius"} and isinstance(item, (int, float))) or has_temperature(item) for key, item in value.items())
+            return isinstance(value, list) and any(has_temperature(item) for item in value)
+        if has_temperature(payload):
+            result.add("host_temperature")
     if name == "current_time" and isinstance(payload, dict) and all(
         str(payload.get(key) or "").strip() for key in ("utc", "local", "timezone")
     ):
@@ -882,6 +928,19 @@ def grounding_metadata(
         payload = _json_payload(text)
         if isinstance(payload, dict) and payload.get("timezone"):
             proof["timezone"] = str(payload.get("timezone") or "")[:80]
+    elif name in {"gmail_search_messages", "gmail_read_message", "gmail_inbox_counts"}:
+        payload = _json_payload(text)
+        if isinstance(payload, dict):
+            proof["gmail_query"] = str(payload.get("query") or args.get("query") or "")
+            proof["gmail_inbox_counts"] = name == "gmail_inbox_counts" and "gmail" in facts
+    elif name == "read_observation":
+        payload = _json_payload(text)
+        if isinstance(payload, dict):
+            origin = str(payload.get("tool") or "")
+            original = str(payload.get("content") or "")
+            proof["historical_tool"] = origin
+            if origin != "read_observation":
+                proof["historical_fact_types"] = payload.get("fact_types") or sorted(classify_fact_types(origin, original))
     elif recipe_like:
         target = _weather_query_from_recipe(text)[:500]
         frame = scoped_frame("weather") or derive_task_frame(target)
@@ -1062,6 +1121,7 @@ def validate_fact_grounding(
     usable = [
         item for item in observations
         if isinstance(item, dict) and str(item.get("status") or "ok") in {"ok", "partial"}
+        and str(item.get("tool") or "").lower() not in {"tool_search", "load_tools"}
     ]
     observed = sorted({fact for item in usable for fact in _fact_types(item)})
     missing: list[str] = []
@@ -1145,9 +1205,15 @@ def validate_fact_grounding(
                 missing.append("encyclopedic")
 
     generic_sources = {
+        "historical_evidence": {"read_observation"},
         "host_state": {"host_snapshot"},
         "network_state": {"network_snapshot", "neighbor_snapshot", "connection_snapshot", "local_subnets", "scan_subnet", "network_reachability", "dns_diagnose", "network_path", "endpoint_probe", "http_probe"},
         "repository_state": {"repo_status", "repo_diff", "repo_checks", "git_status", "git_diff"},
+        "host_temperature": {"temperature_sensors", "host_snapshot"},
+        "profile": {"get_user_profile"},
+        "gmail": {"gmail_search_messages", "gmail_read_message", "gmail_inbox_counts"},
+        "calculation": {"calculate"},
+        "file_content": {"read_file", "read_text", "read_lines", "document_text"},
     }
     for fact_type, allowed_tools in generic_sources.items():
         if fact_type not in required:
@@ -1157,6 +1223,21 @@ def validate_fact_grounding(
             if fact_type in _fact_types(item)
             and str(item.get("tool") or "").lower() in allowed_tools
         ]
+        if fact_type == "gmail":
+            inbox = bool(re.search(r"\b(?:inbox|mailbox)\b", user_request, re.I))
+            unread = bool(re.search(r"\bunread\b", user_request, re.I))
+            matches = [item for item in matches if (
+                _proof(item).get("gmail_inbox_counts")
+                or ((not inbox or "in:inbox" in str(_proof(item).get("gmail_query", "")).lower())
+                    and (not unread or "is:unread" in str(_proof(item).get("gmail_query", "")).lower()))
+            )]
+        if fact_type == "historical_evidence":
+            # Rehydrating an unrelated mailbox observation cannot ground a past
+            # CPU reading. Metadata is derived from the original stored bytes.
+            fresh_wording = re.sub(r"\b(?:earlier|previously|last time|we determined|we found)\b", "", user_request, flags=re.I)
+            expected = requested_fact_types(fresh_wording)
+            expected.discard("encyclopedic")
+            matches = [item for item in matches if expected.issubset(set(_proof(item).get("historical_fact_types") or []))]
         if matches:
             evidence[fact_type] = [str(matches[-1].get("tool") or "")]
             evidence_details[fact_type] = _evidence_detail(
@@ -1223,7 +1304,7 @@ def validate_fact_grounding(
     if "web_fact" in required:
         turn_items = list(turn_usable)
         explicit_urls = {
-            _canonical_url(url) for url in re.findall(r"https?://[^\s<>\"']+", str(user_request or ""), flags=re.I)
+            _canonical_url(url.rstrip(".,;:!?)]}")) for url in re.findall(r"https?://[^\s<>\"']+", str(user_request or ""), flags=re.I)
         }
         explicit_urls.discard("")
         stop = {

@@ -13,6 +13,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from tools.security import redact_diagnostic_value
 
 _LOCK = threading.Lock()
 
@@ -57,7 +58,7 @@ def record_model_trace(
     error: str = "",
     request_extra: dict[str, Any] | None = None,
 ) -> None:
-    """Write one exact request/completion pair as JSONL.
+    """Write one request/completion pair as JSONL, redacting credential forms.
 
     Records contain the actual wire messages/tool schemas/options after harness
     compaction and Qwen schema adaptation. This makes traces suitable for replay,
@@ -87,14 +88,15 @@ def record_model_trace(
         "error": str(error or ""),
     }
     encoded = (
-        json.dumps(record, ensure_ascii=False, separators=(",", ":"), default=str)
+        json.dumps(redact_diagnostic_value(record), ensure_ascii=False, separators=(",", ":"), default=str)
         + "\n"
     )
     with _LOCK:
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             _rotate(target, max(1024 * 1024, int(max_bytes)))
-            with target.open("a", encoding="utf-8") as handle:
+            with os.fdopen(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "a", encoding="utf-8") as handle:
+                os.fchmod(handle.fileno(), 0o600)
                 handle.write(encoded)
         except OSError:
             # Tracing must never fail an interactive turn.

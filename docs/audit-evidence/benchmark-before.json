@@ -1,0 +1,71 @@
+{
+  "mode": "offline Python benchmark; no model or provider calls",
+  "runs": 240,
+  "catalog_tools": 238,
+  "routing_ms": {
+    "median": 4.3963,
+    "p95": 5.204,
+    "min": 3.8985,
+    "max": 7.591
+  },
+  "prompt_assembly_ms": {
+    "median": 0.5496,
+    "p95": 0.7832,
+    "min": 0.4336,
+    "max": 1.235
+  },
+  "estimated_input_tokens": {
+    "median": 1480.5,
+    "p95": 1945,
+    "min": 1275,
+    "max": 1945
+  },
+  "estimated_schema_tokens": {
+    "median": 586.0,
+    "p95": 1047,
+    "min": 385,
+    "max": 1047
+  },
+  "wire_bytes": {
+    "median": 6413.0,
+    "p95": 8408,
+    "min": 5545,
+    "max": 8408
+  },
+  "selections": {
+    "Check the current time in UTC.": [
+      "current_time"
+    ],
+    "What is the weather in London Ontario now?": [
+      "weather_forecast"
+    ],
+    "Calculate 19 times 23.": [
+      "calculate"
+    ],
+    "List the connected devices on my local network.": [
+      "map_network",
+      "block_devices",
+      "local_subnets",
+      "interface_list",
+      "network_reachability",
+      "network_snapshot",
+      "list_directory",
+      "list_recipes"
+    ],
+    "Read the current host CPU temperature and memory use.": [
+      "host_snapshot",
+      "temperature_sensors",
+      "cpu_info",
+      "memory_info",
+      "host_read_text",
+      "read_host_file",
+      "read_host_journal",
+      "search_memory"
+    ],
+    "How many emails are in my inbox?": [
+      "gmail_read_message",
+      "gmail_search_messages"
+    ]
+  },
+  "live_ollama_metrics": null
+}

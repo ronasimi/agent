@@ -26,6 +26,7 @@ def _iter_stream_with_timeouts(
     *,
     first_chunk_timeout_seconds: float | None,
     idle_timeout_seconds: float | None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> Iterator[Any]:
     """Yield stream chunks with separate prefill/first-chunk and idle deadlines.
 
@@ -51,33 +52,59 @@ def _iter_stream_with_timeouts(
         yield from stream
         return
 
-    events: queue.Queue[tuple[str, Any]] = queue.Queue()
+    events: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=64)
+    stopped = threading.Event()
+
+    def put(event):
+        while not stopped.is_set():
+            try:
+                events.put(event, timeout=0.1)
+                return
+            except queue.Full:
+                continue
 
     def pump() -> None:
         try:
             for item in stream:
-                events.put(("item", item))
-            events.put(("done", None))
+                if stopped.is_set():
+                    break
+                put(("item", item))
+            put(("done", None))
         except BaseException as exc:  # provider iterator boundary
-            events.put(("error", exc))
+            put(("error", exc))
+        finally:
+            close = getattr(stream, "close", None)
+            if close:
+                try:
+                    close()
+                except (ValueError, RuntimeError):
+                    pass
 
     threading.Thread(target=pump, name="ollama-stream-pump", daemon=True).start()
     first = True
-    while True:
-        timeout = first_timeout if first else idle_timeout
-        try:
-            kind, payload = events.get(timeout=timeout) if timeout is not None else events.get()
-        except queue.Empty as exc:
-            phase = "first response chunk" if first else "stream activity"
-            raise StreamTimeoutError(
-                f"Timed out waiting for {phase} after {timeout:.1f}s"
-            ) from exc
-        if kind == "done":
-            return
-        if kind == "error":
-            raise payload
-        first = False
-        yield payload
+    last_activity = time.monotonic()
+    try:
+        while True:
+            if cancel_requested and cancel_requested():
+                return
+            timeout = first_timeout if first else idle_timeout
+            remaining = None if timeout is None else timeout - (time.monotonic() - last_activity)
+            try:
+                kind, payload = events.get(timeout=min(0.1, max(0, remaining)) if remaining is not None else 0.1)
+            except queue.Empty as exc:
+                if remaining is None or time.monotonic() - last_activity < timeout:
+                    continue
+                phase = "first response chunk" if first else "stream activity"
+                raise StreamTimeoutError(f"Timed out waiting for {phase} after {timeout:.1f}s") from exc
+            if kind == "done":
+                return
+            if kind == "error":
+                raise payload
+            first = False
+            last_activity = time.monotonic()
+            yield payload
+    finally:
+        stopped.set()
 
 def _tool_call_parts(call: Any) -> tuple[str, str, Any]:
     """Return ``(id, name, arguments)`` for dict or Ollama ToolCall objects."""
@@ -138,7 +165,7 @@ _QWEN_TOOL_CALL_RE = re.compile(
     flags=re.I | re.S,
 )
 _QWEN_PARAMETER_RE = re.compile(
-    r"<parameter=([^>\s]+)>\s*(.*?)\s*</parameter>",
+    r"<parameter=([^>\s]+)>(.*?)</parameter>",
     flags=re.I | re.S,
 )
 
@@ -345,6 +372,7 @@ def consume_chat_stream(
         stream,
         first_chunk_timeout_seconds=first_chunk_timeout_seconds,
         idle_timeout_seconds=idle_timeout_seconds,
+        cancel_requested=cancel_requested,
     ):
         if cancel_requested is not None and cancel_requested():
             return StreamCapture(
@@ -427,7 +455,7 @@ def consume_chat_stream(
 
     if content_stream_allowed and not policy_leak_detected:
         final_piece = guard_buffer if not guard_released else control_tail
-        if final_piece:
+        if final_piece and not (len(final_piece.lstrip()) >= 5 and _ambiguous_control_prefix(final_piece)):
             if first_visible_at is None:
                 first_visible_at = now()
             if on_visible_content is not None:
@@ -441,6 +469,7 @@ def consume_chat_stream(
         first_token_at=first_token_at,
         first_visible_at=first_visible_at,
         policy_leak_detected=policy_leak_detected,
+        cancelled=bool(cancel_requested and cancel_requested()),
     )
 
 

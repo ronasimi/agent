@@ -91,9 +91,12 @@ def test_capability_overrides_omit_explicitly_unsupported_optional_fields(monkey
         caps.capability_chat_overrides("legacy", think=False, tools=[{"type": "function"}])
 
 
-def test_unknown_profile_preserves_existing_runtime_behavior(monkeypatch):
+@pytest.mark.parametrize("enabled", [False, True])
+def test_unknown_profile_preserves_existing_runtime_behavior(monkeypatch, enabled):
+    from tools import config
+    monkeypatch.setattr(config, "load_config", lambda: {"agent": {"supports_thinking": enabled}})
     monkeypatch.setattr(caps, "_ACTIVE", {})
-    assert caps.capability_chat_overrides("new-model", think=True, tools=[]) == {}
+    assert caps.capability_chat_overrides("new-model", think=True, tools=[]) == ({"think": True} if enabled else {})
 
 
 def test_behavioral_probe_must_verify_tool_call_before_runtime_uses_tools(monkeypatch):

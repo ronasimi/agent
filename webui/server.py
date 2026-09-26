@@ -571,6 +571,13 @@ def cancel(turn_id: str) -> dict[str, Any]:
     event.set(); return {"ok": True}
 
 
+@app.get("/api/turns/{turn_id}")
+def turn_status(turn_id: str) -> dict[str, Any]:
+    """Allow a reconnecting browser to recover without resubmitting the request."""
+    with RUNS_LOCK:
+        return {"turn_id": turn_id, "active": turn_id in RUNS}
+
+
 async def _run_turn(websocket: WebSocket, payload: dict[str, Any]) -> None:
     # Keep the historical test/integration hook while delegating to chat.py.
     _sync_workspace_root()

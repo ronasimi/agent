@@ -78,7 +78,7 @@ def test_reasoning_paints_do_not_schedule_transcript_scroll_work() -> None:
 
 def test_backend_foreground_loop_emits_assistant_deltas() -> None:
     loop_py = (ROOT / "al_agent" / "agent_loop.py").read_text(encoding="utf-8")
-    assert "content_stream_allowed=True" in loop_py
+    assert 'content_stream_allowed=config.protocol != "json"' in loop_py
     assert '_VisibleContentRouter' in loop_py
     assert 'self.emit("assistant_delta", content=' in loop_py
     assert 'self.emit("activity_progress", content=label)' in loop_py

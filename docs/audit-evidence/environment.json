@@ -1,0 +1,20 @@
+{
+  "python": "3.12.14",
+  "packages": {
+    "pytest": "9.1.1",
+    "ollama": "0.6.2",
+    "fastapi": "0.141.1",
+    "starlette": "1.7.0",
+    "httpx": "0.28.1",
+    "psutil": "7.2.2",
+    "requests": "2.34.2",
+    "jsonschema": "4.26.0",
+    "ruff": "0.16.9"
+  },
+  "ollama": {
+    "reachable": false,
+    "host": "http://127.0.0.1:11434",
+    "probe": "TCP connection refused"
+  },
+  "source_sha256": "abea1308fc74476283e857e3fb3690dcd5d56557c6314b959699ce5f37e6b7c7"
+}

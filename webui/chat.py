@@ -90,6 +90,17 @@ async def _run_turn(websocket: WebSocket, payload: dict[str, Any]) -> None:
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
     emitted_artifacts: set[str] = set()
+    connected = True
+
+    async def send_event(event: dict[str, Any]) -> None:
+        nonlocal connected
+        if connected:
+            try:
+                await websocket.send_json(event)
+            except (WebSocketDisconnect, RuntimeError, OSError):
+                # Keep draining until the worker finishes, retaining its Stop
+                # handle. A browser disconnect must not orphan a running turn.
+                connected = False
 
     try:
         # Acknowledge the turn before any filesystem scan or model work. This keeps
@@ -170,23 +181,23 @@ async def _run_turn(websocket: WebSocket, payload: dict[str, Any]) -> None:
                     break
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=0.25)
-                    await websocket.send_json(event)
+                    await send_event(event)
                 except TimeoutError:
                     pass
             exc = task.exception() if task.done() else None
             if exc:
-                await websocket.send_json(
+                await send_event(
                     {"type": "error", "turn_id": turn_id, "message": str(exc)}
                 )
-                await websocket.send_json({"type": "turn_end", "turn_id": turn_id})
+                await send_event({"type": "turn_end", "turn_id": turn_id})
             # The final scan can touch many directory entries; keep it off the
             # event loop just like inference. No frontend navigation/input work waits
             # on this scan.
             for event in await asyncio.to_thread(collect_new_artifacts):
                 queue.put_nowait(event)
             while not queue.empty():
-                await websocket.send_json(queue.get_nowait())
-            await websocket.send_json({"type": "history_refresh", "turn_id": turn_id})
+                await send_event(queue.get_nowait())
+            await send_event({"type": "history_refresh", "turn_id": turn_id})
         finally:
             with RUNS_LOCK:
                 RUNS.pop(turn_id, None)

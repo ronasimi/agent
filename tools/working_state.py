@@ -863,7 +863,8 @@ class WorkingStateStore:
         # the whole turn complete while scheduled requirements remain pending.
         # ``blocked=True`` is still allowed to terminate the turn explicitly for
         # hard runtime/safety failures.
-        if not blocked and not self.scheduler_complete(state=state):
+        missing_facts = any(not (row.get("satisfied") or row.get("status") == "satisfied") for row in state.get("fact_requirements", []))
+        if not blocked and (not self.scheduler_complete(state=state) or missing_facts):
             state["status"] = "active"
             state["current_plan"] = []
             # The unfinished scheduler state is compact and durable; native tool

@@ -309,8 +309,27 @@ def gmail_search_messages(
             "safety_notice": _UNTRUSTED_NOTICE,
             "query": query,
             "result_size_estimate": int(listing.get("resultSizeEstimate") or len(refs)),
+            "count_is_estimate": True,
+            "has_more": bool(listing.get("nextPageToken")),
             "messages": [item for item in messages if item is not None],
         }, ensure_ascii=False, indent=2)
+    except (GoogleWorkspaceApiError, GoogleWorkspaceAuthError, TypeError, ValueError) as exc:
+        return _tool_error(exc)
+
+
+@agent_tool(readonly=True, timeout=30)
+def gmail_inbox_counts(account: str = "default") -> str:
+    """Get Gmail inbox email message counts, total and unread, from the INBOX label; read-only."""
+    try:
+        payload = _get_client().get(f"{GMAIL_API_ROOT}/users/me/labels/INBOX", account=account)
+        counts = {}
+        for source, target in (("messagesTotal", "messages_total"), ("messagesUnread", "messages_unread")):
+            value = payload.get(source)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"Gmail did not return a valid {source} count")
+            counts[target] = value
+        return json.dumps({"ok": True, "provider": "Google Gmail API", "read_only": True,
+                           "label": "INBOX", "count_is_estimate": False, **counts})
     except (GoogleWorkspaceApiError, GoogleWorkspaceAuthError, TypeError, ValueError) as exc:
         return _tool_error(exc)
 

@@ -69,9 +69,22 @@ def redact_secrets(text: str) -> str:
     value = str(text or "")
     value = _PEM_RE.sub("[REDACTED PEM MATERIAL]", value)
     value = _SECRET_ASSIGNMENT_RE.sub(lambda m: m.group(1) + "[REDACTED]", value)
+    value = re.sub(r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1[REDACTED]", value)
     # JSON credential fields.
     value = re.sub(
         r'(?i)("(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret|client[_-]?secret|private[_-]?key)"\s*:\s*)"[^"]*"',
         r'\1"[REDACTED]"', value,
     )
+    return value
+
+
+def redact_diagnostic_value(value: Any) -> Any:
+    """Redact credential fields recursively without changing runtime evidence."""
+    if isinstance(value, dict):
+        secret_keys = {"api_key", "apikey", "access_token", "refresh_token", "id_token", "token", "password", "passwd", "secret", "client_secret", "private_key", "authorization"}
+        return {key: "[REDACTED]" if str(key).lower().replace("-", "_") in secret_keys else redact_diagnostic_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [redact_diagnostic_value(item) for item in value]
+    if isinstance(value, str):
+        return redact_secrets(value)
     return value

@@ -7,12 +7,16 @@ import sqlite3
 
 from .memory import init_db
 from .runtime import DB_PATH, DB_TIMEOUT
+from .conversation_context import get_active_conversation_id
 
 
 def _load_observation(observation_id: str) -> tuple[str, str] | None:
     init_db()
     with sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT) as conn:
-        row = conn.execute("SELECT tool_name, content FROM tool_observations WHERE id = ?", (str(observation_id),)).fetchone()
+        row = conn.execute(
+            "SELECT tool_name, content FROM tool_observations WHERE id = ? AND conversation_id = ?",
+            (str(observation_id), get_active_conversation_id()),
+        ).fetchone()
     return (str(row[0]), str(row[1])) if row else None
 
 

@@ -1,0 +1,45 @@
+{
+  "mode": "scripted Qwen XML; real production orchestration and persistence; mocked provider payloads",
+  "results": [
+    {
+      "name": "test_scenario_a_profile",
+      "seconds": 0.067,
+      "passed": true,
+      "properties": {
+        "result": "3 profile queries; 0 model calls; 3 verified profile observations"
+      }
+    },
+    {
+      "name": "test_scenario_b_gmail_followup_chain",
+      "seconds": 0.252,
+      "passed": true,
+      "properties": {
+        "result": "4 Gmail turns; each has actual Gmail fixture evidence; inherited topic survives the chain"
+      }
+    },
+    {
+      "name": "test_scenario_c_historical_exact_rehydration",
+      "seconds": 0.403,
+      "passed": true,
+      "properties": {
+        "result": "CPU evidence recovered after 7 unrelated tool turns; 2 exact rehydrations; no fresh sensor read"
+      }
+    },
+    {
+      "name": "test_scenario_d_explicit_topic_switch",
+      "seconds": 0.093,
+      "passed": true,
+      "properties": {
+        "result": "CPU route selected without Gmail affinity"
+      }
+    },
+    {
+      "name": "test_scenario_e_multidomain_prompt_growth",
+      "seconds": 0.127,
+      "passed": true,
+      "properties": {
+        "prompt_estimated_tokens_by_call": "[2920, 3219, 3417, 3622, 3876, 4041, 4225, 4414, 4692]"
+      }
+    }
+  ]
+}

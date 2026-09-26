@@ -415,7 +415,7 @@ def _start_process_fixture(base: Path, pass_no: int) -> subprocess.Popen:
         "import pathlib,sys,time; "
         "p=pathlib.Path(sys.argv[1]); "
         "f=p.open('a+', encoding='utf-8'); "
-        "f.write('tool-soak-process\n'); f.flush(); "
+        "f.write('tool-soak-process\\n'); f.flush(); "
         "time.sleep(3600)"
     )
     proc = subprocess.Popen(

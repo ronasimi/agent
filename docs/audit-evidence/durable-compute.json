@@ -1,0 +1,35 @@
+{
+  "quantum_results": [
+    {
+      "quantum": 1000,
+      "runs": 5,
+      "median_ms": 0.367,
+      "median_transitions_per_second": 2725456.6,
+      "min_ms": 0.343,
+      "max_ms": 0.729
+    },
+    {
+      "quantum": 10000,
+      "runs": 5,
+      "median_ms": 3.826,
+      "median_transitions_per_second": 2613576.9,
+      "min_ms": 3.486,
+      "max_ms": 13.964
+    },
+    {
+      "quantum": 100000,
+      "runs": 5,
+      "median_ms": 37.874,
+      "median_transitions_per_second": 2640313.1,
+      "min_ms": 35.912,
+      "max_ms": 40.138
+    }
+  ],
+  "checkpoint_write": {
+    "runs": 10,
+    "median_ms": 0.457,
+    "min_ms": 0.415,
+    "max_ms": 0.678
+  },
+  "guidance": "Choose a quantum large enough that sparse-delta checkpoint overhead is small relative to compute time, but small enough that cancellation and queue fairness remain responsive. The quantum bounds one slice only and must not be treated as a total computation limit."
+}

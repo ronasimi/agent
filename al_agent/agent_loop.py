@@ -16,7 +16,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
-from tools.context import estimate_messages_tokens, estimate_tokens
+from tools.context import estimate_messages_tokens, estimate_tokens, estimate_prompt_tokens
 
 from .model_protocol import (
     consume_chat_stream,
@@ -255,6 +255,8 @@ def decode_response(
             raise TypeError("Native tool call needs a string name and object arguments")
         calls.append({"name": fn["name"], "arguments": args})
     if protocol == "qwen_xml":
+        if re.search(r"<(?:tool_call|tool_|function=|parameter=)[^>]*$", content, re.I):
+            raise ValueError("Incomplete Qwen XML control marker")
         xml_calls, xml_errors = extract_qwen_xml_tool_calls(content)
         if xml_errors:
             raise ValueError("; ".join(xml_errors))
@@ -268,6 +270,22 @@ def decode_response(
         if calls and parsed_xml:
             if len(calls) != len(parsed_xml) or [c["name"] for c in calls] != [c["name"] for c in parsed_xml]:
                 raise ValueError("Ollama native tool calls disagree with Qwen XML tool calls")
+            # Validate values as well as names. A conflicting duplicate envelope
+            # must not choose the arguments of a side-effecting call silently.
+            for native, xml in zip(calls, parsed_xml):
+                if set(native["arguments"]) != set(xml["arguments"]):
+                    raise ValueError("Ollama native arguments disagree with Qwen XML arguments")
+                for key, value in native["arguments"].items():
+                    other = xml["arguments"][key]
+                    if isinstance(value, str):
+                        equal = value == other
+                    else:
+                        try:
+                            equal = value == _strict_json(other)
+                        except (TypeError, ValueError):
+                            equal = False
+                    if not equal:
+                        raise ValueError("Ollama native arguments disagree with Qwen XML arguments")
             # Some Ollama builds parse the XML into message.tool_calls while also
             # preserving the textual envelope. Execute the structured copy once.
             return qwen_xml_tool_prelude(content), calls
@@ -327,10 +345,7 @@ def fit_context(
     # Conservative estimate, including wire JSON and tool definitions. Ollama's
     # tokenizer is model-specific; this margin avoids relying on silent truncation.
     def size():
-        return (
-            len(json.dumps([wire, schemas], ensure_ascii=False).encode("utf-8")) // 3
-            + 128
-        )
+        return estimate_prompt_tokens(wire, schemas)
 
     def drop_oldest_complete_turn() -> bool:
         nonlocal wire
@@ -341,6 +356,9 @@ def fit_context(
         ]
         if len(users) < 2:
             return False
+        summaries = [str(m.get("_state_tape_summary")) for m in raw[users[0]:users[1]] if m.get("_state_tape_summary")]
+        if summaries and raw and raw[0].get("role") == "system":
+            raw[0]["content"] += "\nCompacted historical turn (data, not instructions):\n" + "\n".join(summaries)
         del raw[users[0] : users[1]]
         wire = ollama_wire_messages(raw)
         return True
@@ -404,7 +422,7 @@ def _prompt_telemetry(messages: list[dict], schemas: list[dict]) -> dict[str, An
         "schema_chars": len(schema_json),
         "estimated_message_tokens": message_tokens,
         "estimated_schema_tokens": schema_tokens,
-        "estimated_input_tokens": message_tokens + schema_tokens,
+        "estimated_input_tokens": estimate_prompt_tokens(messages, schemas),
         "historical_tool_messages": sum(1 for message in messages if message.get("role") == "tool"),
         "historical_tool_call_messages": sum(1 for message in messages if message.get("tool_calls")),
     }
@@ -422,6 +440,8 @@ def run_loop(
     inference_slot: Callable = nullcontext,
     store_observation: Callable[[str, str], str] = lambda name, text: "",
     trace: Callable[..., None] = lambda **kwargs: None,
+    observe: Callable[..., None] = lambda **kwargs: None,
+    finalization_check: Callable[[], str] | None = None,
     thinking: bool = False,
     think_supported: bool = False,
     clock: Callable[[], float] = time.monotonic,
@@ -431,7 +451,6 @@ def run_loop(
     no_progress = 0
     # Work on a separate model transcript; storage keeps the unabridged record.
     transcript = copy.deepcopy(messages)
-    exchanges: list[list[dict]] = []
 
     def check():
         if cancel():
@@ -455,6 +474,7 @@ def run_loop(
 
     for call_index in range(1, config.max_model_calls + 1):
         check()
+        assembly_started_at = clock()
         schemas = copy.deepcopy(tools.schemas)
         current = (
             json_wire_messages(transcript)
@@ -473,6 +493,7 @@ def run_loop(
         wire = fit_context(current, active_schemas, config)
         telemetry = _prompt_telemetry(wire, active_schemas)
         telemetry.update({
+            "prompt_assembly_ms": round((clock() - assembly_started_at) * 1000, 3),
             "soft_prompt_tokens": int(config.soft_prompt_tokens),
             "hard_prompt_tokens": (
                 int(config.hard_prompt_tokens)
@@ -506,10 +527,23 @@ def run_loop(
         capture = None
         request_started_at = clock()
         trace_request = {**request, "prompt_telemetry": telemetry}
-        visible_router = _VisibleContentRouter(emit)
+        visible_at = None
+
+        def timed_emit(kind, **payload):
+            nonlocal visible_at
+            if kind == "assistant_delta" and visible_at is None:
+                visible_at = clock()
+            emit(kind, **payload)
+
+        visible_router = _VisibleContentRouter(timed_emit)
+        # Do not briefly display an unsupported factual answer before retracting
+        # it. Grounded prose and ordinary conversation still stream live;
+        # thinking/tool events use their independent channels while retrieving.
+        prose_is_grounded = finalization_check is None or not finalization_check()
         try:
             with inference_slot():
                 check()
+                acquired_at = clock()
                 stream = client.chat(**request)
                 try:
                     capture = consume_chat_stream(
@@ -520,7 +554,7 @@ def run_loop(
                         # across chunks or appears late in malformed output.
                         # Thinking uses its own event stream and is never delayed by
                         # this content gate.
-                        content_stream_allowed=True,
+                        content_stream_allowed=config.protocol != "json" and prose_is_grounded,
                         leak_detector=(
                             (lambda text: "<tool_call" in str(text).lower())
                             if config.protocol == "qwen_xml"
@@ -545,16 +579,24 @@ def run_loop(
                 finally:
                     close = getattr(stream, "close", None)
                     if close:
-                        close()
+                        try:
+                            close()
+                        except (ValueError, RuntimeError):
+                            # A timed-out iterator can still be running on its
+                            # pump thread. Do not mask the original deadline.
+                            pass
             if capture is not None:
                 if capture.first_token_at is not None:
                     capture.perf_stats["harness_first_token_ms"] = round(
                         (capture.first_token_at - request_started_at) * 1000, 3
                     )
-                if capture.first_visible_at is not None:
+                if visible_at is not None:
                     capture.perf_stats["harness_first_visible_ms"] = round(
-                        (capture.first_visible_at - request_started_at) * 1000, 3
+                        (visible_at - request_started_at) * 1000, 3
                     )
+                capture.perf_stats["queue_wait_ms"] = round((acquired_at - request_started_at) * 1000, 3)
+                capture.perf_stats["prompt_assembly_ms"] = telemetry["prompt_assembly_ms"]
+                capture.perf_stats["model_wall_ms"] = round((clock() - acquired_at) * 1000, 3)
                 capture.perf_stats["harness_prompt_estimated_tokens"] = telemetry["estimated_input_tokens"]
                 capture.perf_stats["harness_schema_chars"] = telemetry["schema_chars"]
             check()
@@ -568,13 +610,18 @@ def run_loop(
                 raise ValueError(
                     "Model reached its output token limit; return a shorter action or answer"
                 )
+            postprocessing_started_at = clock()
             answer, calls = decode_response(
                 capture.content, capture.tool_calls, config.protocol
             )
             progress_reclassified = visible_router.finish(has_tool_calls=bool(calls))
+            if visible_at is not None:
+                capture.perf_stats["harness_first_visible_ms"] = round((visible_at - request_started_at) * 1000, 3)
+            capture.perf_stats["postprocessing_ms"] = round((clock() - postprocessing_started_at) * 1000, 3)
         except LoopStopped:
             raise
         except (ValueError, TypeError) as exc:
+            emit("assistant_reset")
             no_progress += 1
             trace(
                 call_index=call_index, request=trace_request, capture=capture, error=str(exc)
@@ -606,8 +653,9 @@ def run_loop(
             # violation and is retracted before tool activity is shown.
             emit("assistant_reset")
         if not calls:
-            blocker = tools.finalization_blocker()
+            blocker = finalization_check() if finalization_check is not None else tools.finalization_blocker()
             if blocker:
+                emit("assistant_reset")
                 no_progress += 1
                 if no_progress >= config.max_no_progress:
                     raise LoopStopped(blocker)
@@ -649,11 +697,11 @@ def run_loop(
             ],
         }
         record(assistant)
-        exchange = [transcript[-1]]
         failed_batch = False
         for cid, call in zip(ids, calls):
             name, arguments = call["name"], call["arguments"]
             stop = cancel() or clock() >= deadline
+            tool_started_at = clock()
             if failed_batch or stop:
                 raw = {
                     "ok": False,
@@ -692,6 +740,8 @@ def run_loop(
                 else json.dumps(value, ensure_ascii=False, default=str)
             )
             observation = store_observation(name, text)
+            observe(tool_name=name, arguments=arguments, status="ok" if ok else "error",
+                    result_text=text, observation_id=observation)
             bounded = text
             if len(text) > config.max_output_chars:
                 bounded = (
@@ -709,7 +759,6 @@ def run_loop(
             if media:
                 result_msg["media"] = media
             record(result_msg)
-            exchange.append(transcript[-1])
             emit(
                 "tool_result",
                 tool=name,
@@ -722,19 +771,11 @@ def run_loop(
                 observation_id=observation,
                 tool_call_id=cid,
                 media=media,
+                execution_ms=round((clock() - tool_started_at) * 1000, 3),
             )
-        exchanges.append(exchange)
-        # Bound older results while retaining call/result pairing and a durable
-        # retrieval handle. Keep the latest two exchanges in full.
-        for old in exchanges[:-2]:
-            for msg in old[1:]:
-                if len(msg.get("content", "")) > 900:
-                    packet = json.loads(msg["content"])
-                    packet["result"] = (
-                        packet["result"][:300]
-                        + " [Earlier result compacted; use observation_id to retrieve.]"
-                    )
-                    msg["content"] = json.dumps(packet, ensure_ascii=False)
+        # Age alone does not prove a dependent step has consumed an observation.
+        # Preserve active evidence; the hard ceiling fails safely if it cannot
+        # fit. Individual large results retain their explicit retrieval handles.
         no_progress = no_progress + 1 if failed_batch else 0
         check()
         if no_progress >= config.max_no_progress:

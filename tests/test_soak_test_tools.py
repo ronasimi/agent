@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import pytest
 from pathlib import Path
 
 from diagnostics.soak import soak_test_tools as soak
@@ -223,6 +224,17 @@ def test_process_fixture_uses_probeable_same_uid_process(tmp_path):
     from tools.primitive_modules import process as process_ops
     proc = soak._start_process_fixture(tmp_path, 1)
     try:
+        assert proc.poll() is None, "The fixture must remain alive before probing it"
+        # Some sandbox/container runtimes prohibit /proc FD inspection even
+        # for same-UID children. Keep this integration limitation explicit.
+        import psutil
+        try:
+            psutil.Process(proc.pid).open_files()
+        except (psutil.AccessDenied, NotImplementedError) as exc:
+            pytest.skip(f"Runtime prohibits same-UID process file inspection: {type(exc).__name__}")
+        except psutil.NoSuchProcess:
+            assert proc.poll() is None, "Fixture exited unexpectedly"
+            pytest.skip("Runtime process table does not expose a live subprocess PID")
         assert not process_ops.process_info(proc.pid).startswith("Error:")
         assert not process_ops.process_io(proc.pid).startswith("Error:")
         assert not process_ops.process_fds(proc.pid, 10).startswith("Error:")

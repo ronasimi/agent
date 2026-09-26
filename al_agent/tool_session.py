@@ -192,7 +192,9 @@ class ToolSession:
 
     @property
     def schemas(self) -> list[dict]:
-        return [*self.control.values(), *self.active.values()]
+        # Activation/LRU order is state, not model semantics. Stable wire order
+        # preserves the schema prefix when the same set is loaded differently.
+        return [*self.control.values(), *(self.active[name] for name in sorted(self.active))]
 
     def inventory(self) -> str:
         return (
@@ -370,7 +372,19 @@ class ToolSession:
                 "outcome_unknown": True,
             }
         try:
-            return self.execute_registered(name, validated)
+            result = self.execute_registered(name, validated)
+            packet = result
+            if isinstance(packet, str):
+                try:
+                    packet = json.loads(packet)
+                except (ValueError, TypeError):
+                    packet = None
+            if (
+                not self.metadata.get(name, {}).get("readonly", False)
+                and isinstance(packet, dict) and packet.get("outcome_unknown")
+            ):
+                self.uncertain_mutations.add(signature)
+            return result
         except Exception:
             if not self.metadata.get(name, {}).get("readonly", False):
                 self.uncertain_mutations.add(signature)

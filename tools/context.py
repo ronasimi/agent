@@ -10,6 +10,18 @@ _MESSAGE_FIELDS = {"role", "content", "name", "tool_name", "tool_calls", "tool_c
 IMAGE_TOKEN_ESTIMATE = 1200
 
 
+def estimate_prompt_tokens(messages: Iterable[dict[str, Any]], schemas: list[dict]) -> int:
+    """One conservative estimate shared by telemetry and admission control.
+
+    UTF-8/3 is a heuristic, not a tokenizer guarantee. Include wire/template
+    overhead and the lexical estimate, which catches punctuation-dense inputs.
+    """
+    rows = list(messages)
+    schema_json = json.dumps(schemas, ensure_ascii=False, separators=(",", ":"))
+    encoded = json.dumps([rows, schemas], ensure_ascii=False).encode("utf-8")
+    return max(math.ceil(len(encoded) / 3), estimate_messages_tokens(rows) + estimate_tokens(schema_json)) + 128 + 12 * len(rows)
+
+
 def estimate_tokens(text: str) -> int:
     """Conservative tokenizer-independent estimate for local-model budgeting.
 

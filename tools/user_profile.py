@@ -479,7 +479,7 @@ _PROFILE_READ_RE = re.compile(
 )
 _PROFILE_BROAD_RE = re.compile(
     r"\b(?:what do you know about me|what(?:'s| is) my profile|show (?:me )?my profile|"
-    r"tell me (?:about )?my profile|who am i)\b",
+    r"tell me (?:about )?my profile|read my profile|what information do you have saved about me|who am i)\b",
     re.I,
 )
 
@@ -494,6 +494,12 @@ def _profile_fact_requests(user_text: str) -> tuple[bool, list[str]]:
     text = " ".join(str(user_text or "").strip().split())
     lower = text.lower()
     if not text or _PROFILE_MUTATION_RE.search(lower):
+        return False, []
+    # A local-profile fast path must consume the whole request. Do not turn an
+    # email read or a compound workflow into an answer about the saved address.
+    if re.search(r"\b(?:messages?|inbox|unread|weather|forecast|cpu|calculate|search|browse|file|document)\b", lower):
+        return False, []
+    if re.search(r"\b(?:and|then|also)\b.*\b(?:check|read|run|scan|fetch|open|summarize)\b", lower):
         return False, []
     if _PROFILE_BROAD_RE.search(lower):
         return True, ["profile"]
@@ -510,6 +516,7 @@ def _profile_fact_requests(user_text: str) -> tuple[bool, list[str]]:
             r"\bmy\s+(?:saved\s+|home\s+)?location\b",
             r"\bmy\s+(?:home\s+)?city\b",
             r"\bwhere\s+do\s+i\s+live\b",
+            r"\bwhat\s+city\s+do\s+i\s+live\s+in\b",
             r"\bwhat(?:'s| is)\s+(?:the\s+)?location\s+(?:you\s+have|saved|stored)\s+for\s+me\b",
         )),
         ("timezone", (

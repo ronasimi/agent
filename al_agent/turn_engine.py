@@ -13,7 +13,7 @@ from dataclasses import replace
 from tools.catalog import catalog_snapshot
 from tools.conversation_context import get_active_conversation_id
 from tools.executor import execute_registered_tool
-from tools.memory import _load_chat_history_from_db, get_conversation_summary, store_tool_observation
+from tools.memory import load_recent_conversational_history, get_conversation_summary, store_tool_observation
 from tools.runtime import record_monitor_state, set_foreground_turn, utc_now
 from tools.state_tape import CompactToolOutcome, StateTapeStore, compact_recent_conversation
 from tools.user_profile import (
@@ -21,6 +21,8 @@ from tools.user_profile import (
     get_user_profile,
     resolve_profile_fact_query,
 )
+from tools.grounding import requested_fact_types, validate_fact_grounding
+from tools.task_requirements import derive_fact_frames
 from tools.working_state import WorkingStateStore
 
 from . import state
@@ -51,7 +53,10 @@ def _looks_like_contextual_followup(text: str) -> bool:
     if not clean or len(clean) > 220:
         return False
     words = re.findall(r"[A-Za-z0-9_'-]+", clean)
-    return len(words) <= 24 and bool(_REFERENTIAL_FOLLOWUP_RE.search(clean))
+    return len(words) <= 24 and bool(
+        _REFERENTIAL_FOLLOWUP_RE.search(clean)
+        or re.match(r"^(?:what|how) about\b|^how many (?:of (?:them|those) )?are unread\b", clean, re.I)
+    )
 
 
 def _routing_context_hint(
@@ -72,22 +77,36 @@ def _routing_context_hint(
         return "", ()
 
     previous_user = ""
-    previous_assistant = ""
     for item in reversed(recent_surface):
         role = str(item.get("role") or "")
         content = " ".join(str(item.get("content") or "").split())
-        if role == "assistant" and not previous_assistant:
-            previous_assistant = content[:260]
-        elif role == "user" and not previous_user:
+        if role == "user" and not previous_user:
             previous_user = content[:220]
-        if previous_user and previous_assistant:
             break
+
+    # Explicit new domains outrank pronouns such as "this" or "it". A previous
+    # Gmail exchange must not pull "check this CPU temperature" back to Gmail.
+    def domains(text):
+        groups = (r"gmail|emails?|inbox|unread", r"weather|forecast", r"cpu|gpu|host|memory|disk|processor",
+                  r"profile|my name|timezone", r"network|lan|router", r"files?|documents?", r"calculate")
+        return {i for i, group in enumerate(groups) if re.search(r"\b(?:" + group + r")\b", text, re.I)}
+    nearest = tape.recent(limit=1, resolved_only=False)
+    if not domains(previous_user) and nearest:
+        # Persist the original objective across chains of elliptical follow-ups.
+        # Only the immediate predecessor is eligible; never scan older topics.
+        objective = str(getattr(nearest[-1], "objective", "") or previous_user)
+        previous_user = objective.rsplit("previous user topic:", 1)[-1].strip()[:220]
+    explicit = domains(user_input)
+    if explicit and not explicit.issubset(domains(previous_user)):
+        return "", ()
 
     affinity: tuple[str, ...] = ()
     # Use the nearest tape entry that actually contains a successful capability,
     # not a union of several unrelated older turns.
-    for entry in reversed(tape.recent(limit=4)):
+    for entry in reversed(nearest):
         summary = str(entry.summary or "")
+        if "Unverified conversational record" in summary:
+            break
         names = tuple(
             sorted(
                 name
@@ -105,8 +124,6 @@ def _routing_context_hint(
     parts = []
     if previous_user:
         parts.append("previous user topic: " + previous_user)
-    if previous_assistant:
-        parts.append("previous assistant topic: " + previous_assistant)
     if affinity:
         parts.append("recent successful capabilities: " + " ".join(affinity))
     return "\n".join(parts), affinity
@@ -239,6 +256,7 @@ def handle_user_turn(
     routing_engine = None
     session = None
     routing_context_key = "_general"
+    effective_request = user_input
     routing_tool_status: dict[str, list[bool]] = {}
     compact_tool_outcomes: list[CompactToolOutcome] = []
     tape: StateTapeStore | None = None
@@ -268,9 +286,7 @@ def handle_user_turn(
             entry_chars=state.STATE_TAPE_ENTRY_CHARS,
         )
         raw_history = (
-            _load_chat_history_from_db(
-                limit=state.RECENT_MESSAGES, include_compacted=False
-            )
+            load_recent_conversational_history(turns=state.RECENT_CONVERSATION_TURNS)
             if refresh_history
             else list(messages)
         )
@@ -283,6 +299,8 @@ def handle_user_turn(
             max_assistant_chars=state.RECENT_CONVERSATION_ASSISTANT_CHARS,
             include_source_ids=True,
         )
+        if hasattr(tape, "link_recent_conversation"):
+            recent_surface = tape.link_recent_conversation(recent_surface)
         profile_resolution = resolve_profile_fact_query(user_input)
         relevant_user_context = get_relevant_user_prompt_context(user_input)
         surface_source_ids = {
@@ -404,6 +422,7 @@ def handle_user_turn(
             )
 
         routing_engine = state.TOOL_ROUTER
+        routing_started = time.monotonic()
         decision = routing_engine.decide(user_input, schemas, metadata)
         routing_text = user_input
         schema_names = {
@@ -437,6 +456,11 @@ def handle_user_turn(
                         )
                 decision = contextual
                 routing_text = contextual_text
+                # Ground the referential turn against the same inherited user
+                # intent, without importing unsupported assistant claims.
+                effective_request = user_input + "\n" + context_hint.split("recent successful capabilities:")[0]
+        emit_event("routing_complete", elapsed_ms=(time.monotonic() - routing_started) * 1000,
+                   selected=list(decision.selected), contextual=routing_text != user_input)
         routing_context_key = decision.context_key
         for selected_name in decision.selected:
             routing_engine.record(
@@ -461,6 +485,7 @@ def handle_user_turn(
         work_state = WorkingStateStore(
             limits=state.WORKING_STATE_CFG, conversation_id=cid
         )
+        fact_frames = derive_fact_frames(effective_request, required_fact_types=requested_fact_types(effective_request))
         work_state.begin_turn(
             turn_id=turn_id,
             objective=user_input,
@@ -470,38 +495,54 @@ def handle_user_turn(
             policy_note="Resident 4B tool selection with deterministic catalog prefilter",
             tool_schemas=session.schemas,
             requirements=[],
+            fact_frames=fact_frames,
+            fact_requirements=[{"fact_type": name, "status": "pending", "satisfied": False}
+                               for name in sorted(requested_fact_types(effective_request))],
         )
 
         def append(msg):
             append_fn(messages, msg)
 
-        def emit(kind, **payload):
-            if kind == "tool_result":
-                work_state.record_tool_result(
-                    tool_name=payload["tool"],
-                    arguments=payload["arguments"],
-                    status=payload["status"],
-                    reason="model_selected",
-                    result_text=payload["content"],
-                    observation_id=payload.get("observation_id", ""),
-                )
-                work_state.update_tools(session.schemas)
-                if str(payload["tool"]) not in {"tool_search", "load_tools"}:
-                    compact_tool_outcomes.append(
-                        StateTapeStore.collapse_tool_result(
-                            tool_name=payload["tool"],
-                            arguments=payload["arguments"],
-                            status=payload["status"],
-                            result_text=payload["content"],
-                            observation_id=payload.get("observation_id", ""),
-                        )
+        def observe(*, tool_name, arguments, status, result_text, observation_id):
+            work_state.record_tool_result(
+                tool_name=tool_name,
+                arguments=arguments,
+                status=status,
+                reason="model_selected",
+                result_text=result_text,
+                observation_id=observation_id,
+            )
+            work_state.update_tools(session.schemas)
+            if tool_name not in {"tool_search", "load_tools"}:
+                compact_tool_outcomes.append(
+                    StateTapeStore.collapse_tool_result(
+                        tool_name=tool_name,
+                        arguments=arguments,
+                        status=status,
+                        result_text=result_text,
+                        observation_id=observation_id,
                     )
-                tool_name = str(payload["tool"])
-                tool_ok = str(payload.get("status")) == "ok"
-                routing_tool_status.setdefault(tool_name, []).append(tool_ok)
-                # Route learning is task-outcome based. A tool can execute
-                # successfully and still be the wrong capability, so do not
-                # train confidence merely because the primitive returned OK.
+                )
+            tool_ok = status == "ok"
+            routing_tool_status.setdefault(tool_name, []).append(tool_ok)
+            finalization_check()
+            # Route learning is task-outcome based. A tool can execute
+            # successfully and still be the wrong capability, so do not
+            # train confidence merely because the primitive returned OK.
+
+        def finalization_check():
+            report = validate_fact_grounding(
+                effective_request, work_state.load().get("verified_observations", []),
+                current_turn_id=turn_id, fact_frames=fact_frames,
+            )
+            work_state.update_fact_requirements(report.get("fact_requirements", []))
+            if report["grounded"]:
+                return ""
+            return ("Missing verified evidence for: " + ", ".join(report["missing_fact_types"])
+                    + ". Discover/load the relevant tool and retrieve it before finalizing. "
+                    "Catalog results and unrelated successful tools are not evidence.")
+
+        def emit(kind, **payload):
             if kind in {"tool_start", "tool_result"}:
                 payload["name"] = payload["tool"]
             emit_event(kind, **payload)
@@ -574,6 +615,8 @@ def handle_user_turn(
                 name, text, conversation_id=cid
             ),
             trace=trace,
+            observe=observe,
+            finalization_check=finalization_check,
             thinking=thinking_enabled,
             think_supported=bool(cfg.get("supports_thinking", False)),
         )
@@ -654,7 +697,7 @@ def handle_user_turn(
                     tape.commit_turn(
                         turn_id=turn_id,
                         source_message_id=source_message_id,
-                        objective=user_input,
+                        objective=effective_request,
                         assistant_text=final_answer,
                         outcomes=compact_tool_outcomes,
                         status=terminal_status,

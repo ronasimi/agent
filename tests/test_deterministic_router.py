@@ -146,7 +146,7 @@ def test_referential_followup_uses_recent_capability_affinity(tmp_path):
     ]
 
     class Tape:
-        def recent(self, limit=4):
+        def recent(self, limit=4, **kwargs):
             return [
                 SimpleNamespace(
                     summary="gmail_search_messages succeeded: provider=Google Gmail API"

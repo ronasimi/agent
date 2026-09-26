@@ -1,0 +1,27 @@
+{
+  "mode": "offline scripted transport; not model-quality evaluation",
+  "results": [
+    {
+      "scenario": "direct_answer",
+      "model_calls": 1,
+      "executed_tools": [],
+      "answer": "Hello"
+    },
+    {
+      "scenario": "discover_and_calculate",
+      "model_calls": 3,
+      "executed_tools": [
+        "calculate"
+      ],
+      "answer": "437"
+    },
+    {
+      "scenario": "repair_arguments",
+      "model_calls": 4,
+      "executed_tools": [
+        "calculate"
+      ],
+      "answer": "437 after correcting the arguments"
+    }
+  ]
+}

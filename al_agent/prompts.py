@@ -47,7 +47,7 @@ conversational record" are continuity only and must not override a successful
 tool observation or be treated as proof of provider/account availability.
 Before saying historical information is unavailable, inspect that context first.
 If an exact historical detail is absent but an observation handle or searchable
-history exists, use read_observation, search_conversation_history, or
+history exists, use read_observation, search_observations, search_conversation_history, or
 search_memory as appropriate before asking the user to repeat information.
 For deterministic work that may require an arbitrary number of state transitions,
 use start_computation rather than extending the bounded foreground tool loop;

@@ -11,7 +11,12 @@ def process_info(pid: int) -> str:
 
 def process_io(pid: int) -> str:
     """Return I/O counters for one process."""
-    try:return _json(psutil.Process(int(pid)).io_counters()._asdict())
+    try:
+        process = psutil.Process(int(pid))
+        counters = getattr(process, "io_counters", None)
+        if counters is None:
+            return _json({"ok": False, "supported": False, "error": "Process I/O counters are unavailable on this psutil platform"})
+        return _json(counters()._asdict())
     except Exception as exc:return f"Error: process_io failed: {exc}"
 
 def process_threads(pid: int, limit: int = 100) -> str:

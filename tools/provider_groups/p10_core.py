@@ -6,6 +6,7 @@ TOOL_SPECS = [
     ('memory', 'remember_semantic'),
     ('memory', 'search_semantic_memory'),
     ('memory', 'read_observation'),
+    ('memory', 'search_observations'),
     ('tool_discovery', 'tool_search'),
     ('goals', 'get_goal'),
     ('goals', 'set_goal'),

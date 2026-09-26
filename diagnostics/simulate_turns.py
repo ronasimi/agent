@@ -80,10 +80,13 @@ def main():
             [{"role": "system", "content": "Test"}, {"role": "user", "content": name}],
             client=client,
             tools=session,
-            config=LoopConfig(agent["model"], agent["main_options"]),
+            config=LoopConfig(agent["model"], agent["main_options"], protocol="json"),
             append=lambda message: None,
             emit=lambda *args, **kwargs: None,
         )
+        expected_calls = [] if name == "direct_answer" else ["calculate"]
+        assert calls == expected_calls, f"{name}: expected real dispatch, got {calls}"
+        assert answer == {"direct_answer": "Hello", "discover_and_calculate": "437", "repair_arguments": "437 after correcting the arguments"}[name]
         rows.append(
             {
                 "scenario": name,

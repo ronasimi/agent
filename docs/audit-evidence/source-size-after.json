@@ -1,0 +1,9 @@
+{
+  "bytes": 3179658,
+  "estimated_tokens": 794915,
+  "files": 322,
+  "lines": 68763,
+  "max_source_tokens": 250000,
+  "passed": false,
+  "exit_code": 1
+}

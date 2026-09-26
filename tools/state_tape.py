@@ -15,10 +15,10 @@ from typing import Any, Iterable, Mapping
 
 from .memory import (
     _connect,
-    apply_conversation_compaction,
     ensure_conversation,
     get_conversation_summary,
-    set_conversation_summary,
+    _invalidate_context_cache,
+    _invalidate_history_cache,
 )
 
 
@@ -79,6 +79,7 @@ class StateTapeStore:
 
     def _ensure_schema(self) -> None:
         with _connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 """CREATE TABLE IF NOT EXISTS state_tape_entries (
                        id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -102,6 +103,9 @@ class StateTapeStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_state_tape_unresolved ON state_tape_entries(conversation_id, resolved, id)"
             )
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(state_tape_entries)")}
+            if "rolled_up" not in columns:
+                conn.execute("ALTER TABLE state_tape_entries ADD COLUMN rolled_up INTEGER NOT NULL DEFAULT 0")
 
     @staticmethod
     def _single_line(text: Any) -> str:
@@ -319,7 +323,7 @@ class StateTapeStore:
 
     def recent(self, limit: int | None = None, *, resolved_only: bool = True) -> list[StateTapeEntry]:
         wanted = max(1, int(limit or self.recent_entries))
-        clause = "AND resolved=1" if resolved_only else ""
+        clause = "AND resolved=1 AND rolled_up=0" if resolved_only else ""
         with _connect() as conn:
             rows = conn.execute(
                 f"SELECT id,turn_id,source_message_id,status,objective,summary,unresolved_key,resolved,created_at "
@@ -350,10 +354,11 @@ class StateTapeStore:
                 (self.conversation_id,),
             ).fetchall()
             for row_id, previous_objective, previous_key in rows:
-                previous_tokens = self._objective_tokens(str(previous_objective or ""))
-                union = current_tokens | previous_tokens
-                similarity = (len(current_tokens & previous_tokens) / len(union)) if union else 0.0
-                if str(previous_key or "") == current_key or similarity >= 0.45:
+                # Similar topics are not the same completion contract. Removing
+                # a clause from a failed task must not resolve the larger task.
+                def retry_objective(value):
+                    return self._single_line(re.sub(r"\b(?:again|retry)\b", "", value, flags=re.I)).casefold().strip(" .?!")
+                if retry_objective(objective) == retry_objective(str(previous_objective or "")):
                     conn.execute(
                         "UPDATE state_tape_entries SET resolved=1,status='resolved',updated_at=CURRENT_TIMESTAMP WHERE id=?",
                         (int(row_id),),
@@ -372,7 +377,7 @@ class StateTapeStore:
     ) -> StateTapeEntry:
         """Commit one protocol-free turn record and trigger deterministic rollup."""
 
-        clean_objective = self._clip(objective, 240)
+        clean_objective = self._single_line(objective)
         rows = list(outcomes)
         blocked = str(status or "").lower() not in {"complete", "resolved"}
         if not blocked:
@@ -388,7 +393,7 @@ class StateTapeStore:
                 if str(outcome.observation_id or "").strip()
                 else ""
             )
-            parts.append(self._clip(outcome.summary + evidence, 260))
+            parts.append(self._clip(outcome.summary, max(40, 260 - len(evidence))) + evidence)
         if failure_text:
             parts.append("Failure: " + self._clip(failure_text, 180))
         if not parts and assistant_text:
@@ -406,10 +411,18 @@ class StateTapeStore:
             parts.append("Turn recorded without a durable tool outcome.")
 
         prefix = "Unresolved" if blocked else "Completed"
-        summary = self._clip(
-            f"{prefix} request {clean_objective!r}. " + " ".join(parts),
-            self.entry_chars,
+        # Observation IDs are recovery addresses: reserve room rather than
+        # clipping them together with prose. All raw outcomes stay in storage.
+        refs = " ".join(
+            f"[observation_id={row.observation_id}]" for row in rows[:4]
+            if row.observation_id
         )
+        prose = " ".join(parts)
+        prose = re.sub(r"\s*\[observation_id=[^\]]*\]", "", prose)
+        header = f"{prefix} request {self._clip(clean_objective, 100)!r}. "
+        summary = self._clip(header + prose, max(80, self.entry_chars - len(refs) - 1))
+        if refs:
+            summary += " " + refs
         unresolved_key = self._objective_key(clean_objective) if blocked else ""
         objective_key = self._objective_key(clean_objective)
 
@@ -427,6 +440,7 @@ class StateTapeStore:
                        summary=excluded.summary,
                        unresolved_key=excluded.unresolved_key,
                        resolved=excluded.resolved,
+                       rolled_up=0,
                        updated_at=CURRENT_TIMESTAMP""",
                 (
                     self.conversation_id, int(turn_id), max(0, int(source_message_id)),
@@ -447,43 +461,38 @@ class StateTapeStore:
         """Fold old resolved tape entries into Tier-3 without invoking an LLM."""
 
         with _connect() as conn:
+            # Rollup text, watermark, and row transitions commit together. A
+            # second process cannot append or retire the same entries twice.
+            conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
                 "SELECT id,turn_id,source_message_id,status,objective,summary,unresolved_key,resolved,created_at "
-                "FROM state_tape_entries WHERE conversation_id=? AND resolved=1 ORDER BY id",
+                "FROM state_tape_entries WHERE conversation_id=? AND resolved=1 AND rolled_up=0 ORDER BY id",
                 (self.conversation_id,),
             ).fetchall()
-        overflow = len(rows) - self.recent_entries
-        if overflow <= 0:
-            return
-        merge_rows = rows[:overflow]
-        entries = [self._row_to_entry(row) for row in merge_rows]
-        existing = self._single_line(get_conversation_summary(self.conversation_id))
-        fragments = [existing] if existing else []
-        fragments.extend(entry.render() for entry in entries)
-        # Preserve the newest durable facts when the rolling summary reaches its
-        # configured bound; state-tape entries themselves remain searchable in
-        # raw chat/observation storage.
-        combined = self._single_line(" ".join(fragments))
-        if len(combined) > self.rolling_summary_chars:
-            combined = combined[-self.rolling_summary_chars :].lstrip(" ,;:-")
-
-        through_id = max((entry.source_message_id for entry in entries), default=0)
-        if through_id:
-            applied = apply_conversation_compaction(
-                combined, through_id, conversation_id=self.conversation_id
-            )
-            if not applied:
-                set_conversation_summary(combined, self.conversation_id)
-        else:
-            set_conversation_summary(combined, self.conversation_id)
-
-        ids = [entry.id for entry in entries]
-        placeholders = ",".join("?" for _ in ids)
-        with _connect() as conn:
+            overflow = len(rows) - self.recent_entries
+            if overflow <= 0:
+                return
+            entries = [self._row_to_entry(row) for row in rows[:overflow]]
+            context = conn.execute(
+                "SELECT summary,compacted_through_id FROM conversation_context WHERE conversation_id=?",
+                (self.conversation_id,),
+            ).fetchone()
+            fragments = str(context[0] or "").splitlines() if context else []
+            fragments.extend(entry.render() for entry in entries)
+            # Evict whole records, never the provenance label or half an ID.
+            while len("\n".join(fragments)) > self.rolling_summary_chars and fragments:
+                fragments.pop(0)
+            combined = "\n".join(fragments)
+            through_id = max([int(context[1] or 0) if context else 0, *(e.source_message_id for e in entries)])
             conn.execute(
-                f"DELETE FROM state_tape_entries WHERE conversation_id=? AND id IN ({placeholders})",
-                [self.conversation_id, *ids],
+                "UPDATE conversation_context SET summary=?,compacted_through_id=?,updated_at=CURRENT_TIMESTAMP WHERE conversation_id=?",
+                (combined, through_id, self.conversation_id),
             )
+            if self.conversation_id == "default":
+                conn.execute("UPDATE conversation_state SET summary=?,compacted_through_id=? WHERE id=1", (combined, through_id))
+            conn.executemany("UPDATE state_tape_entries SET rolled_up=1 WHERE id=?", [(e.id,) for e in entries])
+        _invalidate_context_cache(self.conversation_id)
+        _invalidate_history_cache(self.conversation_id)
 
     def render_prompt_context(
         self, *, exclude_source_message_ids: Iterable[int] | None = None
@@ -498,7 +507,7 @@ class StateTapeStore:
         """
 
         sections: list[str] = []
-        rolling = self._single_line(get_conversation_summary(self.conversation_id))
+        rolling = get_conversation_summary(self.conversation_id)
         if rolling:
             sections.append("Rolling summary:\n" + self._clip(rolling, self.rolling_summary_chars))
         recent = self.recent(self.recent_entries, resolved_only=True)
@@ -514,6 +523,28 @@ class StateTapeStore:
                 + "\n".join(entry.render() for entry in unresolved)
             )
         return "\n\n".join(sections)
+
+    def link_recent_conversation(self, surface: list[dict]) -> list[dict]:
+        """Keep exact-evidence handles on the one visible copy of each turn."""
+        linked = [dict(item) for item in surface]
+        ids = [int(item.get("_source_message_id") or 0) for item in linked if item.get("role") == "assistant"]
+        if not ids:
+            return linked
+        with _connect() as conn:
+            rows = conn.execute(
+                f"SELECT source_message_id,summary FROM state_tape_entries WHERE conversation_id=? AND source_message_id IN ({','.join('?' for _ in ids)})",
+                [self.conversation_id, *ids],
+            ).fetchall()
+        summaries = dict(rows)
+        for item in linked:
+            summary = summaries.get(int(item.get("_source_message_id") or 0))
+            if item.get("role") == "assistant" and summary:
+                item["_state_tape_summary"] = summary
+                refs = re.findall(r"\[observation_id=[^\]]+\]", summary)
+                if refs:
+                    item["content"] = item["content"].split("Original tool evidence (retrieve for exact facts):", 1)[0].rstrip()
+                    item["content"] += "\nOriginal tool evidence (retrieve for exact facts): " + " ".join(refs)
+        return linked
 
 
 def _compact_surface_text(text: str, *, role: str, max_chars: int) -> str:
@@ -613,8 +644,8 @@ def compact_recent_conversation(
             )
             if content:
                 item = {"role": "user", "content": content}
-                if include_source_ids and int(raw.get("_db_id") or 0) > 0:
-                    item["_source_message_id"] = int(raw.get("_db_id") or 0)
+                if include_source_ids and int(raw.get("_db_id") or raw.get("_source_message_id") or 0) > 0:
+                    item["_source_message_id"] = int(raw.get("_db_id") or raw.get("_source_message_id") or 0)
                 current = [item]
             else:
                 current = []
@@ -636,8 +667,8 @@ def compact_recent_conversation(
         )
         if content:
             item = {"role": "assistant", "content": content}
-            if include_source_ids and int(raw.get("_db_id") or 0) > 0:
-                item["_source_message_id"] = int(raw.get("_db_id") or 0)
+            if include_source_ids and int(raw.get("_db_id") or raw.get("_source_message_id") or 0) > 0:
+                item["_source_message_id"] = int(raw.get("_db_id") or raw.get("_source_message_id") or 0)
             current.append(item)
     if current:
         turns.append(current)
@@ -654,4 +685,3 @@ def compact_recent_conversation(
         if assistant is not None:
             result.append(assistant)
     return result
-

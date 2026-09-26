@@ -29,7 +29,7 @@ config = load_config()
 _CACHE_LOCK = threading.RLock()
 _SCHEMA_LOCK = threading.RLock()
 _INITIALIZED_DB_PATHS: set[str] = set()
-_HISTORY_CACHE: OrderedDict[tuple[Any, ...], list[dict[str, Any]]] = OrderedDict()
+_HISTORY_CACHE: OrderedDict[tuple[Any, ...], tuple[list[dict[str, Any]], float]] = OrderedDict()
 _CONTEXT_CACHE: OrderedDict[tuple[str, str], tuple[str, int, float]] = OrderedDict()
 _CACHE_MAX = 96
 _FTS_AVAILABLE: dict[str, bool] = {}
@@ -37,6 +37,7 @@ _FTS_AVAILABLE: dict[str, bool] = {}
 # which is a separate process. Keep a tiny TTL so repeated reads inside one
 # foreground turn stay in RAM while a later turn observes cross-process writes.
 _CONTEXT_CACHE_TTL_SECONDS = 0.25
+_HISTORY_CACHE_TTL_SECONDS = 0.25
 
 
 def _db_key() -> str:
@@ -306,6 +307,8 @@ def delete_conversation(conversation_id: str) -> bool:
     with _connect() as conn:
         conn.execute("DELETE FROM chat_history WHERE conversation_id = ?", (cid,))
         conn.execute("DELETE FROM tool_observations WHERE conversation_id = ?", (cid,))
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='state_tape_entries'").fetchone():
+            conn.execute("DELETE FROM state_tape_entries WHERE conversation_id = ?", (cid,))
         conn.execute("DELETE FROM conversation_context WHERE conversation_id = ?", (cid,))
         try:
             conn.execute("DELETE FROM working_states WHERE conversation_id = ?", (cid,))
@@ -390,8 +393,11 @@ def _load_chat_history_from_db(
     with _CACHE_LOCK:
         cached = _HISTORY_CACHE.get(cache_key)
         if cached is not None:
-            _HISTORY_CACHE.move_to_end(cache_key)
-            return copy.deepcopy(cached)
+            history, loaded_at = cached
+            if time.monotonic() - loaded_at <= _HISTORY_CACHE_TTL_SECONDS:
+                _HISTORY_CACHE.move_to_end(cache_key)
+                return copy.deepcopy(history)
+            _HISTORY_CACHE.pop(cache_key, None)
     with _connect() as conn:
         if include_compacted:
             if export_limit == 0:
@@ -424,7 +430,34 @@ def _load_chat_history_from_db(
             except json.JSONDecodeError:
                 pass
         result.append(msg)
-    _cache_put(_HISTORY_CACHE, cache_key, copy.deepcopy(result))
+    _cache_put(_HISTORY_CACHE, cache_key, (copy.deepcopy(result), time.monotonic()))
+    return result
+
+
+def load_recent_conversational_history(turns: int = 4, conversation_id: str | None = None) -> list[dict]:
+    """Select complete recent user turns, independent of tool-row volume.
+
+    Fetch only user/assistant rows; the prompt projector removes action-only
+    assistant rows. Raw observations need not be loaded for conversational recall.
+    """
+    cid = ensure_conversation(conversation_id)
+    offset = max(0, min(int(turns), 20) - 1)
+    with _connect() as conn:
+        boundary = conn.execute(
+            "SELECT id FROM chat_history WHERE conversation_id=? AND role='user' ORDER BY id DESC LIMIT 1 OFFSET ?",
+            (cid, offset),
+        ).fetchone()
+        rows = conn.execute(
+            "SELECT id,role,content,extra FROM chat_history WHERE conversation_id=? AND id>=? AND role IN ('user','assistant') ORDER BY id",
+            (cid, int(boundary[0]) if boundary else 0),
+        ).fetchall()
+    result = []
+    for message_id, role, content, extra in rows:
+        try:
+            details = json.loads(extra or "{}")
+        except (ValueError, TypeError):
+            details = {}
+        result.append({**details, "_db_id": int(message_id), "role": role, "content": content or ""})
     return result
 
 def clear_chat_history(conversation_id: str | None = None) -> str:
@@ -546,6 +579,7 @@ def load_tool_observation_content(observation_id: str = "", conversation_id: str
 
 
 def read_observation(observation_id: str = "", offset: int = 0, length: int = 5000) -> str:
+    """Rehydrate exact historical tool evidence by observation_id; paginate long results."""
     observation_id = str(observation_id or "").strip()
     if not observation_id:
         return "Error: Missing required 'observation_id' parameter."
@@ -558,13 +592,15 @@ def read_observation(observation_id: str = "", offset: int = 0, length: int = 50
             (observation_id, cid),
         ).fetchone()
     if not row:
-        return f"Observation '{observation_id}' was not found in this conversation."
+        return f"Error: observation '{observation_id}' was not found in this conversation."
     tool_name, content, char_count = row
+    from .grounding import classify_fact_types
     chunk = str(content)[offset:offset + length]
     return json.dumps(
         {
             "observation_id": observation_id,
             "tool": tool_name,
+            "fact_types": sorted(classify_fact_types(tool_name, str(content))),
             "offset": offset,
             "returned_chars": len(chunk),
             "total_chars": int(char_count),
@@ -574,6 +610,28 @@ def read_observation(observation_id: str = "", offset: int = 0, length: int = 50
         ensure_ascii=False,
         indent=2,
     )
+
+def search_observations(query: str = "", limit: int = 10, offset: int = 0) -> str:
+    """Find historical tool evidence and observation_id handles in this conversation.
+
+    Search by tool name or content, then use read_observation for exact details.
+    Catalog discovery results are excluded. An empty query lists recent evidence.
+    """
+    cid = ensure_conversation()
+    terms = _memory_query_terms(query)[:8]
+    where = "conversation_id=? AND tool_name NOT IN ('tool_search','load_tools')"
+    params: list = [cid]
+    if terms:
+        where += " AND (" + " OR ".join("instr(lower(tool_name || ' ' || content), ?) > 0" for _ in terms) + ")"
+        params.extend(terms)
+    params.extend([max(1, min(20, int(limit))), max(0, int(offset))])
+    with _connect() as conn:
+        rows = conn.execute(
+            f"SELECT id,tool_name,substr(content,1,400),char_count FROM tool_observations WHERE {where} ORDER BY rowid DESC LIMIT ? OFFSET ?",
+            params,
+        ).fetchall()
+    return json.dumps([{"observation_id": row[0], "tool": row[1], "preview": row[2], "total_chars": row[3]} for row in rows], ensure_ascii=False)
+
 
 def remember(topic: str = "general_knowledge", fact: str = "Recorded by agent action") -> str:
     """Persist an unchanging user/system fact for later retrieval."""

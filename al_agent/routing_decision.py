@@ -8,6 +8,7 @@ keep the resident main model's active schema set bounded.
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -89,7 +90,8 @@ class RoutingDecision:
     context_key: str
 
 
-def _tokens(text: str) -> list[str]:
+@lru_cache(maxsize=1024)
+def _tokens(text: str) -> tuple[str, ...]:
     raw = [
         _TOKEN_CANONICAL.get(t, t)
         for t in _TOKEN_RE.findall(str(text or "").lower())
@@ -104,7 +106,7 @@ def _tokens(text: str) -> list[str]:
                 continue
             seen.add(canonical)
             expanded.append(canonical)
-    return expanded
+    return tuple(expanded)
 
 
 def _context_key(text: str) -> str:

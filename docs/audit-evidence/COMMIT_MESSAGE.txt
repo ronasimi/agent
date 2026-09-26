@@ -1,0 +1,7 @@
+fix(runtime): enforce grounded completion and preserve durable history
+
+Wire domain evidence gates into the production turn engine, preserve exact
+observation provenance through compaction, and repair contextual routing.
+Harden streaming cancellation, uncertain mutations and WebUI reconnects.
+Add exact Gmail inbox counts, archive search, regression scenarios and
+repeatable runtime benchmarks with documented live-inference limitations.

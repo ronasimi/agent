@@ -512,9 +512,18 @@ function restoreSidebarState(){
 function showPanel(name){document.querySelectorAll('.panel').forEach(x=>x.classList.add('hidden'));const panel=$(`#${name}Panel`);if(!panel)return;panel.classList.remove('hidden');document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.panel===name));document.querySelectorAll('.recent-item').forEach(b=>b.classList.toggle('active',name==='chat'&&b.dataset.conversationId===activeConversationId));$('#panelTitle').textContent={chat:displayConversationTitle(currentConversation()),jobs:'Jobs',reminders:'Reminders',benchmarks:'UI Benchmarks'}[name]||'Al Agent';if(name==='chat')updateConversationHeading();if(name==='jobs')loadJobs();if(name==='reminders')loadReminders();if(name==='benchmarks')loadBenchmarks();}
 function closeUtilityMenu(){const menu=$('#utilityMenu'),toggle=$('#utilityMenuToggle');menu?.classList.add('hidden');toggle?.setAttribute('aria-expanded','false');}
 function toggleUtilityMenu(force){const menu=$('#utilityMenu'),toggle=$('#utilityMenuToggle');if(!menu||!toggle)return;const open=typeof force==='boolean'?force:menu.classList.contains('hidden');menu.classList.toggle('hidden',!open);toggle.setAttribute('aria-expanded',String(open));}
+async function recoverActiveTurn(turnId){
+  if(!turnId||activeTurn!==turnId||socket?.readyState!==WebSocket.OPEN)return;
+  try{
+    const state=await api(`/api/turns/${encodeURIComponent(turnId)}`);
+    if(activeTurn!==turnId)return;
+    if(state.active){setStatus('Reconnected · turn still running','busy');setTimeout(()=>recoverActiveTurn(turnId),1000);}
+    else{finishTurn();await Promise.all([loadHistory(),loadConversations()]);setStatus('Ready');}
+  }catch(err){setStatus('Reconnecting…','busy');setTimeout(()=>recoverActiveTurn(turnId),1200);}
+}
 function connect(){
   socket=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws/chat`);
-  socket.onopen=()=>{};
+  socket.onopen=()=>{if(activeTurn)void recoverActiveTurn(activeTurn);else setStatus('Ready');};
   socket.onclose=()=>{setStatus('Disconnected','error');setTimeout(connect,1200);};
   socket.onmessage=ev=>{
     const e=JSON.parse(ev.data);
@@ -593,7 +602,7 @@ function submitChatMessage(text,mediaItems=[],{recordHistory=true,clearComposer=
   if(clearComposer){setPromptValue('');resetHistoryNavigation();attachments=[];renderAttachments();}return true;
 }
 $('#composer').addEventListener('submit',(ev)=>{ev.preventDefault();submitChatMessage(promptEl.value,attachments.slice());});
-$('#stop').addEventListener('click',()=>{if(activeTurn)socket.send(JSON.stringify({type:'cancel',turn_id:activeTurn}));});
+$('#stop').addEventListener('click',()=>{if(activeTurn)void api(`/api/cancel/${encodeURIComponent(activeTurn)}`,{method:'POST'}).catch(err=>setStatus(err.message||'Cancel failed','error'));});
 $('#composerAddFile').addEventListener('click',()=>$('#fileInput').click());
 $('#fileInput').addEventListener('change',async(ev)=>{await uploadChatFiles(ev.target.files);ev.target.value='';});
 $('#workspaceAddFile').addEventListener('click',()=>$('#workspaceFileInput').click());
