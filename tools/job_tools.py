@@ -106,7 +106,7 @@ def start_computation(
     max_recovery_failures: int = 10,
     idempotency_key: str = "",
 ) -> str:
-    """Start a durable deterministic computation that resumes until HALT or cancellation.
+    """Simulate a durable universal Turing machine with potentially unbounded steps on a sparse bidirectional tape; resumes until HALT or cancellation.
 
     ``input_text`` seeds cells from address zero, ``initial_tape`` can overlay
     arbitrary integer addresses, and ``input_file`` may reference a hash-pinned

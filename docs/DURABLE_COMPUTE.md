@@ -1,6 +1,6 @@
 # Durable deterministic computation
 
-> **Current-state note (2026-09-23):** This is the operator/developer guide for the resumable deterministic compute subsystem. The foreground LLM loop remains deliberately bounded; arbitrary-length iteration lives below it in checkpointed worker jobs.
+> **Current-state note (2026-09-25):** This is the operator/developer guide for the resumable deterministic compute subsystem. The foreground LLM loop remains deliberately bounded; arbitrary-length iteration lives below it in checkpointed worker jobs.
 
 ## Why this exists
 
@@ -111,7 +111,7 @@ The Jobs panel exposes, for `durable_compute` jobs:
 - consecutive infrastructure recovery count and configured maximum when non-zero;
 - cancellation for pending/running jobs.
 
-The panel refreshes while visible. `list_jobs()` returns only a bounded progress summary, never the full tape. Detailed bounded inspection remains available through `get_computation_status`.
+The panel refreshes while visible. `list_jobs()` returns only a bounded progress summary, never the full tape. Detailed bounded inspection remains available through `get_computation_status`. The primary Compose `webui` service depends on `worker`, so the normal UI startup path also starts the durable execution engine.
 
 ## Configuration
 
@@ -129,7 +129,9 @@ A short yield delay improves queue fairness so an old, non-halting computation d
 Focused tests cover exact halting, strict transition-target validation, branching, negative tape addresses, arbitrary sparse initial tape maps, workspace-file input/hash pinning, quantum-partition equivalence, multi-quantum resumption, non-halting execution, sparse transactional tape persistence, stale-worker/infrastructure recovery budgets, cancellation races, explicit resource policies, idempotent creation, routing/validator behavior, and Web UI progress output.
 
 ```bash
+python diagnostics/check_turing_completeness.py
 python -m pytest -q \
+  tests/test_turing_completeness_contract.py \
   tests/test_durable_compute_machine.py \
   tests/test_durable_compute_worker.py \
   tests/test_durable_compute_tools.py \

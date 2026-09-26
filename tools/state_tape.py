@@ -361,7 +361,15 @@ class StateTapeStore:
 
         parts: list[str] = []
         for outcome in rows[:4]:
-            parts.append(self._clip(outcome.summary, 220))
+            # Preserve the compact durable observation handle so exact historical
+            # evidence can be rehydrated with read_observation without replaying
+            # the raw tool payload into every future prompt.
+            evidence = (
+                f" [observation_id={outcome.observation_id}]"
+                if str(outcome.observation_id or "").strip()
+                else ""
+            )
+            parts.append(self._clip(outcome.summary + evidence, 260))
         if failure_text:
             parts.append("Failure: " + self._clip(failure_text, 180))
         if not parts and assistant_text:

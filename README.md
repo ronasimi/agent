@@ -10,6 +10,7 @@ A local assistant for Ollama with autonomous tool selection and one all-purpose 
 - Deterministic catalog prefilter with bounded native schemas; the resident 4B model makes all semantic tool decisions and executes the task.
 - Conversation-scoped memory, durable tool observations, and three-tier State Tape prompt compaction.
 - Research, reminders, browser automation, and durable background jobs.
+- Durable sparse-tape universal computation for practically Turing-complete deterministic workloads without removing foreground safety budgets.
 - One model for chat, tool decisions, research, maintenance, and custom-tool generation.
 - Strict argument validation, finite execution budgets, and cancellation.
 - Optional read-only Google integrations and local encrypted credential storage.
@@ -108,6 +109,7 @@ For development:
 
 ```bash
 ./scripts/bootstrap_venv.sh
+.venv/bin/python diagnostics/check_turing_completeness.py
 .venv/bin/python -m pytest -q
 .venv/bin/python diagnostics/simulate_turns.py
 RUN_OLLAMA_LIVE_TESTS=1 .venv/bin/python -m pytest -q tests/test_ollama_conformance_live.py

@@ -24,6 +24,8 @@ try:
     if len(BUILTINS)!=len(set(BUILTINS)): errors.append("duplicate builtin tool provider specs")
     from al_agent.background.handlers import JOB_HANDLERS
     if len(JOB_HANDLERS)!=len(set(JOB_HANDLERS)): errors.append("duplicate background handler names")
+    from diagnostics.check_turing_completeness import check_contract
+    errors.extend(check_contract())
 except Exception as exc:
     errors.append(f"provider discovery failed: {exc}")
 
