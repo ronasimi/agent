@@ -117,16 +117,20 @@ def _schema(name: str, description: str, properties: dict, required: list[str]) 
 DISCOVERY_SCHEMAS = [
     _schema(
         "tool_search",
-        "Search the available tool catalog by name or description. Returns compact ranked "
+        "Search the available TOOL CATALOG by capability name or description only. Returns compact ranked "
         "candidate metadata and automatically activates the relevant candidate schemas for the next "
         "resident-model call. Full schemas are supplied only through the native tools field. "
-        "Empty query browses names.",
+        "Do not pass a downstream service query (for example Gmail 'in:inbox', SQL, a URL, or shell text); "
+        "describe the capability instead, such as 'gmail search messages'.",
         {
-            "query": {"type": "string"},
+            "capability_query": {
+                "type": "string",
+                "description": "Tool capability/name to discover, not a query intended for the downstream service.",
+            },
             "limit": {"type": "integer", "minimum": 1, "maximum": 8},
             "offset": {"type": "integer", "minimum": 0},
         },
-        [],
+        ["capability_query"],
     ),
     _schema(
         "load_tools",
@@ -180,6 +184,8 @@ class ToolSession:
         # now supplies a non-generative deterministic routing engine.
         self.router = router or decision_engine
         self.routed_tools: set[str] = set()
+        self.invoked_control_tools: set[str] = set()
+        self.successful_tools: set[str] = set()
         if initial_active:
             activation = self._activate(list(initial_active), allow_trim=True)
             self.routed_tools.update(activation.get("activated", []))
@@ -201,6 +207,14 @@ class ToolSession:
             raise ValueError(
                 f"Tool {name!r} is not loaded. Use tool_search or load_tools to inspect its schema."
             )
+        # Backward compatibility for saved transcripts/recipes created before
+        # the control-plane argument was renamed. The model-facing schema only
+        # exposes capability_query, so new generations cannot confuse it with a
+        # downstream provider query.
+        if name == "tool_search" and isinstance(args, dict):
+            if "query" in args and "capability_query" not in args:
+                args = {**args, "capability_query": args["query"]}
+                args.pop("query", None)
         return validate_arguments(schema, args)
 
     def _activate(
@@ -240,13 +254,43 @@ class ToolSession:
             "evicted": evicted,
         }
 
-    def _search(self, query: str = "", limit: int = 8, offset: int = 0) -> dict:
+    @staticmethod
+    def _looks_like_downstream_query(value: str) -> bool:
+        """Reject obvious provider/service query syntax at the catalog boundary."""
+        text = str(value or "").strip()
+        if not text:
+            return False
+        lowered = text.lower()
+        if re.search(r"\b(?:in|from|to|subject|label|after|before|is):\S+", lowered):
+            return True
+        if re.match(r"^(?:https?://|file://|/|\.\.?/)", lowered):
+            return True
+        if re.search(r"\b(?:select|insert|update|delete)\b.+\b(?:from|into|set)\b", lowered):
+            return True
+        return False
+
+    def _search(self, capability_query: str = "", limit: int = 8, offset: int = 0) -> dict:
         """Return compact discovery metadata and activate a bounded relevant set.
 
         Search itself never invokes a model. Complete schemas remain out of the
         observation payload and are supplied only through the next request's
         native ``tools`` field.
         """
+        query = str(capability_query or "").strip()
+        if self._looks_like_downstream_query(query):
+            return {
+                "ok": False,
+                "control_plane": True,
+                "error": (
+                    "tool_search searches tool capabilities, not downstream service data. "
+                    "Describe the needed capability (for example 'gmail search messages'), "
+                    "then call the activated domain tool with its own query."
+                ),
+                "candidates": [],
+                "activated": [],
+                "total": 0,
+            }
+
         available = [
             schema for name, schema in self.catalog.items() if name not in self.control
         ]
@@ -315,6 +359,7 @@ class ToolSession:
             "load_tools": lambda names: self._activate(names, replace=True),
         }
         if name in dispatch:
+            self.invoked_control_tools.add(name)
             return dispatch[name](**validated)
         signature = json.dumps([name, validated], sort_keys=True, allow_nan=False)
         if signature in self.uncertain_mutations:
@@ -330,3 +375,32 @@ class ToolSession:
             if not self.metadata.get(name, {}).get("readonly", False):
                 self.uncertain_mutations.add(signature)
             raise
+
+    def record_outcome(self, name: str, ok: bool) -> None:
+        """Track successful domain evidence separately from discovery/control calls."""
+        clean = str(name or "")
+        if ok and clean and clean not in self.control:
+            self.successful_tools.add(clean)
+
+    def finalization_blocker(self) -> str:
+        """Prevent discovery metadata from being mistaken for domain evidence.
+
+        If the deterministic router exposed one or more domain capabilities and
+        the model chose a control-plane discovery call instead, a final answer is
+        not allowed until at least one routed domain capability succeeds. This is
+        deliberately narrow so ordinary answer-only turns remain unaffected.
+        """
+        if not self.invoked_control_tools:
+            return ""
+        expected = sorted(
+            name for name in self.routed_tools
+            if name not in self.control
+        )
+        if not expected or any(name in self.successful_tools for name in expected):
+            return ""
+        return (
+            "Discovery/control-plane results are not domain evidence. Before finalizing, "
+            "call one of the routed domain capabilities successfully: "
+            + ", ".join(expected[:8])
+            + ". If discovery evicted it, reload the exact tool with load_tools."
+        )

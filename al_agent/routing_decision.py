@@ -30,6 +30,29 @@ _STOP = {
     "step", "tool", "usage",
 }
 
+# Small deterministic lexical normalization table used only for catalog routing.
+# This is intentionally not an embedding/model call: it covers ordinary user
+# vocabulary that differs from provider/tool naming (for example "email" vs
+# "gmail messages") while keeping routing latency effectively unchanged.
+_TOKEN_CANONICAL = {
+    "emails": "email",
+    "messages": "message",
+    "calendars": "calendar",
+    "events": "event",
+    "files": "file",
+    "screenshots": "screenshot",
+}
+_TOKEN_ALIASES = {
+    "email": {"gmail", "mail", "message"},
+    "inbox": {"gmail", "mail", "message", "email"},
+    "mailbox": {"gmail", "mail", "message", "email"},
+    "gmail": {"email", "mail", "message", "inbox"},
+    "calendar": {"event", "schedule"},
+    "schedule": {"calendar", "event"},
+    "drive": {"file", "google"},
+    "screenshot": {"capture", "page"},
+}
+
 # Routing remains primarily request/schema based. Learned evidence may move a
 # candidate by at most +/- 0.15.
 LEARNED_MAX_ADJUSTMENT = 0.15
@@ -62,7 +85,21 @@ class RoutingDecision:
 
 
 def _tokens(text: str) -> list[str]:
-    return [t for t in _TOKEN_RE.findall(str(text or "").lower()) if t not in _STOP]
+    raw = [
+        _TOKEN_CANONICAL.get(t, t)
+        for t in _TOKEN_RE.findall(str(text or "").lower())
+        if t not in _STOP
+    ]
+    expanded: list[str] = []
+    seen: set[str] = set()
+    for token in raw:
+        for candidate in (token, *sorted(_TOKEN_ALIASES.get(token, set()))):
+            canonical = _TOKEN_CANONICAL.get(candidate, candidate)
+            if canonical in _STOP or canonical in seen:
+                continue
+            seen.add(canonical)
+            expanded.append(canonical)
+    return expanded
 
 
 def _context_key(text: str) -> str:

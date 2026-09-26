@@ -457,6 +457,13 @@ def run_loop(
             # stream before showing tool activity.
             emit("assistant_reset")
         if not calls:
+            blocker = tools.finalization_blocker()
+            if blocker:
+                no_progress += 1
+                if no_progress >= config.max_no_progress:
+                    raise LoopStopped(blocker)
+                feedback(blocker)
+                continue
             record({"role": "assistant", "content": answer})
             emit("assistant_final", content=answer, finalization=False)
             return answer
@@ -528,6 +535,7 @@ def run_loop(
                 media = list(raw.get("images") or [])
                 raw = str(raw.get("content", ""))
             ok, value = tool_outcome(raw)
+            tools.record_outcome(name, ok)
             failed_batch = failed_batch or not ok
             text = (
                 value

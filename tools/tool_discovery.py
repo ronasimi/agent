@@ -9,11 +9,11 @@ def _tokens(value: str) -> set[str]:
     return {x for x in re.findall(r"[a-z0-9]+", str(value or "").lower().replace("_", " ")) if len(x) > 1}
 
 
-def tool_search(query: str = "", limit: int = 5) -> str:
-    """Find relevant available tool names without executing them; use when the current tool set lacks the needed capability."""
-    query = " ".join(str(query or "").split())
+def tool_search(capability_query: str = "", limit: int = 5) -> str:
+    """Find available tool capabilities; never use this to query a downstream service."""
+    query = " ".join(str(capability_query or "").split())
     if not query:
-        return "Error: Missing required 'query' parameter."
+        return "Error: Missing required 'capability_query' parameter."
     try:
         limit = max(1, min(int(limit), 8))
     except (TypeError, ValueError):

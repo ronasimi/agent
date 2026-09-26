@@ -176,3 +176,28 @@ def test_active_turn_protocol_collapses_to_prompt_safe_surface(monkeypatch, tmp_
     assert "42" in rendered
     assert "additionalProperties" not in rendered
     assert "tool_call_id" not in rendered
+
+
+def test_unverified_assistant_claim_is_labeled_non_evidence_in_tape(monkeypatch, tmp_path):
+    memory = _temp_db(monkeypatch, tmp_path)
+    from tools.state_tape import StateTapeStore
+
+    cid = "unverified-" + uuid.uuid4().hex
+    tape = StateTapeStore(cid)
+    user_id = memory._save_message_to_db(
+        {"role": "user", "content": "Can you access Gmail?"}, cid
+    )
+    final_id = memory._save_message_to_db(
+        {"role": "assistant", "content": "No Gmail account is configured."}, cid
+    )
+    tape.commit_turn(
+        turn_id=user_id,
+        source_message_id=final_id,
+        objective="Can you access Gmail?",
+        assistant_text="No Gmail account is configured.",
+        outcomes=[],
+        status="complete",
+    )
+    context = tape.render_prompt_context()
+    assert "No Gmail account is configured" in context
+    assert "Unverified conversational record (not tool evidence)" in context

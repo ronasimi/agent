@@ -84,13 +84,88 @@ def test_tool_search_activates_relevant_candidate_set_without_schema_duplication
         schema("temperature_sensors", "Return bounded CPU temperature readings."),
     ]
     session = ToolSession(schemas, lambda *a: None, router=router)
-    result = session.invoke("tool_search", {"query": "host memory usage", "limit": 6})
+    result = session.invoke("tool_search", {"capability_query": "host memory usage", "limit": 6})
     assert "schemas" not in result
     assert all("function" not in row for row in result["candidates"])
     assert "memory_info" in result["activated"]
     assert [s["function"]["name"] for s in session.schemas][:2] == [
         "tool_search", "load_tools"
     ]
+
+
+def test_email_and_inbox_vocabulary_routes_to_gmail_search(tmp_path):
+    router = make_router(tmp_path)
+    schemas = [
+        schema("gmail_search_messages", "Search or list Gmail messages with metadata and snippets only."),
+        schema("gmail_read_message", "Read one Gmail message by ID."),
+        schema("search_memory", "Search durable explicit memories."),
+    ]
+    decision = router.decide("How many emails are in my inbox?", schemas)
+    assert "gmail_search_messages" in decision.selected
+    assert "search_memory" not in decision.selected
+
+
+def test_tool_search_rejects_downstream_provider_query(tmp_path):
+    router = make_router(tmp_path)
+    schemas = [schema("gmail_search_messages", "Search or list Gmail messages.")]
+    session = ToolSession(
+        schemas, lambda *a: None, router=router,
+        initial_active=["gmail_search_messages"],
+    )
+    result = session.invoke("tool_search", {"capability_query": "in:inbox"})
+    assert result["ok"] is False
+    assert result["control_plane"] is True
+    assert "downstream service" in result["error"]
+    assert "gmail_search_messages" in session.active
+
+
+def test_control_plane_result_cannot_replace_routed_domain_evidence(tmp_path):
+    router = make_router(tmp_path)
+    schemas = [schema("gmail_search_messages", "Search or list Gmail messages.")]
+    session = ToolSession(
+        schemas, lambda *a: None, router=router,
+        initial_active=["gmail_search_messages"],
+    )
+    session.invoke("tool_search", {"capability_query": "gmail search messages"})
+    blocker = session.finalization_blocker()
+    assert "not domain evidence" in blocker
+    assert "gmail_search_messages" in blocker
+    session.record_outcome("gmail_search_messages", True)
+    assert session.finalization_blocker() == ""
+
+
+def test_referential_followup_uses_recent_capability_affinity(tmp_path):
+    from types import SimpleNamespace
+    from al_agent.turn_engine import _routing_context_hint
+
+    router = make_router(tmp_path)
+    schemas = [
+        schema("gmail_search_messages", "Search or list Gmail messages."),
+        schema("gmail_read_message", "Read one Gmail message by ID."),
+        schema("dependency_audit", "Audit runtime dependencies."),
+    ]
+
+    class Tape:
+        def recent(self, limit=4):
+            return [
+                SimpleNamespace(
+                    summary="gmail_search_messages succeeded: provider=Google Gmail API"
+                )
+            ]
+
+    surface = [
+        {"role": "user", "content": "Why didn't you see the Gmail account credentials initially?"},
+        {"role": "assistant", "content": "The Gmail tools require a configured account."},
+    ]
+    hint, affinity = _routing_context_hint(
+        "It is included in the harness",
+        surface,
+        Tape(),
+        {s["function"]["name"] for s in schemas},
+    )
+    assert "gmail_search_messages" in affinity
+    contextual = router.decide("It is included in the harness\n" + hint, schemas)
+    assert "gmail_search_messages" in contextual.selected
 
 
 def test_feedback_reorders_only_related_candidates(tmp_path):

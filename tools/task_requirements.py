@@ -175,6 +175,8 @@ _RULES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     ("gmail", "gmail_search_messages", "requested Gmail messages", (
         r"\b(?:check|search|show|find|list|read)\s+(?:through\s+)?my\s+(?:gmail|email|emails|mail|inbox|messages?)\b",
         r"\bwhat(?:'s| is)\s+in\s+my\s+(?:gmail|email|inbox)\b",
+        r"\bhow\s+many\s+(?:emails?|messages?)\s+(?:are\s+)?(?:in\s+)?my\s+(?:gmail|inbox|mailbox)?\b",
+        r"\b(?:count|number of)\s+(?:my\s+)?(?:gmail\s+)?(?:emails?|messages?)\b",
     )),
     ("google_calendar", "google_calendar_list_events", "requested Google Calendar schedule", (
         r"\b(?:check|search|show|list|read)\s+my\s+(?:google\s+)?calendar\b",

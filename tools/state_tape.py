@@ -373,7 +373,16 @@ class StateTapeStore:
         if failure_text:
             parts.append("Failure: " + self._clip(failure_text, 180))
         if not parts and assistant_text:
-            parts.append("Assistant outcome: " + self._clip(assistant_text, 220))
+            # Pure model prose is conversational context, not verified durable
+            # state.  Keeping unsupported assistant claims in the authoritative
+            # tape can poison later routing (for example a mistaken claim that a
+            # configured provider is unavailable). Preserve it for long-term
+            # conversational recall, but label it explicitly so tool-backed
+            # outcomes outrank it as evidence.
+            parts.append(
+                "Unverified conversational record (not tool evidence): Assistant said: "
+                + self._clip(assistant_text, 210)
+            )
         if not parts:
             parts.append("Turn recorded without a durable tool outcome.")
 

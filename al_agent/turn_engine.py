@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import uuid
 from contextlib import contextmanager
+from dataclasses import replace
 
 from tools.catalog import catalog_snapshot
 from tools.conversation_context import get_active_conversation_id
@@ -29,6 +31,80 @@ from .events import (
 from .model_traces import record_model_trace
 from .prompts import append_and_save, build_system_prompt
 from .tool_session import ToolSession
+
+
+_REFERENTIAL_FOLLOWUP_RE = re.compile(
+    r"\b(?:it|that|this|those|these|they|them|same|again|still|included|configured|"
+    r"available|enabled|there|here|do it|try again|double check)\b",
+    re.I,
+)
+
+
+def _looks_like_contextual_followup(text: str) -> bool:
+    """Return True for short utterances that depend on the preceding turn."""
+    clean = " ".join(str(text or "").split())
+    if not clean or len(clean) > 220:
+        return False
+    words = re.findall(r"[A-Za-z0-9_'-]+", clean)
+    return len(words) <= 24 and bool(_REFERENTIAL_FOLLOWUP_RE.search(clean))
+
+
+def _routing_context_hint(
+    user_input: str,
+    recent_surface: list[dict],
+    tape: StateTapeStore,
+    schema_names: set[str],
+) -> tuple[str, tuple[str, ...]]:
+    """Build a tiny prompt-free routing hint for an elliptical follow-up.
+
+    The router never receives the full conversation.  It gets only the most
+    recent conversational referent plus exact tool names found in recent State
+    Tape outcomes.  This preserves low routing latency while allowing requests
+    such as "it is configured" to retain the Gmail/browser/etc. capability from
+    the preceding exchange.
+    """
+    if not _looks_like_contextual_followup(user_input):
+        return "", ()
+
+    previous_user = ""
+    previous_assistant = ""
+    for item in reversed(recent_surface):
+        role = str(item.get("role") or "")
+        content = " ".join(str(item.get("content") or "").split())
+        if role == "assistant" and not previous_assistant:
+            previous_assistant = content[:260]
+        elif role == "user" and not previous_user:
+            previous_user = content[:220]
+        if previous_user and previous_assistant:
+            break
+
+    affinity: tuple[str, ...] = ()
+    # Use the nearest tape entry that actually contains a successful capability,
+    # not a union of several unrelated older turns.
+    for entry in reversed(tape.recent(limit=4)):
+        summary = str(entry.summary or "")
+        names = tuple(
+            sorted(
+                name
+                for name in schema_names
+                if name not in {"tool_search", "load_tools"}
+                and re.search(
+                    rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])",
+                    summary,
+                )
+            )[:6]
+        )
+        if names:
+            affinity = names
+            break
+    parts = []
+    if previous_user:
+        parts.append("previous user topic: " + previous_user)
+    if previous_assistant:
+        parts.append("previous assistant topic: " + previous_assistant)
+    if affinity:
+        parts.append("recent successful capabilities: " + " ".join(affinity))
+    return "\n".join(parts), affinity
 
 
 def _is_transport_error_message(message: dict) -> bool:
@@ -215,6 +291,38 @@ def handle_user_turn(
 
         routing_engine = state.TOOL_ROUTER
         decision = routing_engine.decide(user_input, schemas, metadata)
+        routing_text = user_input
+        schema_names = {
+            str(schema.get("function", {}).get("name") or "")
+            for schema in schemas
+            if isinstance(schema, dict)
+        }
+        context_hint, affinity_tools = _routing_context_hint(
+            user_input, recent_surface, tape, schema_names
+        )
+        if context_hint:
+            contextual_text = user_input + "\n" + context_hint
+            contextual = routing_engine.decide(contextual_text, schemas, metadata)
+            # Prefer contextual routing only when it materially improves the
+            # confidence or restores a capability proven by the recent tape.
+            contextual_selected = set(contextual.selected)
+            affinity_hit = bool(contextual_selected & set(affinity_tools))
+            confidence_gain = contextual.confidence >= decision.confidence + 0.12
+            if affinity_hit or confidence_gain or not decision.selected:
+                if affinity_hit:
+                    affinity_rows = tuple(
+                        row for row in contextual.candidates
+                        if row.name in set(affinity_tools)
+                    )
+                    if affinity_rows:
+                        contextual = replace(
+                            contextual,
+                            selected=tuple(row.name for row in affinity_rows),
+                            confidence=max(row.score for row in affinity_rows),
+                            tier="context_affinity",
+                        )
+                decision = contextual
+                routing_text = contextual_text
         routing_context_key = decision.context_key
         for selected_name in decision.selected:
             routing_engine.record(
@@ -224,7 +332,7 @@ def handle_user_turn(
                 event_type="route_selected",
                 detail=(
                     f"tier={decision.tier}; confidence={decision.confidence:.3f}; "
-                    "engine=deterministic"
+                    f"engine=deterministic; contextual={routing_text != user_input}"
                 ),
             )
         session = ToolSession(

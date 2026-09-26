@@ -183,7 +183,7 @@ def test_invalid_calls_are_returned_for_model_correction():
 
 def test_model_can_discover_without_known_keyword_mapping():
     result, calls, *_ = run(
-        [tool("tool_search", query="named value"), tool("lookup", key="x"), final()]
+        [tool("tool_search", capability_query="named value"), tool("lookup", key="x"), final()]
     )
     assert calls == [("lookup", {"key": "x"})]
 
@@ -482,7 +482,7 @@ def test_tool_session_state_is_not_shared_and_full_catalog_is_discoverable():
     two = ToolSession([SCHEMA], lambda *a: None)
     one.invoke("load_tools", {"names": ["lookup"]})
     assert "lookup" in one.active and "lookup" not in two.active
-    result = two.invoke("tool_search", {})
+    result = two.invoke("tool_search", {"capability_query": "lookup"})
     assert result["total"] == 1 and result["selected"] == "lookup"
     assert result["activated"] == ["lookup"]
     assert "schemas" not in result

@@ -26,7 +26,7 @@ _REQUIRED_OVERRIDES = {
     "schedule_reminder": {"title"},
     "cancel_reminder": {"reminder_id"},
     "web_search": {"query"},
-    "tool_search": {"query"},
+    "tool_search": {"capability_query"},
     "search_skills": {"query"},
     "load_skill": {"name"},
     "news_search": {"query"},
