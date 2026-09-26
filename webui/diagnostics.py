@@ -201,6 +201,10 @@ def _runtime_snapshot(conversation_id: str) -> dict[str, Any]:
             "recipes": agent_runtime.RECIPES_ENABLED,
             "state_tape": {
                 "recent_conversation_turns": agent_runtime.RECENT_CONVERSATION_TURNS,
+                "soft_prompt_tokens": agent_runtime.SOFT_PROMPT_TOKENS,
+                "hard_prompt_tokens": agent_runtime.HARD_PROMPT_TOKENS,
+                "recent_conversation_user_chars": agent_runtime.RECENT_CONVERSATION_USER_CHARS,
+                "recent_conversation_assistant_chars": agent_runtime.RECENT_CONVERSATION_ASSISTANT_CHARS,
                 "recent_entries": agent_runtime.STATE_TAPE_RECENT_ENTRIES,
                 "unresolved_entries": agent_runtime.STATE_TAPE_UNRESOLVED_ENTRIES,
                 "rolling_summary_chars": agent_runtime.STATE_TAPE_ROLLING_SUMMARY_CHARS,

@@ -51,6 +51,11 @@ _TOKEN_ALIASES = {
     "schedule": {"calendar", "event"},
     "drive": {"file", "google"},
     "screenshot": {"capture", "page"},
+    "profile": {"identity", "personal", "preference", "name"},
+    "identity": {"profile", "personal", "name"},
+    "name": {"profile", "identity"},
+    "preferences": {"profile", "preference"},
+    "preference": {"profile", "preferences"},
 }
 
 # Routing remains primarily request/schema based. Learned evidence may move a

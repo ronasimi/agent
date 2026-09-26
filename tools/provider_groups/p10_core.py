@@ -12,6 +12,7 @@ TOOL_SPECS = [
     ('goals', 'clear_goal'),
     ('user_profile', 'set_profile_image'),
     ('user_profile', 'profile_image_info'),
+    ('user_profile', 'get_user_profile'),
     ('user_profile', 'set_user_identity'),
     ('user_profile', 'set_research_preference'),
     ('repo_map', 'get_repo_map'),

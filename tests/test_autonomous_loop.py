@@ -516,3 +516,35 @@ def test_prompt_telemetry_is_attached_to_model_trace_request():
     assert telemetry["estimated_input_tokens"] > 0
     assert telemetry["schema_chars"] > 0
     assert telemetry["historical_tool_messages"] == 0
+
+
+def test_context_uses_soft_prefill_budget_to_drop_only_old_completed_turns():
+    config = replace(
+        CFG, options={"num_ctx": 16384}, reserve_tokens=2560,
+        soft_prompt_tokens=1800, hard_prompt_tokens=13824,
+    )
+    data = [
+        {"role": "system", "content": "policy"},
+        {"role": "user", "content": "old request"},
+        {"role": "assistant", "content": "old answer " + ("x" * 6000)},
+        {"role": "user", "content": "current task"},
+        {"role": "assistant", "content": "working"},
+        {"role": "user", "content": "fresh tool result", "_runtime": True},
+    ]
+    fitted = fit_context(data, [], config)
+    assert all("old request" not in str(row.get("content", "")) for row in fitted)
+    assert any(row.get("content") == "current task" for row in fitted)
+    assert any("fresh tool result" in str(row.get("content", "")) for row in fitted)
+
+
+def test_context_allows_large_current_turn_above_soft_target_below_hard_ceiling():
+    config = replace(
+        CFG, options={"num_ctx": 16384}, reserve_tokens=2560,
+        soft_prompt_tokens=800, hard_prompt_tokens=13824,
+    )
+    data = [
+        {"role": "system", "content": "policy"},
+        {"role": "user", "content": "current " + ("x" * 3500)},
+    ]
+    fitted = fit_context(data, [], config)
+    assert fitted[-1]["content"].startswith("current ")

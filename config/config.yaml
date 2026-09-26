@@ -18,7 +18,7 @@ agent:
     auto_activate_margin: 0.20
     min_candidate_score: 0.18
   main_options:
-    num_ctx: 32768
+    num_ctx: 16384
     temperature: 0.2
     top_p: 0.9
     top_k: 20
@@ -38,14 +38,23 @@ agent:
     queue_timeout_seconds: 90
   context:
     reserve_tokens: 2560
+    # Normal turns are proactively compacted below this total prompt size
+    # (messages + active tool schemas). The current turn may exceed it up to
+    # hard_prompt_tokens when necessary.
+    soft_prompt_tokens: 8192
+    # 16384 context - 2560 generation reserve = 13824 maximum input tokens.
+    hard_prompt_tokens: 13824
     max_tool_output_chars: 6000
     # DB retrieval bound; only the recent conversational surface below reaches the model.
     recent_messages: 100
-    recent_conversation_turns: 3
+    # Keep several natural-language turns for continuity; formatting/protocol is compacted.
+    recent_conversation_turns: 4
+    recent_conversation_user_chars: 1400
+    recent_conversation_assistant_chars: 900
     state_tape_entries: 6
     state_tape_unresolved_entries: 3
-    state_tape_entry_chars: 520
-    rolling_summary_chars: 3200
+    state_tape_entry_chars: 440
+    rolling_summary_chars: 2400
   warmup:
     enabled: true
     # Prime the exact initial tool-schema/system prefix used by real turns.
@@ -151,7 +160,7 @@ self_optimization:
   require_test_sandbox: true
   test_memory_limit_mb: 1536
   model_options:
-    num_ctx: 32768
+    num_ctx: 16384
     temperature: 0.6
     top_p: 0.95
     top_k: 20

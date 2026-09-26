@@ -231,6 +231,22 @@ def get_user_identity() -> dict[str, Any]:
 
 
 
+def get_user_profile() -> str:
+    """Read the configured local user profile and preferences as bounded JSON."""
+    identity = get_user_identity()
+    preferences = get_user_preferences()
+    location = get_user_location()
+    profile_image = get_profile_image_path(migrate_legacy=True)
+    payload = {
+        "configured": bool(identity or preferences or location or profile_image),
+        "identity": identity,
+        "location": location,
+        "preferences": preferences,
+        "profile_image_present": bool(profile_image),
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
 def get_user_location() -> str:
     """Return the explicitly configured durable user location, if any."""
     init_user_profile_db()

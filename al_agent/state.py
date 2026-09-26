@@ -41,11 +41,21 @@ RESERVE_TOKENS = max(
     int(CONTEXT_CFG.get("reserve_tokens", 2560)),
 )
 RECENT_MESSAGES = int(CONTEXT_CFG.get("recent_messages", 100))
-RECENT_CONVERSATION_TURNS = max(1, int(CONTEXT_CFG.get("recent_conversation_turns", 3)))
+RECENT_CONVERSATION_TURNS = max(1, int(CONTEXT_CFG.get("recent_conversation_turns", 4)))
+RECENT_CONVERSATION_USER_CHARS = max(400, int(CONTEXT_CFG.get("recent_conversation_user_chars", 1400)))
+RECENT_CONVERSATION_ASSISTANT_CHARS = max(400, int(CONTEXT_CFG.get("recent_conversation_assistant_chars", 900)))
 STATE_TAPE_RECENT_ENTRIES = max(1, int(CONTEXT_CFG.get("state_tape_entries", 6)))
 STATE_TAPE_UNRESOLVED_ENTRIES = max(1, int(CONTEXT_CFG.get("state_tape_unresolved_entries", 3)))
-STATE_TAPE_ENTRY_CHARS = max(180, int(CONTEXT_CFG.get("state_tape_entry_chars", 520)))
-STATE_TAPE_ROLLING_SUMMARY_CHARS = max(800, int(CONTEXT_CFG.get("rolling_summary_chars", 3200)))
+STATE_TAPE_ENTRY_CHARS = max(180, int(CONTEXT_CFG.get("state_tape_entry_chars", 440)))
+STATE_TAPE_ROLLING_SUMMARY_CHARS = max(800, int(CONTEXT_CFG.get("rolling_summary_chars", 2400)))
+HARD_PROMPT_TOKENS = min(
+    max(128, int(CONTEXT_CFG.get("hard_prompt_tokens", MAX_CTX - RESERVE_TOKENS))),
+    max(128, MAX_CTX - RESERVE_TOKENS),
+)
+SOFT_PROMPT_TOKENS = min(
+    max(128, int(CONTEXT_CFG.get("soft_prompt_tokens", 8192))),
+    HARD_PROMPT_TOKENS,
+)
 MAX_TOOL_OUTPUT = int(CONTEXT_CFG.get("max_tool_output_chars", 6000))
 MAX_MODEL_CALLS_PER_TURN = int(AGENT_CFG.get("max_model_calls_per_turn", 24))
 MAX_TOOL_CALLS_PER_ITERATION = int(AGENT_CFG.get("max_tool_calls_per_iteration", 6))

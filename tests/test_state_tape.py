@@ -201,3 +201,76 @@ def test_unverified_assistant_claim_is_labeled_non_evidence_in_tape(monkeypatch,
     context = tape.render_prompt_context()
     assert "No Gmail account is configured" in context
     assert "Unverified conversational record (not tool evidence)" in context
+
+
+def test_recent_conversation_keeps_four_turns_and_removes_formatting_bloat():
+    from tools.state_tape import compact_recent_conversation
+
+    history = []
+    for i in range(1, 6):
+        history.extend([
+            {"role": "user", "content": f"Question {i}?"},
+            {
+                "role": "assistant",
+                "content": (
+                    f"## Answer {i}\n\n"
+                    "| Step | Tool | Result | Status |\n"
+                    "|---|---|---|---|\n"
+                    f"| {i} | `demo_tool` | **value {i}** | ✅ Success |\n"
+                    "```text\nformatted payload\n```"
+                ),
+            },
+        ])
+    compact = compact_recent_conversation(
+        history, max_turns=4, max_user_chars=500, max_assistant_chars=500
+    )
+    users = [row["content"] for row in compact if row["role"] == "user"]
+    assistants = [row["content"] for row in compact if row["role"] == "assistant"]
+    assert users == ["Question 2?", "Question 3?", "Question 4?", "Question 5?"]
+    assert len(assistants) == 4
+    rendered = "\n".join(assistants)
+    assert "##" not in rendered
+    assert "```" not in rendered
+    assert "|---|" not in rendered
+    assert "demo_tool" in rendered
+    assert all(len(row) <= 500 for row in assistants)
+
+
+def test_state_tape_can_skip_turns_already_kept_as_conversation(monkeypatch, tmp_path):
+    memory = _temp_db(monkeypatch, tmp_path)
+    from tools.state_tape import StateTapeStore
+
+    cid = "dedupe-" + uuid.uuid4().hex
+    memory.ensure_conversation(cid)
+    tape = StateTapeStore(cid, recent_entries=6, rolling_summary_chars=2400)
+    for index in range(6):
+        user_id = memory._save_message_to_db(
+            {"role": "user", "content": f"question {index}"}, cid
+        )
+        final_id = memory._save_message_to_db(
+            {"role": "assistant", "content": f"answer {index}"}, cid
+        )
+        tape.commit_turn(
+            turn_id=user_id, source_message_id=final_id, objective=f"question {index}",
+            assistant_text=f"answer {index}", outcomes=[], status="complete",
+        )
+
+    recent = tape.recent()
+    overlap = {entry.source_message_id for entry in recent[-4:]}
+    rendered = tape.render_prompt_context(exclude_source_message_ids=overlap)
+    # Four newest turns live in natural conversation and are not replayed again.
+    assert "question 5" not in rendered
+    assert "question 4" not in rendered
+    assert "question 3" not in rendered
+    assert "question 2" not in rendered
+    assert "question 0" in rendered or "question 1" in rendered
+
+
+def test_default_context_config_targets_16k_with_prefill_soft_budget():
+    from tools.config import normalize_config
+
+    cfg = normalize_config({"agent": {"model": "agent-main:4b"}})["agent"]
+    assert cfg["main_options"]["num_ctx"] == 16384
+    assert cfg["context"]["soft_prompt_tokens"] == 8192
+    assert cfg["context"]["hard_prompt_tokens"] == 13824
+    assert cfg["context"]["recent_conversation_turns"] == 4

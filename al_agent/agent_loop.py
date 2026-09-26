@@ -44,6 +44,8 @@ class LoopConfig:
     timeout_seconds: float = 600
     max_output_chars: int = 6000
     reserve_tokens: int = 2048
+    soft_prompt_tokens: int = 8192
+    hard_prompt_tokens: int = 0
     first_byte_timeout_seconds: float = 120
     stream_idle_timeout_seconds: float = 60
 
@@ -205,7 +207,12 @@ def fit_context(
     """Drop complete older turns only; never cut the current request or a call/result pair."""
     raw = copy.deepcopy(messages)
     wire = ollama_wire_messages(raw)
-    budget = int(config.options.get("num_ctx", 32768)) - config.reserve_tokens
+    physical_budget = int(config.options.get("num_ctx", 16384)) - config.reserve_tokens
+    hard_budget = min(
+        physical_budget,
+        int(config.hard_prompt_tokens) if int(config.hard_prompt_tokens) > 0 else physical_budget,
+    )
+    soft_budget = min(max(128, int(config.soft_prompt_tokens)), hard_budget)
 
     # Conservative estimate, including wire JSON and tool definitions. Ollama's
     # tokenizer is model-specific; this margin avoids relying on silent truncation.
@@ -215,18 +222,32 @@ def fit_context(
             + 128
         )
 
-    while size() > budget:
+    def drop_oldest_complete_turn() -> bool:
+        nonlocal wire
         users = [
             i
             for i, m in enumerate(raw)
             if m.get("role") == "user" and not m.get("_runtime")
         ]
         if len(users) < 2:
-            raise LoopStopped(
-                "The current task exceeds the context budget. Split the request or increase num_ctx."
-            )
+            return False
         del raw[users[0] : users[1]]
         wire = ollama_wire_messages(raw)
+        return True
+
+    # Prefill-oriented soft target: evict only *completed historical turns*.
+    # Never shrink the current turn merely to hit this optimization target.
+    while size() > soft_budget and drop_oldest_complete_turn():
+        pass
+
+    # The hard ceiling is the actual safety limit. A large current request or
+    # active tool transaction may exceed the soft target, but never this bound.
+    while size() > hard_budget:
+        if not drop_oldest_complete_turn():
+            raise LoopStopped(
+                "The current task exceeds the context budget after compaction. "
+                "Split the request or use chunked retrieval."
+            )
     return wire
 
 
@@ -337,12 +358,24 @@ def run_loop(
                 "Only use the following loaded schemas. Do not put actions inside answer text.\n"
                 + json.dumps(schemas, ensure_ascii=False, separators=(",", ":"))
             )
-        wire = fit_context(
-            current, schemas if config.protocol in {"native", "qwen_xml"} else [], config
-        )
-        telemetry = _prompt_telemetry(
-            wire, schemas if config.protocol in {"native", "qwen_xml"} else []
-        )
+        active_schemas = schemas if config.protocol in {"native", "qwen_xml"} else []
+        before_telemetry = _prompt_telemetry(current, active_schemas)
+        wire = fit_context(current, active_schemas, config)
+        telemetry = _prompt_telemetry(wire, active_schemas)
+        telemetry.update({
+            "soft_prompt_tokens": int(config.soft_prompt_tokens),
+            "hard_prompt_tokens": (
+                int(config.hard_prompt_tokens)
+                if int(config.hard_prompt_tokens) > 0
+                else int(config.options.get("num_ctx", 16384)) - int(config.reserve_tokens)
+            ),
+            "prefill_compaction_removed_messages": max(
+                0, before_telemetry["message_count"] - telemetry["message_count"]
+            ),
+            "prefill_compaction_removed_estimated_tokens": max(
+                0, before_telemetry["estimated_input_tokens"] - telemetry["estimated_input_tokens"]
+            ),
+        })
         request = {
             "model": config.model,
             "messages": wire,

@@ -67,7 +67,7 @@ class StateTapeStore:
         *,
         recent_entries: int = 6,
         unresolved_entries: int = 3,
-        rolling_summary_chars: int = 3200,
+        rolling_summary_chars: int = 2400,
         entry_chars: int = 520,
     ) -> None:
         self.conversation_id = ensure_conversation(conversation_id)
@@ -265,6 +265,25 @@ class StateTapeStore:
                 artifact = str(payload.get("path") or payload.get("file") or payload.get("image_path") or "")
             suffix = f"; artifact={artifact}" if artifact else ""
             return CompactToolOutcome(name, ok, cls._clip(f"Web screenshot {state} for {target}{suffix}.", 300), observation_id)
+
+        if name == "get_user_profile" and isinstance(payload, dict):
+            identity = payload.get("identity") if isinstance(payload.get("identity"), dict) else {}
+            details: list[str] = []
+            for key in ("name", "role", "timezone", "email"):
+                value = identity.get(key)
+                if value not in (None, "", []):
+                    details.append(f"{key}={value}")
+            location = payload.get("location")
+            if location:
+                details.append(f"location={location}")
+            interests = identity.get("interests") if isinstance(identity, dict) else None
+            if interests:
+                details.append("interests=" + ", ".join(map(str, interests[:6] if isinstance(interests, list) else [interests])))
+            if not details:
+                details.append("no configured identity fields")
+            return CompactToolOutcome(
+                name, ok, cls._clip(f"User profile lookup {state}: {'; '.join(details)}.", 360), observation_id
+            )
 
         if name == "remember":
             fact = args.get("fact") or (payload.get("fact") if isinstance(payload, dict) else "")
@@ -466,16 +485,28 @@ class StateTapeStore:
                 [self.conversation_id, *ids],
             )
 
-    def render_prompt_context(self) -> str:
-        """Return compact prompt state with no historical schemas or tool protocol."""
+    def render_prompt_context(
+        self, *, exclude_source_message_ids: Iterable[int] | None = None
+    ) -> str:
+        """Return compact durable state without duplicating recent conversation.
+
+        ``exclude_source_message_ids`` identifies completed tape entries whose
+        final assistant messages are already present in the bounded conversational
+        surface. This avoids paying prefill twice for the same turn without hiding
+        older state that has already been compacted out of raw conversation.
+        Unresolved work is never excluded.
+        """
 
         sections: list[str] = []
         rolling = self._single_line(get_conversation_summary(self.conversation_id))
         if rolling:
             sections.append("Rolling summary:\n" + self._clip(rolling, self.rolling_summary_chars))
         recent = self.recent(self.recent_entries, resolved_only=True)
+        excluded = {int(value) for value in (exclude_source_message_ids or ()) if int(value) > 0}
+        if excluded:
+            recent = [entry for entry in recent if int(entry.source_message_id) not in excluded]
         if recent:
-            sections.append("Recent state tape:\n" + "\n".join(entry.render() for entry in recent))
+            sections.append("Older recent state tape:\n" + "\n".join(entry.render() for entry in recent))
         unresolved = self.unresolved(self.unresolved_entries)
         if unresolved:
             sections.append(
@@ -485,14 +516,85 @@ class StateTapeStore:
         return "\n\n".join(sections)
 
 
-def compact_recent_conversation(
-    history: Iterable[dict[str, Any]], *, max_turns: int = 3
-) -> list[dict[str, Any]]:
-    """Keep only recent user/final-assistant surface text, never tool protocol.
+def _compact_surface_text(text: str, *, role: str, max_chars: int) -> str:
+    """Normalize historical conversation while preserving semantic continuity.
 
-    Raw tool calls, tool results, images, runtime feedback, system messages, and
-    empty assistant action rows are intentionally excluded.  This is the Tier-2
-    conversational surface used alongside the State Tape.
+    Tool protocol is removed elsewhere. This helper removes presentation-only
+    Markdown that is expensive to replay (table separators, heading markers,
+    fences, emphasis) and applies a hard per-message bound. Current-turn content
+    is never passed through this helper.
+    """
+
+    value = str(text or "").strip()
+    if not value:
+        return ""
+
+    # Remove fence markers but retain the code/text inside for conversational
+    # continuity. A prior answer's formatting is not needed for future routing.
+    value = re.sub(r"(?m)^\s*```[^\n]*\s*$", "", value)
+    value = re.sub(r"(?m)^\s{0,3}#{1,6}\s+", "", value)
+    value = re.sub(r"(?m)^\s*[-*_]{3,}\s*$", "", value)
+    value = re.sub(r"\*\*([^*]+)\*\*", r"\1", value)
+    value = re.sub(r"__([^_]+)__", r"\1", value)
+    value = re.sub(r"`([^`\n]+)`", r"\1", value)
+
+    lines = value.splitlines()
+    compact_lines: list[str] = []
+    table_rows: list[str] = []
+
+    def flush_table() -> None:
+        nonlocal table_rows
+        if not table_rows:
+            return
+        rows: list[list[str]] = []
+        for line in table_rows:
+            stripped = line.strip().strip("|")
+            cells = [re.sub(r"\s+", " ", cell.strip()) for cell in stripped.split("|")]
+            # Drop Markdown alignment/separator rows.
+            if cells and all(re.fullmatch(r":?-{2,}:?", cell or "-") for cell in cells):
+                continue
+            if any(cells):
+                rows.append(cells)
+        if rows:
+            header = rows[0]
+            compact_lines.append("Table: " + ", ".join(header))
+            for row in rows[1:7]:
+                compact_lines.append("; ".join(row))
+            if len(rows) > 7:
+                compact_lines.append(f"[{len(rows) - 7} additional table rows omitted]")
+        table_rows = []
+
+    for line in lines:
+        stripped = line.strip()
+        if "|" in stripped and stripped.count("|") >= 2:
+            table_rows.append(stripped)
+            continue
+        flush_table()
+        stripped = re.sub(r"^\s*(?:[-+*]|\d+[.)])\s+", "", stripped)
+        if stripped:
+            compact_lines.append(stripped)
+    flush_table()
+
+    value = " ".join(compact_lines)
+    value = re.sub(r"\s+", " ", value).strip()
+    limit = max(160, int(max_chars))
+    if len(value) > limit:
+        value = value[: limit - 1].rstrip() + "…"
+    return value
+
+
+def compact_recent_conversation(
+    history: Iterable[dict[str, Any]], *, max_turns: int = 4,
+    max_user_chars: int = 1400, max_assistant_chars: int = 900,
+    include_source_ids: bool = False,
+) -> list[dict[str, Any]]:
+    """Keep several recent conversational turns without historical protocol bloat.
+
+    Historical tool schemas are never stored in chat messages and raw tool calls,
+    tool results, images, runtime feedback, system messages, and action-only
+    assistant rows are excluded. User wording is retained with a generous bound;
+    assistant formatting is normalized so large tables/fences do not dominate the
+    next prompt. The current turn is assembled separately and remains untouched.
     """
 
     turns: list[list[dict[str, Any]]] = []
@@ -506,7 +608,16 @@ def compact_recent_conversation(
         if role == "user":
             if current:
                 turns.append(current)
-            current = [{"role": "user", "content": str(raw.get("content") or "")}]
+            content = _compact_surface_text(
+                str(raw.get("content") or ""), role="user", max_chars=max_user_chars
+            )
+            if content:
+                item = {"role": "user", "content": content}
+                if include_source_ids and int(raw.get("_db_id") or 0) > 0:
+                    item["_source_message_id"] = int(raw.get("_db_id") or 0)
+                current = [item]
+            else:
+                current = []
             continue
         if role != "assistant" or not current:
             continue
@@ -520,7 +631,14 @@ def compact_recent_conversation(
             lower.startswith("turn failed:") and "timed out" in lower
         ):
             continue
-        current.append({"role": "assistant", "content": content})
+        content = _compact_surface_text(
+            content, role="assistant", max_chars=max_assistant_chars
+        )
+        if content:
+            item = {"role": "assistant", "content": content}
+            if include_source_ids and int(raw.get("_db_id") or 0) > 0:
+                item["_source_message_id"] = int(raw.get("_db_id") or 0)
+            current.append(item)
     if current:
         turns.append(current)
 
@@ -536,3 +654,4 @@ def compact_recent_conversation(
         if assistant is not None:
             result.append(assistant)
     return result
+

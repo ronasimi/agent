@@ -51,9 +51,9 @@ def normalize_config(raw: dict) -> dict:
         raise ValueError("agent.model must be nonempty")
     options = dict(
         agent.get("main_options")
-        or {"num_ctx": 32768, "temperature": 0.2, "num_predict": 2048}
+        or {"num_ctx": 16384, "temperature": 0.2, "num_predict": 2048}
     )
-    options.setdefault("num_ctx", 32768)
+    options.setdefault("num_ctx", 16384)
     if int(options["num_ctx"]) < 2048:
         raise ValueError("agent.main_options.num_ctx must be at least 2048")
     agent.update(model=model, main_options=options)
@@ -120,11 +120,15 @@ def normalize_config(raw: dict) -> dict:
         "num_ctx": options["num_ctx"],
     }
     context.setdefault("recent_messages", 100)
-    context.setdefault("recent_conversation_turns", 3)
+    context.setdefault("recent_conversation_turns", 4)
+    context.setdefault("recent_conversation_user_chars", 1400)
+    context.setdefault("recent_conversation_assistant_chars", 900)
+    context.setdefault("soft_prompt_tokens", 8192)
+    context.setdefault("hard_prompt_tokens", max(128, int(options["num_ctx"]) - int(context.get("reserve_tokens", 2560))))
     context.setdefault("state_tape_entries", 6)
     context.setdefault("state_tape_unresolved_entries", 3)
-    context.setdefault("state_tape_entry_chars", 520)
-    context.setdefault("rolling_summary_chars", 3200)
+    context.setdefault("state_tape_entry_chars", 440)
+    context.setdefault("rolling_summary_chars", 2400)
     agent["context"] = context
 
     transport = dict(agent.get("model_transport") or {})

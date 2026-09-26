@@ -70,7 +70,7 @@ Edit config/config.yaml. The primary settings are:
 | agent.tool_routing.auto_activate_margin | 0.20 | Required separation from the runner-up for direct activation |
 | agent.tool_routing.min_candidate_score | 0.18 | Minimum relevance for ambiguous candidate-set activation |
 | agent.tool_protocol | qwen_xml | Use the supplied Qwen3.8 XML tool-call template |
-| agent.main_options.num_ctx | 32768 | Shared context size |
+| agent.main_options.num_ctx | 16384 | Shared context size |
 | agent.main_options.num_predict | 2048 | Per-response output limit |
 | agent.max_model_calls_per_turn | 24 | Model-call budget |
 | agent.max_tool_calls_per_turn | 48 | Tool-call budget, including discovery |
@@ -79,9 +79,11 @@ Edit config/config.yaml. The primary settings are:
 | agent.turn_hard_timeout_seconds | 600 | Cooperative turn deadline |
 | agent.model_transport.first_byte_timeout_seconds | 120 | Prefill/first stream-chunk deadline |
 | agent.model_transport.stream_idle_timeout_seconds | 60 | Maximum idle time after streaming begins |
-| agent.context.recent_conversation_turns | 3 | Raw conversational surface retained in prompts |
+| agent.context.recent_conversation_turns | 4 | Compact natural-language conversational turns retained in prompts |
+| agent.context.soft_prompt_tokens | 8192 | Prefill-oriented target; old completed turns are evicted above this size |
+| agent.context.hard_prompt_tokens | 13824 | Maximum input budget before the 2560-token generation reserve |
 | agent.context.state_tape_entries | 6 | Recent compact completed-turn entries |
-| agent.context.rolling_summary_chars | 3200 | Tier-3 deep-history summary bound |
+| agent.context.rolling_summary_chars | 2400 | Tier-3 deep-history summary bound |
 
 AGENT_MODEL and OLLAMA_HOST override the corresponding configuration values. Legacy role settings are normalized to the main model and options; legacy router settings are ignored with a warning.
 
