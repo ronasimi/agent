@@ -548,3 +548,66 @@ def test_context_allows_large_current_turn_above_soft_target_below_hard_ceiling(
     ]
     fitted = fit_context(data, [], config)
     assert fitted[-1]["content"].startswith("current ")
+
+
+def test_qwen_step_narration_is_activity_not_assistant_answer_stream():
+    config = replace(CFG, protocol="qwen_xml")
+    narrated = [{
+        "message": {
+            "content": "## Step 1: Load lookup tool\n\n",
+            "tool_calls": [{
+                "function": {
+                    "name": "load_tools",
+                    "arguments": {"names": ["lookup"]},
+                }
+            }],
+        },
+        "done": True,
+        "done_reason": "stop",
+    }]
+    result, _calls, _saved, events, _client, _session = run(
+        [narrated, "Done"], config=config
+    )
+    assert result == "Done"
+    progress = [data["content"] for kind, data in events if kind == "activity_progress"]
+    assert progress == ["Step 1: Load lookup tool"]
+    deltas = [data["content"] for kind, data in events if kind == "assistant_delta"]
+    assert all("Step 1" not in value for value in deltas)
+    assert "Done" in "".join(deltas)
+    assert not any(kind == "assistant_reset" for kind, _data in events)
+
+
+def test_qwen_step_heading_without_tool_call_remains_normal_answer_content():
+    config = replace(CFG, protocol="qwen_xml")
+    result, _calls, _saved, events, _client, _session = run(
+        ["## Step 2: Final result"], config=config
+    )
+    assert result == "## Step 2: Final result"
+    assert not any(kind == "activity_progress" for kind, _data in events)
+    assert "## Step 2: Final result" in "".join(
+        data["content"] for kind, data in events if kind == "assistant_delta"
+    )
+
+
+def test_unclassified_prose_before_qwen_tool_call_is_still_retracted():
+    config = replace(CFG, protocol="qwen_xml")
+    narrated = [{
+        "message": {
+            "content": "I will now use the requested capability.\n\n",
+            "tool_calls": [{
+                "function": {
+                    "name": "load_tools",
+                    "arguments": {"names": ["lookup"]},
+                }
+            }],
+        },
+        "done": True,
+        "done_reason": "stop",
+    }]
+    _result, _calls, _saved, events, _client, _session = run(
+        [narrated, "Done"], config=config
+    )
+    assert any(kind == "assistant_delta" for kind, _data in events)
+    assert any(kind == "assistant_reset" for kind, _data in events)
+    assert not any(kind == "activity_progress" for kind, _data in events)
+

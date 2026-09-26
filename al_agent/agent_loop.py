@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import time
 import uuid
 from collections.abc import Callable
@@ -29,6 +30,115 @@ from .tool_session import ToolSession
 
 class LoopStopped(RuntimeError):
     pass
+
+
+_PROGRESS_STEP_RE = re.compile(
+    r"^step\s+\d+\s*(?::|[.)]|[-–—])\s*.+$", re.IGNORECASE
+)
+_PROGRESS_VERB_RE = re.compile(
+    r"^(?:checking|retrieving|reading|calculating|getting|fetching|looking\s+up|searching|running)\b.+$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_progress_narration(text: str) -> str:
+    """Return a compact activity label for short tool-loop narration.
+
+    Models sometimes emit a Markdown heading such as ``## Step 2: Calculate``
+    immediately before a tool call.  That text is orchestration, not assistant
+    answer content, and should live in the activity stream rather than the
+    transcript renderer.  Keep this intentionally conservative: only one short
+    logical line is eligible.
+    """
+
+    raw = str(text or "").strip()
+    if not raw or len(raw) > 320:
+        return ""
+    nonempty = [line.strip() for line in raw.splitlines() if line.strip()]
+    if len(nonempty) != 1:
+        return ""
+    line = nonempty[0]
+    line = re.sub(r"^#{1,6}\s*", "", line)
+    line = re.sub(r"^(?:\*\*|__)", "", line)
+    line = re.sub(r"(?:\*\*|__)$", "", line)
+    line = line.strip()
+    if not line or len(line) > 280:
+        return ""
+    if _PROGRESS_STEP_RE.match(line) or _PROGRESS_VERB_RE.match(line):
+        return line
+    return ""
+
+
+class _VisibleContentRouter:
+    """Delay only likely orchestration labels until tool intent is known.
+
+    Ordinary answer prose still streams immediately.  A short leading
+    ``Step N: ...``/``Checking ...`` label is held until the model response is
+    decoded.  If the response contains tool calls it becomes an activity event;
+    otherwise it is released as normal assistant text.
+    """
+
+    _PREFIXES = (
+        "step", "checking", "retrieving", "reading", "calculating", "getting",
+        "fetching", "looking up", "searching", "running",
+    )
+
+    def __init__(self, emit: Callable[..., None], *, max_hold_chars: int = 384):
+        self.emit = emit
+        self.max_hold_chars = max(64, int(max_hold_chars))
+        self.buffer = ""
+        self.streaming = False
+        self.emitted_visible = False
+
+    @staticmethod
+    def _prefix_probe(text: str) -> str:
+        probe = str(text or "").lstrip()
+        probe = re.sub(r"^#{1,6}\s*", "", probe)
+        probe = re.sub(r"^(?:\*\*|__)", "", probe)
+        return probe.lower()
+
+    def _could_be_progress(self) -> bool:
+        probe = self._prefix_probe(self.buffer)
+        if not probe:
+            return True
+        if len([line for line in self.buffer.splitlines() if line.strip()]) > 1:
+            return False
+        # Preserve streaming for normal prose as soon as the leading token can
+        # no longer become one of the known orchestration prefixes.
+        return any(prefix.startswith(probe) or probe.startswith(prefix) for prefix in self._PREFIXES)
+
+    def _flush(self) -> None:
+        if not self.buffer:
+            return
+        self.emit("assistant_delta", content=self.buffer)
+        self.emitted_visible = True
+        self.buffer = ""
+        self.streaming = True
+
+    def feed(self, text: str) -> None:
+        value = str(text or "")
+        if not value:
+            return
+        if self.streaming:
+            self.emit("assistant_delta", content=value)
+            self.emitted_visible = True
+            return
+        self.buffer += value
+        if len(self.buffer) > self.max_hold_chars or not self._could_be_progress():
+            self._flush()
+
+    def finish(self, *, has_tool_calls: bool) -> bool:
+        """Finalize pending content; return True when it became activity."""
+
+        if self.streaming:
+            return False
+        label = _normalize_progress_narration(self.buffer) if has_tool_calls else ""
+        if label:
+            self.emit("activity_progress", content=label)
+            self.buffer = ""
+            return True
+        self._flush()
+        return False
 
 
 @dataclass(frozen=True)
@@ -396,6 +506,7 @@ def run_loop(
         capture = None
         request_started_at = clock()
         trace_request = {**request, "prompt_telemetry": telemetry}
+        visible_router = _VisibleContentRouter(emit)
         try:
             with inference_slot():
                 check()
@@ -419,9 +530,7 @@ def run_loop(
                         on_thinking=(lambda text: emit("thinking_delta", content=text))
                         if thinking
                         else None,
-                        on_visible_content=lambda text: emit(
-                            "assistant_delta", content=text
-                        ),
+                        on_visible_content=visible_router.feed,
                         # Qwen's opening <tool_call> marker is only 11 chars.
                         # A 16-char guard prevents XML leakage while keeping the
                         # first visible prose latency close to native streaming.
@@ -462,6 +571,7 @@ def run_loop(
             answer, calls = decode_response(
                 capture.content, capture.tool_calls, config.protocol
             )
+            progress_reclassified = visible_router.finish(has_tool_calls=bool(calls))
         except LoopStopped:
             raise
         except (ValueError, TypeError) as exc:
@@ -483,11 +593,17 @@ def run_loop(
             )
             raise LoopStopped(f"Model request failed: {exc}") from exc
         trace(call_index=call_index, request=trace_request, capture=capture, error="")
-        if calls and capture is not None and capture.first_visible_at is not None:
-            # A strict Qwen tool turn should contain only XML tool-call blocks,
-            # so normally nothing was made visible.  If the model violated that
-            # rule and emitted prose before a tool call, retract the provisional
-            # stream before showing tool activity.
+        if (
+            calls
+            and capture is not None
+            and capture.first_visible_at is not None
+            and visible_router.emitted_visible
+            and not progress_reclassified
+        ):
+            # A strict Qwen tool turn should contain only XML tool-call blocks.
+            # Clearly orchestration-only labels were reclassified above into the
+            # activity stream.  Any other visible prose remains a protocol
+            # violation and is retracted before tool activity is shown.
             emit("assistant_reset")
         if not calls:
             blocker = tools.finalization_blocker()

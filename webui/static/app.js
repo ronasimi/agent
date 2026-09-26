@@ -238,6 +238,7 @@ function resetAssistantStream(){
   if(assistantNode)assistantNode.closest('.message')?.remove();
   assistantNode=null;assistantStreamBuffer='';
 }
+function addProgress(e){const group=ensureActivityGroup();const el=document.createElement('div');el.className='activity-progress';el.textContent=String(e?.content||'Working…');group.querySelector('.activity-body').appendChild(el);bumpActivity();scrollBottom();}
 function addTool(name,status,content){const group=ensureActivityGroup();const wrap=document.createElement('details');wrap.className='tool-card';const badgeClass=['ok','error','partial','history'].includes(status)?status:'history';wrap.innerHTML=`<summary><span class="tool-chevron">${mdiIcon('chevron-right','›')}</span><span>${esc(name)}</span><span class="badge ${badgeClass}">${esc(status)}</span></summary><pre></pre>`;wrap.querySelector('pre').textContent=content||'';group.querySelector('.activity-body').appendChild(wrap);bumpActivity();scrollBottom();}
 function addValidator(e){const group=ensureActivityGroup();const el=document.createElement('div');el.className='validator';const recipe=e.suggested_recipe?` · recipe: ${e.suggested_recipe}`:'';const label=e.validator==='grounding'?'Grounding validator':'Fast validator';const missing=Array.isArray(e.missing_fact_types)&&e.missing_fact_types.length?` · missing: ${e.missing_fact_types.join(', ')}`:'';el.textContent=`${label}: ${e.decision||'—'}${e.diagnosis?' · '+e.diagnosis:''}${missing}${e.suggested_tool?' · '+e.suggested_tool:''}${recipe}`;group.querySelector('.activity-body').appendChild(el);bumpActivity();scrollBottom();}
 function recipeSuggestionId(e){
@@ -536,6 +537,7 @@ function connect(){
     else if(e.type==='recipe_check')setStatus(e.best_match?`Recipe checked: ${e.best_match}`:'Recipes checked','busy');
     else if(e.type==='thinking_delta')appendThinking(e.content||'');
     else if(e.type==='assistant_delta')appendAssistant(e.content||'');
+    else if(e.type==='activity_progress'){addProgress(e);setStatus(e.content||'Working…','busy');}
     else if(e.type==='assistant_reset'){resetAssistantStream();}
     else if(e.type==='tool_start'){finalizeThinkingStream();finalizeAssistantStream();assistantNode=null;assistantStreamBuffer='';setStatus(`Running ${e.name}…`,'busy');}
     else if(e.type==='tool_result'){addTool(e.name,e.status,e.content);addMedia(e.media);if(e.name==='set_profile_image'&&e.status==='ok')refreshProfileImage();setStatus(activeThinkingEnabled?'Thinking…':'Generating…','busy');if(appShell.classList.contains('workspace-open'))loadWorkspace(workspacePath);}
